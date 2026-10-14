@@ -27,3 +27,4 @@ __pycache__/
 /.idea/
 /.claude/
 /bot/.claude/
+/bot/brain_state.lua
