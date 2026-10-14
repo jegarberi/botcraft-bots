@@ -1,0 +1,52 @@
+-- Offline check of the castle plugin: every stage of the full plan and of the miniature must build its list
+-- without error. lua5.4 test_castle.lua plugins/castle.lua
+local tool, tick, orders, handed = nil, nil, {}, {}
+bot = { call = function(name, a)
+    if name == "team" then handed[#handed + 1] = a return {} end
+    if name == "team_member" then orders[#orders + 1] = a return {} end
+    if name == "locate" then return { x = 40, z = 0 } end
+    -- A pit 3 deep at x 5..6, z 5: the floor over it must stand on dirt down to the stone
+    if name == "get_block" then return { block = (a.y < 70 and not (a.x >= 5 and a.x <= 6 and a.z == 5 and a.y >= 66)) and "minecraft:stone" or "minecraft:air" } end
+    if name == "status" then return { position = { x = 0, y = 70, z = 0 }, building = false, build_left = 0, build_idle = 0 } end
+    if name == "bots" then return { { name = "Bot1" } } end
+    if name == "mines" then return { { x = 120, y = 70, z = 90, resources = "iron_ore,coal_ore" } } end
+    if name == "vault" then return { chests = {}, full = false } end
+    if name == "inventory" then return {} end
+    return {}
+end, tool = function(t) tool = t end, every = function(_, f) local before = tick; tick = before and function() before(); f() end or f end, on_chat = function() end, log = print }
+load(io.open(arg[1]):read("a"), "castle")()
+local plan = tool.run({ action = "plan", x = 0, y = 70, z = 0 })
+assert(#plan.stages >= 10, "the full plan has all its stages")
+for _, s in ipairs(plan.stages) do assert(s.blocks > 0, s.stage .. " is empty") end
+local started = tool.run({ action = "start", x = 0, y = 70, z = 0 })
+assert(started.started)
+-- The first stage handed over is the levelling: the pit is filled, cobblestone on top, dirt under it to the stone
+local filled = {}
+for _, b in ipairs(handed[1].blocks) do if b[1] == 5 and b[3] == 5 then filled[b[2]] = b[4] end end
+assert(filled[69] == "cobblestone" and filled[68] == "dirt" and filled[66] == "dirt" and filled[65] == nil, "the pit under the floor is filled")
+tool.run({ action = "stop" })
+assert(tool.run({ action = "test", x = 0, y = 70, z = 0 }).started)
+tool.run({ action = "stop" })
+local roads = tool.run({ action = "roads" })
+assert(roads.started, "a road to the test mine is planned")
+tool.run({ action = "stop" })
+-- The road builder: one bot, 32 blocks at a time, signs at both ends, to the located village and to the mine
+local man = tool.run({ action = "roadbot", structures = "village_plains", x = 0, y = 70, z = 0 })
+assert(man.bot == "Bot1" and #man.places == 1 and #man.not_found == 0)
+local signs = 0
+for _ = 1, 12 do tick() end
+for _, o in ipairs(orders) do
+    assert(o.solo and o.bot == "Bot1" and #o.blocks > 0, "each order lays a piece")
+    for _, b in ipairs(o.blocks) do if b[4]:match("^spruce_sign|") then signs = signs + 1 end end
+end
+assert(#orders == 7, "2 pieces to the village 40 blocks away, 5 to the mine 150 away, got " .. #orders)
+assert(signs == 4, "a sign at each end of both roads, got " .. signs)
+assert(tool.run({ action = "roadbot" }).roads_laid == 2)
+-- The road builder and the castle job are kept in files next to the plugin's working directory
+local saved = io.open("../roadbot_job.lua")
+assert(saved, "the road builder is saved for a restart")
+saved:close()
+tool.run({ action = "stop" })
+os.remove("../roadbot_job.lua")
+os.remove("../castle_job.lua")
+print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")

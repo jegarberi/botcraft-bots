@@ -1,0 +1,29 @@
+# Botcraft itself: run.sh clones it at the pinned commit and applies patches/botcraft.diff
+/Botcraft/
+# Build output
+/bot/build/
+/bot/bin/
+# Game data extracted from Mojang's client jar by run.sh (not ours to publish)
+/bot/data/
+# What the bots remember and do: their memories, the shared database, saved jobs, runtime files
+/bot/memory/
+/bot/run/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*_job.lua
+/bot/castle_site.txt
+/castle_site.txt
+/bot/sites.txt
+/bot/chests.txt
+# Logs, views, caches
+*.log
+/bot/snapshot*.png
+__pycache__/
+/bot/luac.out
+# Schematics downloaded from createmod.com by the user (for players, not for redistribution)
+/bot/schematics/*.nbt
+# Editors and local tool settings
+/.idea/
+/.claude/
+/bot/.claude/

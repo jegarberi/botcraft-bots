@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Botcraft control</title>
+<style>
+  :root { color-scheme: light dark; --line: #8886; --on: #2e9e5b; --dim: #8889; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; max-width: 1100px; }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  h2 { font-size: 15px; margin: 0; }
+  .bot, .top { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .badge { border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; }
+  .badge.state { background: var(--on); color: #fff; border-color: var(--on); }
+  .cols { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .cols { grid-template-columns: 1fr; } }
+  table { border-collapse: collapse; width: 100%; }
+  td { border: 1px solid var(--line); padding: 4px 8px; }
+  td.arrow { border: 0; width: 1em; text-align: center; color: var(--dim); padding: 0; }
+  tr.active td:not(.arrow) { border-color: var(--on); background: #2e9e5b33; font-weight: 600; }
+  ol { margin: 4px 0; padding-left: 20px; color: var(--dim); max-height: 11em; overflow: auto; }
+  ol li:last-child { color: inherit; }
+  input[type=text], input[type=number] { width: 9em; padding: 3px 6px; }
+  input[type=number] { width: 4.5em; }
+  img { max-width: 100%; border-radius: 6px; display: block; }
+  #views { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  figure { margin: 0; } figcaption { color: var(--dim); }
+  #message { color: var(--dim); min-height: 1.4em; }
+  small { color: var(--dim); }
+</style>
+</head>
+<body>
+<h1>Botcraft control</h1>
+<div class="top">
+  <form class="row" id="connect">
+    <label for="name">Connect a bot</label>
+    <input type="text" id="name" placeholder="player name" required>
+    <button>Connect</button>
+    <span id="message" role="status"></span>
+  </form>
+  <form class="row" id="team">
+    <label for="objective">Team up all bots to</label>
+    <select id="objective">
+      <option value="gather">gather a block</option>
+      <option value="attack">attack mobs</option>
+      <option value="build">build a box</option>
+      <option value="follow">follow the leader</option>
+    </select>
+    <input type="text" id="what" placeholder="block(s) / mob / item" aria-label="Block ids (comma separated), mob type or block item" list="goals" style="width: 20em">
+    <datalist id="goals"><option value="iron_ore,gold_ore,diamond_ore,redstone_ore"><option value="iron_ore"><option value="coal_ore"><option value="spruce_log"><option value="stone"><option value="hostile"><option value="cow"></datalist>
+    <input type="number" id="howmany" min="1" value="16" aria-label="Total count">
+    <input type="text" id="box" placeholder="x1 y1 z1 x2 y2 z2" aria-label="Box corners for build" style="width: 14em">
+    <button>Team up</button>
+    <button type="button" id="disband">Disband</button>
+  </form>
+  <form class="row" id="schematic">
+    <label for="schematic-source">Structure from createmod.com</label>
+    <input type="text" id="schematic-source" placeholder="https://createmod.com/schematics/… or downloaded file.nbt" style="width: 26em">
+    <input type="text" id="schematic-at" placeholder="x y z (file only: build there)" aria-label="Corner to build at" style="width: 14em">
+    <button>Materials / build</button>
+  </form>
+</div>
+<div id="views"></div>
+<div id="bots"></div>
+<datalist id="places">
+  <option value="village_plains"><option value="village_taiga"><option value="village_snowy"><option value="village_desert"><option value="village_savanna">
+  <option value="mineshaft"><option value="ruined_portal"><option value="shipwreck"><option value="pillager_outpost"><option value="desert_pyramid">
+  <option value="igloo"><option value="stronghold"><option value="trial_chambers"><option value="ancient_city">
+  <option value="forest"><option value="plains"><option value="taiga"><option value="desert"><option value="dark_forest"><option value="jungle">
+</datalist>
+<script>
+const $ = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+const message = document.getElementById("message");
+async function call(name, args = {}) {
+  message.textContent = name + "…";
+  const r = await (await fetch("/call", { method: "POST", headers: { "X-Bot": "1" }, body: JSON.stringify({ name, arguments: args }) })).json();
+  message.textContent = name + (r.ok ? ": " : " failed: ") + (typeof r.result === "string" ? r.result : JSON.stringify(r.result));
+  refresh();
+}
+document.getElementById("team").onsubmit = e => {
+  e.preventDefault();
+  const objective = document.getElementById("objective").value, what = document.getElementById("what").value;
+  const [x1, y1, z1, x2, y2, z2] = document.getElementById("box").value.trim().split(/[\s,]+/).map(Number);
+  call("team", { objective, block: what, type: what, item: what, count: +document.getElementById("howmany").value, x1, y1, z1, x2, y2, z2 });
+};
+document.getElementById("schematic").onsubmit = e => {
+  e.preventDefault();
+  const source = document.getElementById("schematic-source").value.trim(), at = document.getElementById("schematic-at").value.trim();
+  const [x, y, z] = at ? at.split(/[\s,]+/).map(Number) : [];
+  call("schematic", source.startsWith("http") ? { url: source } : at ? { file: source, x, y, z } : { file: source });
+};
+document.getElementById("disband").onclick = () => call("team", { objective: "disband" });
+document.getElementById("connect").onsubmit = e => { e.preventDefault(); call("connect", { name: document.getElementById("name").value }); };
+
+function card(bot, tree) {
+  const live = bot.position !== undefined;
+  const rows = tree.map(b => $("tr", { className: b.state === bot.state ? "active" : "" },
+    $("td", {}, b.condition), $("td", { className: "arrow" }, "→"), $("td", {}, b.action), $("td", { className: "arrow" }, "→"), $("td", {}, b.state)));
+  const gather = $("input", { type: "text", placeholder: "block to gather or item to make", value: bot.gather || "" });
+  const count = $("input", { type: "number", min: 1, max: 64, value: bot.gather_left || 16 });
+  gather.setAttribute("aria-label", "Resource to gather"); count.setAttribute("aria-label", "How many");
+  const auto = $("input", { type: "checkbox", checked: !!bot.autopilot, onchange: () => call("autopilot", { bot: bot.name, enabled: auto.checked }) });
+  const gear = $("input", { type: "checkbox", checked: !!bot.gear, onchange: () => call("autopilot", { bot: bot.name, enabled: auto.checked, gear: gear.checked }) });
+  const placeKind = $("select", {}, $("option", { value: "structure" }, "structure"), $("option", { value: "biome" }, "biome"));
+  const place = $("input", { type: "text", placeholder: "e.g. village_plains" });
+  place.setAttribute("list", "places"); place.setAttribute("aria-label", "Structure or biome id"); placeKind.setAttribute("aria-label", "Kind of place");
+  return $("section", { className: "bot" },
+    $("div", { className: "row" }, $("h2", {}, bot.name), $("span", { className: "badge state" }, bot.state),
+      bot.times_stuck ? $("span", { className: "badge" }, "stuck ×" + bot.times_stuck) : "",
+      bot.deaths ? $("span", { className: "badge" }, "died ×" + bot.deaths + " (last at " + bot.died_at.x + " " + bot.died_at.y + " " + bot.died_at.z + ")") : "",
+      bot.team_leader ? $("span", { className: "badge" }, bot.team_leader === bot.name ? "team leader" : "follows " + bot.team_leader) : "",
+      live ? $("small", {}, `❤ ${bot.health}  🍖 ${bot.food}  at ${bot.position.x}, ${bot.position.y}, ${bot.position.z}  holding ${bot.held_item || "nothing"}`) : ""),
+    $("div", { className: "row" },
+      $("label", {}, auto, " Autopilot (decision tree)"),
+      $("label", {}, gear, " Gear up first"),
+      gather, count,
+      $("button", { onclick: () => call("autopilot", { bot: bot.name, enabled: true, gather: gather.value, count: +count.value }) }, "Gather"),
+      $("button", { onclick: () => gather.value && call("make", { bot: bot.name, item: gather.value, count: +count.value }) }, "Make"),
+      $("button", { onclick: () => call("store", { bot: bot.name }) }, "Store in chests"),
+      $("button", { onclick: () => call("farm", { bot: bot.name }) }, "Farm"),
+      $("button", { onclick: () => call("disconnect", { bot: bot.name }) }, "Store all & disconnect")),
+    $("div", { className: "row" }, $("b", {}, "Find and go to the nearest"), placeKind, place,
+      $("button", { onclick: () => place.value && call("locate", { bot: bot.name, kind: placeKind.value, name: place.value, go: true }) }, "Find & go"),
+      $("small", {}, "needs the bot to be op; the walk can take minutes")),
+    bot.last_note ? $("div", { className: "row" }, $("small", {}, "Note: " + bot.last_note)) : "",
+    bot.team_order ? $("div", { className: "row" }, $("b", {}, "Leader's order"), $("span", { className: "badge" }, bot.team_order)) : "",
+    Object.keys(bot.team_reports || {}).length ? $("div", { className: "row" }, $("b", {}, "Team reports"),
+      ...Object.entries(bot.team_reports).map(([who, what]) => $("span", { className: "badge" }, who + ": " + what))) : "",
+    Object.keys(bot.gear_skipped || {}).length ? $("div", { className: "row" }, $("b", {}, "Gave up on"),
+      ...Object.entries(bot.gear_skipped).map(([stage, why]) => $("span", { className: "badge" }, stage + ": " + why))) : "",
+    live ? $("div", { className: "row" }, $("b", {}, "Equipment"),
+      ...Object.entries(bot.equipment).map(([slot, item]) => $("span", { className: "badge" }, slot.replace("_", " ") + ": " + (item || "–")))) : "",
+    live ? $("div", { className: "row" }, $("b", {}, "Inventory"),
+      ...(Object.keys(bot.inventory).length ? Object.entries(bot.inventory).map(([item, n]) => $("span", { className: "badge" }, item + " ×" + n)) : [$("small", {}, "empty")])) : "",
+    live ? $("div", { className: "row" }, $("b", {}, "Memory"),
+      ...(Object.keys(bot.memory || {}).length ? Object.entries(bot.memory).map(([kind, n]) => $("span", { className: "badge" }, kind + " ×" + n)) : [$("small", {}, "nothing remembered yet")])) : "",
+    $("div", { className: "cols" },
+      $("div", {}, $("small", {}, "Decision tree: first condition that holds picks the action, which sets the state" +
+        (tree.some(b => b.state === bot.state) ? "" : ` (currently overridden by "${bot.state}")`)), $("table", {}, ...rows)),
+      $("div", {}, $("small", {}, "State flow (latest last)"), $("ol", {}, ...(bot.flow || []).map(f => $("li", {}, f))))));
+}
+
+let editing = false;
+document.addEventListener("focusin", e => editing = e.target.matches("#bots input[type=text], #bots input[type=number], #bots select"));
+document.addEventListener("focusout", () => editing = false);
+async function refresh() {
+  if (editing) return;  // don't rebuild the cards under the user's cursor
+  try {
+    const state = await (await fetch("/state")).json();
+    views = state.snapshot ? state.bots.map(b => b.name) : [];
+    document.getElementById("bots").replaceChildren(...state.bots.map(b => card(b, state.tree)),
+      ...(state.bots.length ? [] : [$("p", {}, "No bot connected.")]));
+  } catch (e) { message.textContent = "server unreachable"; }
+}
+setInterval(refresh, 1000); refresh();
+// One view per bot, reloaded every 5 seconds (kept out of the cards, which are rebuilt every second)
+let views = [], shown = "";
+function refreshViews() {
+  const box = document.getElementById("views");
+  if (views.join() !== shown) {
+    shown = views.join();
+    box.replaceChildren(...views.map(name => $("figure", {}, $("img", { alt: name + "'s view" }), $("figcaption", {}, name + "'s view"))));
+  }
+  [...box.querySelectorAll("img")].forEach((img, i) => img.src = "/snapshot.png?bot=" + encodeURIComponent(views[i]) + "&t=" + Date.now());
+}
+setInterval(refreshViews, 5000); setTimeout(refreshViews, 1500);
+</script>
+</body>
+</html>

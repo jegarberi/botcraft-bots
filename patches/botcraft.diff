@@ -1,0 +1,459 @@
+diff --git a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
+index 260a52e..234e5af 100644
+--- a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
++++ b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
+@@ -331,8 +331,11 @@ namespace Botcraft
+                 }
+                 catch (const std::exception& e)
+                 {
+-                    LOG_ERROR("Exception caught during tree ticking:\n" << e.what() << "\nStopping behaviour.");
+-                    return;
++                    // One task failing in an unexpected way is no reason to leave the bot standing there
++                    // for ever: log it, give the rest of the client a moment, and tick the tree again
++                    LOG_ERROR("Exception caught during tree ticking:\n" << e.what() << "\nTicking again.");
++                    Utilities::SleepFor(std::chrono::milliseconds(500));
++                    continue;
+                 }
+                 catch (...)
+                 {
+diff --git a/botcraft/include/botcraft/Game/ConnectionClient.hpp b/botcraft/include/botcraft/Game/ConnectionClient.hpp
+index 8efbf2a..25a3bd5 100644
+--- a/botcraft/include/botcraft/Game/ConnectionClient.hpp
++++ b/botcraft/include/botcraft/Game/ConnectionClient.hpp
+@@ -65,5 +65,11 @@ namespace Botcraft
+         std::shared_ptr<NetworkManager> network_manager;
+ 
+         bool should_be_closed;
++
++#if PROTOCOL_VERSION > 776 /* > 26.2 */
++        /// @brief Last position/rotation (x, y, z, yRot, xRot) the server teleported us to,
++        /// required to confirm teleportations when there is no PhysicsManager
++        double last_teleport[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
++#endif
+     };
+ } //Botcraft
+diff --git a/botcraft/include/botcraft/Game/ManagersClient.hpp b/botcraft/include/botcraft/Game/ManagersClient.hpp
+index a669863..63a3c4e 100644
+--- a/botcraft/include/botcraft/Game/ManagersClient.hpp
++++ b/botcraft/include/botcraft/Game/ManagersClient.hpp
+@@ -99,6 +99,14 @@ namespace Botcraft
+ #endif
+         bool is_hardcore;
+         std::atomic<int> day_time;
++#if PROTOCOL_VERSION > 774 /* > 1.21.11 */
++        /// @brief Last clock state received for the current dimension. The server only sends it now and
++        /// then: in between, the day time is derived from the game time that comes every second
++        bool clock_known = false;
++        long long int clock_ticks = 0;
++        long long int clock_game_time = 0;
++        float clock_rate = 1.0f;
++#endif
+ 
+         /// @brief Names of all connected players
+         std::map<ProtocolCraft::UUID, std::string> player_names;
+diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
+index 958521f..ef99c43 100644
+--- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
++++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
+@@ -1,3 +1,6 @@
++#include <chrono>
++#include <optional>
++
+ #include "botcraft/AI/BehaviourClient.hpp"
+ #include "botcraft/AI/Blackboard.hpp"
+ #include "botcraft/AI/Tasks/PathfindingTask.hpp"
+@@ -607,6 +610,17 @@ namespace Botcraft
+ 
+                         if (block != nullptr && ((block->IsSolid() && !block->IsClimbable()) || (take_damage && block->IsHazardous())))
+                         {
++                            // (bot patch) A drop of up to 6 blocks onto plain ground: a few hearts at most, and
++                            // dear enough that it is only the way out when there is no other (a bot left on
++                            // top of something it may not break stayed there for good)
++                            if (block->IsSolid() && !block->IsClimbable() && !block->IsHazardous() && y >= -7)
++                            {
++                                const std::pair<Position, float> landing = {
++                                    next_location + Position(0, y + 1, 0),
++                                    next_location.y + y + 1.0f
++                                };
++                                add_node_if_better(landing, cost[current_node.pos] + std::abs(y) + 10.0f, current_node);
++                            }
+                             break;
+                         }
+ 
+@@ -960,6 +974,10 @@ namespace Botcraft
+         // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
+         // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
+         // climbable at the bottom, preventing fall damage
++        // (bot patch) Falling fast onto something else than water: steer for water within 4 blocks of the
++        // landing spot, if there is some (looked for once a fall)
++        std::optional<Vector3<double>> water_below;
++        bool looked_for_water = false;
+         if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
+             {
+                 // Previous inputs have not been processed by physics thread yet
+@@ -984,8 +1002,48 @@ namespace Botcraft
+                     (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
+                 local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
+ 
++                if (!looked_for_water && local_player->GetSpeed().y < -0.6)
++                {
++                    looked_for_water = true;
++                    const Position here(static_cast<int>(std::floor(current_pos.x)), static_cast<int>(std::floor(current_pos.y)), static_cast<int>(std::floor(current_pos.z)));
++                    const auto landing = [&](const int dx, const int dz) -> const Blockstate*
++                        {
++                            for (int down = 1; down <= 40; ++down)
++                            {
++                                const Blockstate* b = world->GetBlock(here + Position(dx, -down, dz));
++                                if (b == nullptr || !b->IsAir())
++                                {
++                                    return b;
++                                }
++                            }
++                            return nullptr;
++                        };
++                    const Blockstate* under = landing(0, 0);
++                    if (under == nullptr || !under->IsWater())
++                    {
++                        double best = 1e9;
++                        for (int dx = -4; dx <= 4; ++dx)
++                        {
++                            for (int dz = -4; dz <= 4; ++dz)
++                            {
++                                const Blockstate* b = landing(dx, dz);
++                                if (b != nullptr && b->IsWater() && dx * dx + dz * dz < best)
++                                {
++                                    best = dx * dx + dz * dz;
++                                    water_below = Vector3<double>(here.x + dx + 0.5, current_pos.y, here.z + dz + 0.5);
++                                }
++                            }
++                        }
++                    }
++                }
++                if (water_below)
++                {
++                    local_player->LookAt(*water_below, false);
++                    local_player->SetInputsForward(1.0);
++                    local_player->SetInputsSneak(false);
++                }
+                 // If we drifted too much, adjust toward target X/Z position
+-                if (Vector3<double>(current_pos.x, 0.0, current_pos.z).SqrDist(horizontal_target_position) > (0.5 - half_player_width) * (0.5 - half_player_width))
++                else if (Vector3<double>(current_pos.x, 0.0, current_pos.z).SqrDist(horizontal_target_position) > (0.5 - half_player_width) * (0.5 - half_player_width))
+                 {
+                     local_player->LookAt(look_at_target, false);
+                     local_player->SetInputsForward(1.0);
+@@ -1129,7 +1187,41 @@ namespace Botcraft
+             }, client, 20.0 * ms_per_tick);
+     }
+ 
++    Status GoToSearch(BehaviourClient& client, const Vector3<double>& goal, const int dist_tolerance, const int min_end_dist, const int min_end_dist_xz, const bool allow_jump, const bool sprint, float speed_factor);
++
++    // (bot patch) A goal that could not be reached a moment ago, from about the same spot, is not searched for
++    // again (a failed search visits its whole budget, 15000 nodes): the caller gets the failure after a short
++    // pause instead. Callers that retry in a loop were burning a core each. One memo per behaviour thread
+     Status GoToImpl(BehaviourClient& client, const Vector3<double>& goal, const int dist_tolerance, const int min_end_dist, const int min_end_dist_xz, const bool allow_jump, const bool sprint, float speed_factor)
++    {
++        struct Failure
++        {
++            Vector3<double> goal;
++            Vector3<double> from;
++            std::chrono::steady_clock::time_point at;
++        };
++        thread_local std::optional<Failure> last_failure;
++        const std::shared_ptr<LocalPlayer> player = client.GetLocalPlayer();
++        const Vector3<double> from = player ? player->GetPosition() : Vector3<double>();
++        if (last_failure && last_failure->goal.SqrDist(goal) < 1.0 && last_failure->from.SqrDist(from) < 4.0 &&
++            std::chrono::steady_clock::now() - last_failure->at < std::chrono::seconds(10))
++        {
++            Utilities::YieldForCondition([]() { return false; }, client, 500);
++            return Status::Failure;
++        }
++        const Status status = GoToSearch(client, goal, dist_tolerance, min_end_dist, min_end_dist_xz, allow_jump, sprint, speed_factor);
++        if (status == Status::Failure)
++        {
++            last_failure = Failure{ goal, player ? player->GetPosition() : from, std::chrono::steady_clock::now() };
++        }
++        else
++        {
++            last_failure.reset();
++        }
++        return status;
++    }
++
++    Status GoToSearch(BehaviourClient& client, const Vector3<double>& goal, const int dist_tolerance, const int min_end_dist, const int min_end_dist_xz, const bool allow_jump, const bool sprint, float speed_factor)
+     {
+         if (min_end_dist > dist_tolerance)
+         {
+@@ -1190,6 +1282,8 @@ namespace Botcraft
+         const float step_height = 0.6f;
+ #endif
+         Position current_position;
++        Position last_planned_from = current_position;
++        int plans_in_place = 0;
+         do
+         {
+             // Wait until we are on the ground or climbing
+@@ -1212,6 +1306,22 @@ namespace Botcraft
+                 static_cast<int>(std::floor(local_player->GetPosition().z))
+             );
+ 
++            // (bot patch) A path whose first step can't be walked is planned again, and again: the same path each
++            // time when nothing changes. Five plans in a row without moving a block: give up
++            if (current_position == last_planned_from)
++            {
++                if (++plans_in_place >= 5)
++                {
++                    LOG_WARNING("Pathfinding planned 5 times from " << current_position << " without moving (asked " << goal_block << "). Giving up.");
++                    return Status::Failure;
++                }
++            }
++            else
++            {
++                plans_in_place = 0;
++                last_planned_from = current_position;
++            }
++
+             std::vector<std::pair<Position, float>> path;
+             const bool is_goal_loaded = world->IsLoaded(goal_block);
+ 
+@@ -1297,7 +1407,20 @@ namespace Botcraft
+ 
+                 // If something went wrong, break and
+                 // replan the whole path to the goal
+-                if (!Move(client, local_player, Vector3<double>(path[i].first.x + 0.5, path[i].second, path[i].first.z + 0.5), speed_factor, sprint))
++                // (bot patch) Walk, don't sprint, where a slip costs: a step down, a drop just ahead, or a cliff
++                // edge beside the way (3 blocks of air under a neighbour)
++                bool careful = path[i].first.y < current_position.y || (i + 1 < path.size() && path[i + 1].first.y < path[i].first.y);
++                for (const Position& side : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
++                {
++                    bool drop = !careful;
++                    for (int down = 1; down <= 3 && drop; ++down)
++                    {
++                        const Blockstate* b = world->GetBlock(path[i].first + side + Position(0, -down, 0));
++                        drop = b != nullptr && b->IsAir();
++                    }
++                    careful = careful || drop;
++                }
++                if (!Move(client, local_player, Vector3<double>(path[i].first.x + 0.5, path[i].second, path[i].first.z + 0.5), speed_factor, sprint && !careful))
+                 {
+                     break;
+                 }
+diff --git a/botcraft/src/Game/ConnectionClient.cpp b/botcraft/src/Game/ConnectionClient.cpp
+index 7748dc1..c904138 100644
+--- a/botcraft/src/Game/ConnectionClient.cpp
++++ b/botcraft/src/Game/ConnectionClient.cpp
+@@ -135,6 +135,24 @@ namespace Botcraft
+         // Confirmations have to be sent from here, as there is no PhysicsManager with a ConnectionClient
+         std::shared_ptr<ServerboundAcceptTeleportationPacket> confirm_packet = std::make_shared<ServerboundAcceptTeleportationPacket>();
+         confirm_packet->SetId_(packet.GetId_());
++#if PROTOCOL_VERSION > 776 /* > 26.2 */
++        // The confirmation must contain the resulting position, or the server
++        // rejects it ("moved wrongly") and teleports us again, forever
++        const double change[5] = {
++            packet.GetChange().GetPosition()[0], packet.GetChange().GetPosition()[1], packet.GetChange().GetPosition()[2],
++            packet.GetChange().GetYRot(), packet.GetChange().GetXRot()
++        };
++        for (int i = 0; i < 5; ++i)
++        {
++            // Bit i of relatives set means this value is an offset from the current one
++            last_teleport[i] = ((packet.GetRelatives() >> i) & 1) ? last_teleport[i] + change[i] : change[i];
++        }
++        confirm_packet->SetX(last_teleport[0]);
++        confirm_packet->SetY(last_teleport[1]);
++        confirm_packet->SetZ(last_teleport[2]);
++        confirm_packet->SetYRot(static_cast<float>(last_teleport[3]));
++        confirm_packet->SetXRot(static_cast<float>(last_teleport[4]));
++#endif
+ 
+         network_manager->Send(confirm_packet);
+     }
+diff --git a/botcraft/src/Game/Entities/EntityManager.cpp b/botcraft/src/Game/Entities/EntityManager.cpp
+index 3925686..db2ab82 100644
+--- a/botcraft/src/Game/Entities/EntityManager.cpp
++++ b/botcraft/src/Game/Entities/EntityManager.cpp
+@@ -644,6 +644,11 @@ namespace Botcraft
+ #else
+             if (packet.GetPosition().GetValue().GetLeft().has_value())
+             {
++                // A sync with no interpolation step (seen on teleports) carries no position: back() would be garbage
++                if (packet.GetPosition().GetValue().GetLeft().value().GetSteps().empty())
++                {
++                    return;
++                }
+                 entity->SetPosition(packet.GetPosition().GetValue().GetLeft().value().GetSteps().back().GetPosition());
+             }
+             else
+diff --git a/botcraft/src/Game/Entities/entities/Entity.cpp b/botcraft/src/Game/Entities/entities/Entity.cpp
+index d3e406d..201b5a4 100644
+--- a/botcraft/src/Game/Entities/entities/Entity.cpp
++++ b/botcraft/src/Game/Entities/entities/Entity.cpp
+@@ -2103,11 +2103,22 @@ namespace Botcraft
+         std::scoped_lock<std::shared_mutex> lock(entity_mutex);
+         const Renderer::Atlas* atlas = AssetsManager::getInstance().GetAtlas();
+ 
++        // Size first: it reads the entity metadata, and throws when a value has a type we don't expect
++        // (protocol drift). Nothing may be half built when that happens, so fall back to a default box
++        double half_height = 0.5;
++        double half_width = 0.3;
++        try
++        {
++            half_height = GetHeightImpl() / 2.0;
++            half_width = GetWidthImpl() / 2.0;
++        }
++        catch (const std::exception&)
++        {
++        }
++
+         // Generate default faces
+         face_descriptors = std::vector<FaceDescriptor>(6);
+         faces = std::vector<Renderer::Face>(6);
+-        const double half_height = GetHeightImpl() / 2.0;
+-        const double half_width = GetWidthImpl() / 2.0;
+         for (int i = 0; i < 6; ++i)
+         {
+             face_descriptors[i].orientation = static_cast<Orientation>(i);
+@@ -2183,8 +2194,17 @@ namespace Botcraft
+     void Entity::OnSizeUpdated()
+     {
+         are_rendered_faces_up_to_date = false;
+-        const double half_width = GetWidthImpl() / 2.0;
+-        const double half_height = GetHeightImpl() / 2.0;
++        double half_width = 0.3;
++        double half_height = 0.5;
++        try
++        {
++            half_width = GetWidthImpl() / 2.0;
++            half_height = GetHeightImpl() / 2.0;
++        }
++        catch (const std::exception&)
++        {
++            // Unreadable metadata: keep the default box
++        }
+         for (size_t i = 0; i < faces.size(); ++i)
+         {
+             std::static_pointer_cast<Renderer::Scale>(face_descriptors[i].transformations.scales.back())->axis_x = static_cast<float>(half_width);
+diff --git a/botcraft/src/Game/ManagersClient.cpp b/botcraft/src/Game/ManagersClient.cpp
+index 9380d9d..7d36ad6 100644
+--- a/botcraft/src/Game/ManagersClient.cpp
++++ b/botcraft/src/Game/ManagersClient.cpp
+@@ -264,21 +264,20 @@ namespace Botcraft
+         // TODO: match the dimension to ids using registry?
+         if (world != nullptr)
+         {
+-            if (world->GetCurrentDimension() == "minecraft:overworld")
++            const int clock_id = world->GetCurrentDimension() == "minecraft:overworld" ? 0 : world->GetCurrentDimension() == "minecraft:the_end" ? 1 : -1;
++            auto it = packet.GetClockUpdates().find(clock_id);
++            if (it != packet.GetClockUpdates().end())
+             {
+-                auto it = packet.GetClockUpdates().find(0);
+-                if (it != packet.GetClockUpdates().end())
+-                {
+-                    day_time = it->second.GetTotalTicks() % 24000;
+-                }
++                clock_known = true;
++                clock_ticks = it->second.GetTotalTicks();
++                clock_rate = it->second.GetRate();
++                clock_game_time = packet.GetGameTime();
+             }
+-            else if (world->GetCurrentDimension() == "minecraft:the_end")
++            // The clock itself is only sent when it changes pace: advance it with the game time
++            if (clock_known && clock_id != -1)
+             {
+-                auto it = packet.GetClockUpdates().find(1);
+-                if (it != packet.GetClockUpdates().end())
+-                {
+-                    day_time = it->second.GetTotalTicks() % 24000;
+-                }
++                const long long int now = clock_ticks + static_cast<long long int>((packet.GetGameTime() - clock_game_time) * static_cast<double>(clock_rate));
++                day_time = static_cast<int>(((now % 24000) + 24000) % 24000);
+             }
+         }
+ #endif
+diff --git a/botcraft/src/Network/NetworkManager.cpp b/botcraft/src/Network/NetworkManager.cpp
+index 6c5c487..ec5bea5 100644
+--- a/botcraft/src/Network/NetworkManager.cpp
++++ b/botcraft/src/Network/NetworkManager.cpp
+@@ -396,12 +396,22 @@ namespace Botcraft
+             }
+             catch (const std::exception& e)
+             {
+-                LOG_FATAL("Parsing exception while parsing message \"" << packet->GetName() << "\"\n" << e.what());
+-                throw;
++                // Packets are length-framed, so one we can't parse can be skipped without
++                // losing the stream. Killing the client over (e.g.) a particle effect is worse
++                LOG_WARNING("Skipping unparsable message \"" << packet->GetName() << "\"\n" << e.what());
++                return;
+             }
+             for (size_t i = 0; i < subscribed.size(); i++)
+             {
+-                packet->Dispatch(subscribed[i]);
++                // A handler choking on one packet (metadata of an unexpected type...) must not end the client
++                try
++                {
++                    packet->Dispatch(subscribed[i]);
++                }
++                catch (const std::exception& e)
++                {
++                    LOG_WARNING("Error while handling message \"" << packet->GetName() << "\": " << e.what());
++                }
+             }
+         }
+     }
+diff --git a/botcraft/src/Renderer/RenderingManager.cpp b/botcraft/src/Renderer/RenderingManager.cpp
+index 0e9ea35..290adb1 100644
+--- a/botcraft/src/Renderer/RenderingManager.cpp
++++ b/botcraft/src/Renderer/RenderingManager.cpp
+@@ -393,6 +393,8 @@ namespace Botcraft
+                     if (!Settings::screenhsot_path.empty() || Settings::screenshot_callback)
+                     {
+                         std::vector<unsigned char> pixels(current_window_height * current_window_width * 3);
++                        // Rows are padded to 4 bytes by default, which overflows the buffer when width * 3 is not a multiple of 4
++                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                         glReadPixels(0, 0, current_window_width, current_window_height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+ 
+                         if (!Settings::screenhsot_path.empty())
+@@ -444,6 +446,14 @@ namespace Botcraft
+                 }
+             }
+ 
++            // (bot patch) The window can close on its own (display gone, Close()): the thread updating
++            // the renderables uses world_renderer, so it has to be stopped before world_renderer is freed
++            running = false;
++            condition_update.notify_all();
++            if (thread_updating_renderable.joinable())
++            {
++                thread_updating_renderable.join();
++            }
+             world_renderer.reset();
+             my_shader.reset();
+ 
+@@ -781,7 +791,16 @@ namespace Botcraft
+                     }
+                     else if (!entity->GetAreRenderedFacesUpToDate())
+                     {
+-                        faces = entity->GetFaces(true);
++                        // An entity whose metadata we can't read (protocol drift) is drawn as nothing
++                        // rather than taking the whole client down from the rendering thread
++                        try
++                        {
++                            faces = entity->GetFaces(true);
++                        }
++                        catch (const std::exception&)
++                        {
++                            faces.clear();
++                        }
+                         should_update = true;
+                     }
+ 
+diff --git a/protocolCraft/src/Utilities/Json.cpp b/protocolCraft/src/Utilities/Json.cpp
+index 8fa30ef..3165042 100644
+--- a/protocolCraft/src/Utilities/Json.cpp
++++ b/protocolCraft/src/Utilities/Json.cpp
+@@ -719,7 +719,7 @@ namespace ProtocolCraft
+                         switch (*(iter + 1))
+                         {
+                         case '\"':
+-                            output << *iter << *(iter + 1);
++                            output << '"';
+                             iter += 2;
+                             length -= 2;
+                             break;
