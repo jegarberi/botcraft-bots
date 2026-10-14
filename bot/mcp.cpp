@@ -4869,6 +4869,9 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
                     return Obtain(c, made_from->second.front(), depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
                 }
             }
+            // Mined, not made: more of that ingredient (not of the item itself: a bot with one cobblestone set
+            // out to dig up a stone hoe)
+            return Obtain(c, more, depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
         }
     }
     // A raw material: mine it
