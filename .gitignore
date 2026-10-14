@@ -28,3 +28,4 @@ __pycache__/
 /.claude/
 /bot/.claude/
 /bot/brain_state.lua
+/bot/netlink_id.txt

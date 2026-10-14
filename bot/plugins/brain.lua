@@ -348,6 +348,7 @@ local function end_of_day()
     for name, r in pairs(rewards) do
         if (state.drawn or {})[name] ~= false then
             learn(state.net, state.inputs[name], state.trades[name], (r - mean) + 0.25 * (mean - state.baseline))
+            state.samples = (state.samples or 0) + 1
         end
     end
     state.baseline = 0.9 * state.baseline + 0.1 * mean
@@ -397,11 +398,42 @@ bot.every(30, function()
     busy = false
 end)
 
+-- ---------------------------------------------------------------- sharing (see the netlink plugin)
+-- The network as a flat list of numbers, in a fixed order, and back
+local function flatten(net)
+    local w = {}
+    for h = 1, HID do for i = 1, IN do w[#w + 1] = net.w1[h][i] end; w[#w + 1] = net.b1[h] end
+    for o = 1, OUT do for h = 1, HID do w[#w + 1] = net.w2[o][h] end; w[#w + 1] = net.b2[o] end
+    return w
+end
+
+-- What another program's bots learnt: a step toward their network, bigger the more lessons it comes from
+-- (a peer with as many as ours moves us a quarter of the way; it moves toward us the same way)
+local function merge(w, samples)
+    local mine = state.samples or 0
+    if type(w) ~= "table" or #w ~= #flatten(state.net) or (samples or 0) <= 0 then return nil end
+    local mix = 0.5 * samples / (mine + samples)
+    local k = 0
+    local function step(old) k = k + 1; return old + mix * ((tonumber(w[k]) or old) - old) end
+    for h = 1, HID do for i = 1, IN do state.net.w1[h][i] = step(state.net.w1[h][i]) end; state.net.b1[h] = step(state.net.b1[h]) end
+    for o = 1, OUT do for h = 1, HID do state.net.w2[o][h] = step(state.net.w2[o][h]) end; state.net.b2[o] = step(state.net.b2[o]) end
+    state.merged = (state.merged or 0) + 1
+    save(state)
+    return mix
+end
+
 bot.tool{
     name = "brain",
     description = "The bots' brain: a small neural network (17 inputs about the bot and the team, 10 hidden, 5 outputs) shared by all bots picks each bot's trade every Minecraft day (hunter, farmer, breeder, miner, builder; groups of three), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
-    params = { vote = "boolean", stop = "boolean", start = "boolean" },
+    params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object" },
     run = function(args)
+        -- For the netlink plugin: the network out, a peer's network in
+        if args.export then return { samples = state.samples or 0, w = flatten(state.net) } end
+        if type(args.merge) == "table" then
+            local mix = merge(args.merge.w, args.merge.samples)
+            if not mix then error("not a network of the same shape, or no lessons in it") end
+            return { mixed = mix, merged_so_far = state.merged }
+        end
         if args.stop then state.enabled = false; save(state); return "the brain rests: the groups stay as they are" end
         if args.start then state.enabled = true; save(state); return "the brain is working" end
         if args.vote then
@@ -422,7 +454,7 @@ bot.tool{
             bots[st.name] = { trade = TRADES[state.trades[st.name] or 5], wants_percent = wants,
                 last_reward = state.last_rewards and state.last_rewards[st.name] }
         end
-        return { enabled = state.enabled, day = state.day, next_vote_in_days = VOTE_EVERY - state.day % VOTE_EVERY,
+        return { enabled = state.enabled, day = state.day, lessons = state.samples or 0, networks_merged = state.merged or 0, next_vote_in_days = VOTE_EVERY - state.day % VOTE_EVERY,
             leader = state.leader, last_vote = state.last_vote, team_score_last_day = state.last_team, bots = bots }
     end,
 }
