@@ -310,6 +310,8 @@ public:
     /// @brief Blocks this bot could not get (a tree it can't reach, ore it can't dig to): not tried again
     /// for 10 minutes. Behaviour thread only
     std::map<Botcraft::Position, std::chrono::steady_clock::time_point> unreachable;
+    /// @brief After a store that failed (chests out of reach): not before this time again
+    std::chrono::steady_clock::time_point store_retry_at;
     std::string assist_type;
     int assist_count = 0;
     Botcraft::Position assist_at;
@@ -1416,7 +1418,9 @@ static std::vector<Ent> FindEntities(BehaviourClient& c, std::string type, const
             }
             const std::string name = e->GetName();
             const bool match = type.empty() || name == type ||
-                (type == "hostile" && e->IsMonster()) ||
+                // Not the endermen: neutral until provoked, and the worst thing to provoke (one that comes
+                // right at the bot is attacking: the defend branch fights it by name)
+                (type == "hostile" && e->IsMonster() && name != "enderman") ||
                 (type == "animal" && e->IsAnimal()) ||
                 (type == "player" && e->IsRemotePlayer());
             const Vector3<double> pos = e->GetPosition();
@@ -1942,6 +1946,24 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
             const int felled = FellTree(c, *target);
             if (felled == 0)
             {
+                // The whole tree, not this log alone: its other logs are just as far out of reach (one at a
+                // time, a bot walked around the same tree for minutes)
+                const std::shared_ptr<World> w = c.GetWorld();
+                for (int dx = -3; dx <= 3; ++dx)
+                {
+                    for (int dz = -3; dz <= 3; ++dz)
+                    {
+                        for (int dy = -12; dy <= 20; ++dy)
+                        {
+                            const Position p = *target + Position(dx, dy, dz);
+                            const Blockstate* b = w->GetBlock(p);
+                            if (b != nullptr && EndsWith(b->GetName(), "_log"))
+                            {
+                                give_up_on(p);
+                            }
+                        }
+                    }
+                }
                 give_up_on(*target);
             }
             done += felled;
@@ -4049,6 +4071,11 @@ static Status BuildStep(McpBot& c)
         return Status::Success;
     }
     const Blockstate* block = world->GetBlock(p);
+    if (block == nullptr)
+    {
+        // Its chunk went out of view meanwhile (a teleport, the bot walked off): look again next time
+        return Status::Success;
+    }
     if (!block->IsAir() && !block->IsFluid() && !(item != "minecraft:air" && block->GetName() == "minecraft:snow"))
     {
         // Never what the bots live on
@@ -5398,14 +5425,19 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .end()
             .sequence("defend")
                 // 10 blocks: time to put the sword in hand (KillTask does) before the first hit, not after
+                // (an enderman right on the bot is one that attacks: it is fought too)
                 .leaf("hostile within 10 blocks?", [](McpBot& c)
                     {
-                        return FindEntities(c, "hostile", 10.0).empty() ? Status::Failure : Status::Success;
+                        return FindEntities(c, "hostile", 10.0).empty() && FindEntities(c, "enderman", 2.5).empty() ? Status::Failure : Status::Success;
                     })
                 .leaf("fight", [](McpBot& c)
                     {
                         c.SetState("fighting");
                         std::atomic<int> killed = 0;
+                        if (!FindEntities(c, "enderman", 2.5).empty())
+                        {
+                            return KillTask(c, "enderman", 1, 6.0, killed);
+                        }
                         return KillTask(c, "hostile", 1, 10.0, killed);
                     })
             .end()
@@ -5548,15 +5580,22 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("store when full")
                 .leaf("chests on and inventory full?", [](McpBot& c)
                     {
-                        return auto_store && InventoryFull(c) ? Status::Success : Status::Failure;
+                        return auto_store && InventoryFull(c) && std::chrono::steady_clock::now() >= c.store_retry_at ? Status::Success : Status::Failure;
                     })
                 .leaf("store in chests", [](McpBot& c)
                     {
                         c.SetState("storing");
                         std::atomic<int> stored = 0;
                         std::string error;
-                        // Nothing that could be stored (all gear, no chest): go on working rather than loop here
-                        return StoreTask(c, false, stored, error) == Status::Success && stored > 0 ? Status::Success : Status::Failure;
+                        // Nothing that could be stored (all gear, no chest, chests out of reach): go on working
+                        // for 5 minutes rather than try again every tick
+                        if (StoreTask(c, false, stored, error) == Status::Success && stored > 0)
+                        {
+                            return Status::Success;
+                        }
+                        c.store_retry_at = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+                        c.SetNote("could not store" + (error.empty() ? std::string() : ": " + error) + "; trying again in 5 minutes");
+                        return Status::Failure;
                     })
             .end()
             .sequence("orders")
