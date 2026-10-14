@@ -9430,6 +9430,9 @@ int main(int argc, char* argv[])
                             it->second.at = std::chrono::steady_clock::now() + rejoin_delay;
                         }
                     }
+                    // One join at a time, spaced like the first ones: the server turns away a second join from
+                    // the same address within 4 seconds, and after a server restart every bot was waiting
+                    nap(std::max(delay, 5));
                 }
             });
 
