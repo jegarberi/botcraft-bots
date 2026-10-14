@@ -1154,6 +1154,7 @@ struct Ent
 };
 
 static std::vector<Ent> FindEntities(BehaviourClient& c, std::string type, const double radius);
+static bool IsPenned(BehaviourClient& c, const Vector3<double>& animal);
 
 /// @brief Replace what is remembered in the 24 blocks around the bot with what is there now (monsters
 /// included), tell the team about the first new find of something it is after, and call the bots around
@@ -1316,7 +1317,16 @@ static void Remember(McpBot& c)
         sqlite3_step(statement);
         sqlite3_reset(statement);
     }
-    for (const Ent& m : monsters)
+    // Farm animals too (not penned ones: those are kept), for hunting and food: where they were last seen
+    std::vector<Ent> seen_alive = monsters;
+    for (const Ent& a : FindEntities(c, "animal", radius))
+    {
+        if ((a.name == "cow" || a.name == "pig" || a.name == "sheep" || a.name == "chicken") && !IsPenned(c, a.pos))
+        {
+            seen_alive.push_back(a);
+        }
+    }
+    for (const Ent& m : seen_alive)
     {
         const Position p = BlockPos(m.pos);
         const std::string kind = "mob:" + m.name;
@@ -3385,6 +3395,25 @@ static Status GetFoodStep(McpBot& c)
                 c.SetNote(std::string("could not get to a ") + animal + " for food, will try again in 3 minutes");
             }
             return Status::Success;
+        }
+    }
+    // Animals seen in the last half hour, not too far: there before exploring blindly
+    for (const char* animal : { "cow", "pig", "sheep" })
+    {
+        const std::vector<std::pair<std::string, Position>> seen = Recall(c, std::string("mob:") + animal, 1);
+        if (!seen.empty())
+        {
+            const Position& p = seen[0].second;
+            const double d = std::sqrt(c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z)));
+            if (d > 24.0 && d < 200.0)
+            {
+                c.SetNote(std::string("no food: going where a ") + animal + " was seen, at " + std::to_string(p.x) + " " + std::to_string(p.z));
+                if (TravelTask(c, p.x, p.z) == Status::Failure)
+                {
+                    Forget(p);
+                }
+                return Status::Success;
+            }
         }
     }
     if (!Explore(c, "animals to hunt for food"))

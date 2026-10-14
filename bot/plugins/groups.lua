@@ -60,6 +60,7 @@ local function solo(name)
 end
 
 local function apply(g)
+    notes = {}                  -- what they did in their old trades says nothing now
     call("feeders", { bots = g.hunters })
     for _, n in ipairs(g.farmers) do solo(n) end
     for _, n in ipairs(g.breeders) do solo(n) end
@@ -74,11 +75,36 @@ end
 
 -- Farmers: their farm (made once, where they stand, if there is no farmland about), harvested and replanted;
 -- what the breeders lack, handed over
+local function has_hoe(name)
+    for _, slot in ipairs(call("inventory", { bot = name }) or {}) do
+        if slot.item:match("_hoe$") then return true end
+    end
+    return false
+end
+
 local function farmer(name)
     local farmland = call("find_blocks", { bot = name, block = "farmland", radius = 16, max = 1 }) or {}
     if #farmland == 0 then
+        -- A hoe first (stone, else wood): the make tool sets it as a goal the bot works toward
+        if not has_hoe(name) then
+            local r = call("make", { bot = name, item = "stone_hoe", count = 1 }) or call("make", { bot = name, item = "wooden_hoe", count = 1 })
+            notes[name] = r and "making a hoe for its farm" or "can't make a hoe yet"
+            return
+        end
         local r, err = call("make_farm", { bot = name })
-        notes[name] = r and ("made a farm: " .. (r.tilled or 0) .. " tilled") or ("could not make a farm: " .. tostring(err))
+        if r then
+            notes[name] = "made a farm: " .. (r.tilled or 0) .. " tilled"
+        elseif tostring(err):match("no water") then
+            -- No water near: a walk in some direction, to look again from there
+            local st = call("status", { bot = name })
+            if st and st.position then
+                local a = math.random() * 2 * math.pi
+                call("travel", { bot = name, x = math.floor(st.position.x + 64 * math.cos(a)), z = math.floor(st.position.z + 64 * math.sin(a)) })
+            end
+            notes[name] = "no water near for a farm: went looking further"
+        else
+            notes[name] = "could not make a farm: " .. tostring(err)
+        end
         return
     end
     local r = call("farm", { bot = name, radius = 16 })
