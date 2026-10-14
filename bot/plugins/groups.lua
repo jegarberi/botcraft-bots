@@ -8,6 +8,7 @@
 --   groups {}                         groups everyone, in threes, once (and says who is what)
 --   groups { show = true }            who is what
 --   groups { stop = true }            everyone back to the castle
+--   groups { assign = { hunters = {...}, ... } }   exactly these groups (the brain plugin decides them)
 -- The groups are kept in a file and taken up again after a restart.
 local FILE = "../groups_job.lua"
 local ORES = "coal_ore,iron_ore,copper_ore,gold_ore,redstone_ore,lapis_ore,diamond_ore"
@@ -125,8 +126,19 @@ end)
 bot.tool{
     name = "groups",
     description = "Put the bots in groups of three, each with a trade: hunters (the feeders: hunt, cook, feed the hungry), farmers (a crop farm each: harvest, replant, bone meal; they give wheat and carrots to the breeders), breeders (breed cows, sheep, pigs, chickens), miners (a team after ores, digging wide lit mines with stairs), builders (the rest: the castle). With no argument, makes the groups; show=true says who is what; stop=true sends everyone back to the castle team.",
-    params = { show = "boolean", stop = "boolean" },
+    params = { show = "boolean", stop = "boolean", assign = "object" },
     run = function(args)
+        -- Given from outside (the brain plugin): { hunters = {...}, farmers = {...}, ... }
+        if type(args.assign) == "table" then
+            local g = { hunters = {}, farmers = {}, breeders = {}, miners = {}, builders = {} }
+            for k in pairs(g) do
+                for _, n in ipairs(args.assign[k] or {}) do g[k][#g[k] + 1] = n end
+            end
+            groups = g
+            save(g)
+            apply(g)
+            return g
+        end
         if args.stop then
             if groups then
                 call("feeders", { stop = true })

@@ -426,6 +426,10 @@ public:
     std::atomic<bool> working_in_place = false;
     /// @brief How many times the watchdog found the bot stuck since it connected
     std::atomic<int> times_stuck = 0;
+    /// @brief What the bot has done since it joined, for its performance (the brain plugin learns from it):
+    /// built, collected, killed, harvested, bred, stored, given
+    std::map<std::string, int> stats;
+    std::mutex stats_mutex;
     /// @brief Last place the watchdog saw the bot move from, and when (stepper thread only)
     Botcraft::Vector3<double> watch_position;
     std::chrono::steady_clock::time_point moved_at = std::chrono::steady_clock::now();
@@ -1875,6 +1879,17 @@ static int FellTree(BehaviourClient& c, const Position& first)
 
 /// @brief Mine the nearest matching blocks and pick up the drops until count is reached. A log means its whole tree
 /// @param tunnel Dig a way to the ones that can't be walked to (needs a pickaxe)
+/// @brief One more of something done, in the bot's stats
+static void Count(BehaviourClient& c, const char* what, const int n = 1)
+{
+    McpBot* bot = dynamic_cast<McpBot*>(&c);
+    if (bot != nullptr && n > 0)
+    {
+        std::lock_guard<std::mutex> lock(bot->stats_mutex);
+        bot->stats[what] += n;
+    }
+}
+
 static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blockstate&)>& match, const int count, const int radius, std::atomic<int>& done, const bool tunnel = false)
 {
     std::set<Position> failed;
@@ -1930,6 +1945,7 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
                 give_up_on(*target);
             }
             done += felled;
+            Count(c, "collected", felled);
             continue;
         }
         if (SafeDig(c, *target, true) == Status::Failure &&
@@ -1939,6 +1955,7 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
             continue;
         }
         ++done;
+        Count(c, "collected");
         // Wherever the bot works, underground or in the open at night: keep the place lit
         LightUp(c, BlockPos(c.GetLocalPlayer()->GetPosition()), true);
         // Drops can't be picked up for half a second, then walk into the hole to get them
@@ -2213,6 +2230,7 @@ static Status KillTask(BehaviourClient& c, const std::string& type, const int co
         if (dead)
         {
             ++done;
+            Count(c, "killed");
             // Walk where it died to pick up the drops
             Wait(c, 600);
             GoTo(c, BlockPos(last_seen), 1);
@@ -2240,6 +2258,7 @@ static Status FarmTask(BehaviourClient& c, const int radius, const bool replant,
             continue;
         }
         ++harvested;
+        Count(c, "harvested");
         // Walk onto the plot to pick up the drops, they include what we replant with
         Wait(c, 300);
         GoTo(c, p, 1);
@@ -2582,6 +2601,7 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
             if (MoveStack(c, container_id, index, free_slot))
             {
                 stored += slot.GetItemCount();
+                Count(c, "stored", slot.GetItemCount());
             }
         }
         CloseContainer(c, container_id);
@@ -4038,6 +4058,11 @@ static Status BuildStep(McpBot& c)
         {
             give_up_on(p);
         }
+        else
+        {
+            // Clearing a spot of the plan is building too (the castle's levelling is nothing else)
+            Count(c, "built");
+        }
         return Status::Success;
     }
     if (item == "minecraft:water")
@@ -4091,6 +4116,7 @@ static Status BuildStep(McpBot& c)
         give_up_on(p);
         return Status::Success;
     }
+    Count(c, "built");
     if (!wanted_next.state.empty())
     {
         // Did it end up the right way round? If not, take it out: the spot is tried again in a minute
@@ -5100,6 +5126,7 @@ static Status GiveTask(McpBot& c, const std::string& to, const Position& to_at, 
             if (DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, static_cast<short>(n)) == Status::Success)
             {
                 given += n;
+                Count(c, "given", n);
             }
         }
     }
@@ -5890,6 +5917,7 @@ static const char* tools_json = R"JSON([
 {"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds and crops. kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
 {"name":"schematic","description":"Materials and building plan of a structure from createmod.com. url: the link of a schematic page (https://createmod.com/schematics/<name>): returns its title, size, required mods and material list, and which materials this game does not have (blocks of other mods). The site gives the block-by-block file to players only, so the user downloads the .nbt from that page into bot/schematics/; then file=<name>.nbt returns the materials and the number of parts, and with x y z (the corner with the lowest coordinates) the team builds part `part` (default 1, 4000 blocks each, bottom up) there, gathering and crafting what it needs; blocks of other mods are left out.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"file":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"part":{"type":"number"}}}},
 {"name":"give","description":"The bot walks up to another player (a bot) and drops items at its feet, which it picks up. to: the player's name; item: an item id, food (anything edible) or wood (logs and planks), default food; count (default 16); x y z: where the player is, if out of sight.","inputSchema":{"type":"object","properties":{"to":{"type":"string"},"item":{"type":"string"},"count":{"type":"number"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["to"]}},
+{"name":"leader","description":"The leader the bots elected (every 10 Minecraft days, see the brain tool): it leads the team (the team tool's leader when none is given). With name, sets it.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
 {"name":"feeders","description":"Bots whose whole job is to feed the others: each hunts (cows, pigs, sheep in turn, from memory first), cuts wood, and takes food to the hungriest bot (food 8 or less), and logs to bots that have no wood. bots: their names, or count (default 3) to take the best fed ones; stop=true gives them back; with no argument, who they are and what they did.","inputSchema":{"type":"object","properties":{"bots":{"type":"array","items":{"type":"string"}},"count":{"type":"number"},"stop":{"type":"boolean"}}}},
 {"name":"sites","description":"The stored construction boxes: every build (team build, castle stages) records the box around it in the shared database, and from then on no bot breaks a block inside one (gathering, tunnelling, getting unstuck, the dig tool), except a build whose own plan covers the spot. Lists them; with x1 y1 z1 x2 y2 z2 (and name) adds one by hand; remove=n forgets the n-th of the list (from 1).","inputSchema":{"type":"object","properties":{"x1":{"type":"number"},"y1":{"type":"number"},"z1":{"type":"number"},"x2":{"type":"number"},"y2":{"type":"number"},"z2":{"type":"number"},"name":{"type":"string"},"remove":{"type":"number"}}}},
 {"name":"mines","description":"The entrances of the team's mines: the places where a bot started digging down from the surface for ore (recorded automatically, one per 24 blocks). With x y z, declares one by hand. The castle plugin builds roads to them.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"resources":{"type":"string","description":"what the mine gives, e.g. iron_ore,coal_ore"}}}},
@@ -6486,6 +6514,8 @@ static Value CallTool(const std::string& name, const Value& a);
 
 // Bots with a job of their own (team_member with solo=true): the team tool leaves them out
 static std::set<std::string> solo_bots;
+// The leader the bots elected (the brain plugin's vote): the team tool's leader when none is given
+static std::string elected_leader;
 
 /// @brief The jobs the main program keeps track of ("solo", "feeder"), in the shared database: they outlive a restart
 static void SaveRole(const std::string& bot, const std::string& role, const bool on)
@@ -6592,7 +6622,15 @@ static Value CallTool(const std::string& name, const Value& a)
         {
             throw std::runtime_error("no bot is connected, use the connect tool");
         }
-        const std::string leader = a.contains("leader") && a["leader"].is_string() && !a["leader"].get_string().empty() ? a["leader"].get_string() : names.front();
+        std::string leader = a.contains("leader") && a["leader"].is_string() && !a["leader"].get_string().empty() ? a["leader"].get_string() : names.front();
+        {
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            if (!(a.contains("leader") && a["leader"].is_string() && !a["leader"].get_string().empty()) &&
+                std::find(names.begin(), names.end(), elected_leader) != names.end())
+            {
+                leader = elected_leader;
+            }
+        }
         if (std::find(names.begin(), names.end(), leader) == names.end())
         {
             throw std::runtime_error("no bot named " + leader + ", see the bots tool");
@@ -6803,6 +6841,23 @@ static Value CallTool(const std::string& name, const Value& a)
             o["building_part"] = part;
         }
         return o;
+    }
+    if (name == "leader")
+    {
+        // The elected leader: with name, sets it (and makes it the leader of the team at the next order)
+        if (a.is_object() && a.contains("name") && a["name"].is_string())
+        {
+            const std::string elected = a["name"].get_string();
+            for (const std::string& old : LoadRole("leader"))
+            {
+                SaveRole(old, "leader", false);
+            }
+            SaveRole(elected, "leader", true);
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            elected_leader = elected;
+        }
+        std::lock_guard<std::mutex> lock(bots_mutex);
+        return elected_leader;
     }
     if (name == "feeders")
     {
@@ -7339,6 +7394,15 @@ static Value CallTool(const std::string& name, const Value& a)
         // Times the bot was detected stuck (busy but not moving for 20 seconds) and broke a block beside it
         o["times_stuck"] = bot.times_stuck.load();
         {
+            std::lock_guard<std::mutex> lock(bot.stats_mutex);
+            Value stats = Json::Object();
+            for (const auto& [what, n] : bot.stats)
+            {
+                stats[what] = n;
+            }
+            o["stats"] = stats;
+        }
+        {
             // How many times the bot died since it connected, and where the last time
             const McpBot::Death death = bot.GetDeath();
             o["deaths"] = death.count;
@@ -7708,6 +7772,7 @@ static Value CallTool(const std::string& name, const Value& a)
                     if (InteractEntity(c, e.id, Hand::Main, true) == Status::Success)
                     {
                         ++*fed;
+                        Count(c, "bred");
                         Wait(c, 300);
                     }
                 }
@@ -9280,6 +9345,11 @@ int main(int argc, char* argv[])
             {
                 std::lock_guard<std::mutex> lock(bots_mutex);
                 solo_bots.insert(n);
+            }
+            for (const std::string& n : LoadRole("leader"))
+            {
+                std::lock_guard<std::mutex> lock(bots_mutex);
+                elected_leader = n;
             }
             const std::vector<std::string> saved_feeders = LoadRole("feeder");
             if (!saved_feeders.empty())
