@@ -8402,6 +8402,11 @@ static std::recursive_mutex lua_mutex;
 static Value tools;
 // Plugin tool name -> registry reference of its run function
 static std::map<std::string, int> lua_tools;
+// The plugin tools' names, under their own lock: whether a call is for a plugin is known without waiting for
+// the Lua lock, which a plugin can hold for minutes (a timer walking a bot somewhere). Every built-in tool,
+// status included, waited behind it: the control panel froze
+static std::set<std::string> lua_tool_names;
+static std::mutex lua_tool_names_mutex;
 static std::vector<int> lua_chat_handlers;
 // bot.every(seconds, function): called again and again, on the plugin thread
 struct LuaTimer
@@ -8503,6 +8508,14 @@ static Value ToJson(lua_State* L, int index)
 
 static Value CallLuaTool(const std::string& name, const Value& a, bool& found)
 {
+    {
+        std::lock_guard<std::mutex> names_lock(lua_tool_names_mutex);
+        if (lua_tool_names.count(name) == 0)
+        {
+            found = false;
+            return Value();
+        }
+    }
     std::lock_guard<std::recursive_mutex> lock(lua_mutex);
     const auto tool = lua_tools.find(name);
     found = tool != lua_tools.end();
@@ -8576,6 +8589,10 @@ static bool RegisterLuaTool(lua_State* L, const char* name, const char* descript
     }
     tools.push_back(tool);
     lua_tools[name] = run_ref;
+    {
+        std::lock_guard<std::mutex> names_lock(lua_tool_names_mutex);
+        lua_tool_names.insert(name);
+    }
     return true;
 }
 

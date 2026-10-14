@@ -95,11 +95,11 @@ local function farmer(name)
         if r then
             notes[name] = "made a farm: " .. (r.tilled or 0) .. " tilled"
         elseif tostring(err):match("no water") then
-            -- No water near: a walk in some direction, to look again from there
+            -- No water near: a short walk in some direction (the plugins wait while it walks), to look again from there
             local st = call("status", { bot = name })
             if st and st.position then
                 local a = math.random() * 2 * math.pi
-                call("travel", { bot = name, x = math.floor(st.position.x + 64 * math.cos(a)), z = math.floor(st.position.z + 64 * math.sin(a)) })
+                call("travel", { bot = name, x = math.floor(st.position.x + 24 * math.cos(a)), z = math.floor(st.position.z + 24 * math.sin(a)) })
             end
             notes[name] = "no water near for a farm: went looking further"
         else
