@@ -6,6 +6,7 @@ local names, carry, assigned, chat, made, attacks = {}, {}, {}, {}, {}, 0
 for i = 1, 15 do names[i] = { name = "Bot" .. i }; carry["Bot" .. i] = 0 end
 local brain_on, tool, tick = true, nil, nil
 local building, builds = {}, {}
+local homes_called = {}
 bot = { call = function(name, a)
     if name == "bots" then return names end
     if name == "status" then
@@ -26,6 +27,7 @@ bot = { call = function(name, a)
             explorers = { "Bot10", "Bot14" } }
     end
     if name == "chat" then chat[#chat + 1] = a.message end
+    if name == "home" then homes_called[a.bot] = { a.x, a.y, a.z } return "ok" end
     if name == "make" then made[#made + 1] = a.item end
     if name == "team_member" and a.objective == "attack" then attacks = attacks + 1 end
     if name == "team_member" and a.objective == "build" then building[a.bot] = 2; builds[#builds + 1] = a end
@@ -87,6 +89,15 @@ local ok, err = pcall(function()
     n_ = 0
     for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
     assert(n_ == 15, "every bot in a trade again, got " .. n_)
+    -- Each bot's bed is its own, and every trade with bots builds its shop
+    local homed = 0
+    for _ in pairs(homes_called) do homed = homed + 1 end
+    assert(homed == 15, "every bot given its bed, got " .. homed)
+    for _ = 1, 10 do t = t + 60; tick() end
+    v = tool.run({}).village
+    for _, shop in ipairs({ "Bakery", "Farm Store", "Butcher's", "Mining Office", "Smithy" }) do
+        assert(v[shop] and v[shop]:match("^open at"), shop .. " open: " .. tostring(v[shop]))
+    end
     local s = tool.run({ stop = true })
     assert(s.age == "Imperial Age", "went up the ages, got " .. s.age)
     assert(brain_on, "the brain works again")

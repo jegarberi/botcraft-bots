@@ -5482,7 +5482,9 @@ static bool IsBed(const Blockstate& b)
 /// @brief True if the bot has a bed to go to: one in sight, one it remembers, or one in its inventory
 static bool HasBed(McpBot& c)
 {
-    if (!ItemLike(c, "_bed").empty() || !FindBlocks(c, IsBed, 32, 1).empty())
+    // Its own bed (its house's, in the village) counts wherever it is: it goes home to sleep
+    Position mine;
+    if (!ItemLike(c, "_bed").empty() || GetOwn("bed", mine) || !FindBlocks(c, IsBed, 32, 1).empty())
     {
         return true;
     }
@@ -5600,7 +5602,7 @@ static Status SleepStep(McpBot& c)
         if (std::find(beds.begin(), beds.end(), mine) == beds.end() && c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(mine.x, mine.y, mine.z)) > 24.0 * 24.0)
         {
             c.SetNote("night: going back to its bed at " + std::to_string(mine.x) + " " + std::to_string(mine.y) + " " + std::to_string(mine.z));
-            if (GoTo(c, mine, 8) == Status::Failure)
+            if (GoTo(c, mine, 8) == Status::Failure && TravelTask(c, mine.x, mine.z) == Status::Failure)
             {
                 c.sleep_retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(60);
             }
@@ -6554,6 +6556,7 @@ static const char* tools_json = R"JSON([
 {"name":"interact_block","description":"Right-click the block at a position (button, lever, door, chest...). Walks there if needed.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"use_item","description":"Use an item while looking at a point (walks within reach first): how a bucket is filled (x y z of a still water block, y its surface) and emptied (x z of the spot, y the top of the block the water goes on). item: what to use, default what is in hand. For buttons, doors and chests use interact_block instead.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"item":{"type":"string"}},"required":["x","y","z"]}},
 {"name":"equip","description":"Put an inventory item in the bot's main hand.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
+{"name":"home","description":"Give the bot a bed of its own (the one in its house): at night it goes back there to sleep, from wherever it is.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"eat","description":"Eat a food item from the inventory.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
 {"name":"collect","description":"Collect resources: repeatedly find the nearest block with this exact id, mine it and pick up the drop, until count is reached. Equip a suitable tool first. For a log the whole tree is cut (every connected log within reach, so the result can exceed count), and a sapling of that kind is replanted if the bot has one.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":32}},"required":["block"]}},
 {"name":"kill","description":"Hunt and attack entities until count are dead. type: an entity name like zombie or cow, or a group: hostile, animal. Equip a weapon first. Penned animals (a fence, gate, wall or iron bars within 8 blocks) are never attacked.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":24}},"required":["type"]}},
@@ -8287,6 +8290,13 @@ static Value CallTool(const std::string& name, const Value& a)
     {
         const std::string item = Id(Str(a, "item"));
         return Act(bot, 20, "equip", [=](McpBot& c) { return SetItemInHand(c, item); });
+    }
+    if (name == "home")
+    {
+        // The bed in the bot's house: its own, slept in every night (the sleep branch walks back to it)
+        const Position bed(static_cast<int>(Num(a, "x")), static_cast<int>(Num(a, "y")), static_cast<int>(Num(a, "z")));
+        SetOwn("bed", bed);
+        return "its bed is at " + std::to_string(bed.x) + " " + std::to_string(bed.y) + " " + std::to_string(bed.z);
     }
     if (name == "eat")
     {

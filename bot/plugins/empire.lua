@@ -12,6 +12,7 @@
 --   village    empire { village = true }: every bot builds a house of its own in the town first (all at once: a bed,
 --              a double chest, a furnace, a table and chairs, a sign with its name), then a road joining it to the
 --              others, then the leader gives it a trade; a bot that joins later does the same. The shared houses are left out then
+--              Each bot sleeps in its own bed every night from then on; once every house stands, each trade builds its shop
 --   attacks    from the Castle Age, every 10 minutes the soldiers go out together after hostile mobs
 -- It decides the groups (the groups plugin carries them out, each trade's network still picks what a bot does), so the
 -- brain rests while it plays and works again when it stops.
@@ -377,7 +378,12 @@ local function built_of(age)
 end
 
 -- A bot of the village still building its house: no trade, no other building for it until then
-local function homeless(n) local h = state.village and state.village[n] return h and not h.done end
+-- (or putting up its trade's shop)
+local function homeless(n)
+    local h = state.village and state.village[n]
+    for _, w in pairs(state.shops or {}) do if w.bot == n and not w.done then return true end end
+    return h and not h.done
+end
 
 local function hand(w)
     -- Later blocks replace earlier ones at the same spot: the air cleared first, the building after
@@ -420,6 +426,25 @@ local function home(o, owner)
         { 2, -1, 7, "cobblestone" }, { 2, 0, 7, "oak_sign|" .. owner .. "'s|house" } })
 end
 
+-- Each trade's shop, in the village: a hut with its sign and what the trade works with
+local SHOPS = {
+    bakers = { "Bakery", { { 1, 0, 1, "furnace" }, { 2, 0, 1, "smoker" }, { 4, 0, 1, "crafting_table" }, { 5, 0, 1, "barrel" },
+        { 1, 0, 3, "hay_block" }, { 5, 0, 3, "chest" } } },
+    farmers = { "Farm Store", { { 1, 0, 1, "composter" }, { 2, 0, 1, "hay_block" }, { 3, 0, 1, "hay_block" }, { 5, 0, 1, "barrel" },
+        { 1, 0, 3, "carved_pumpkin" }, { 5, 0, 3, "chest" } } },
+    butchers = { "Butcher's", { { 1, 0, 1, "smoker" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "barrel" }, { 1, 0, 3, "chest" },
+        { 5, 0, 3, "white_wool" } } },
+    miners = { "Mining Office", { { 1, 0, 1, "furnace" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "chest" }, { 1, 0, 3, "iron_ore" },
+        { 5, 0, 3, "coal_block" } } },
+    blacksmiths = { "Smithy", { { 1, 0, 1, "blast_furnace" }, { 2, 0, 1, "furnace" }, { 3, 0, 1, "anvil" }, { 4, 0, 1, "smithing_table" },
+        { 5, 0, 1, "grindstone" }, { 1, 0, 3, "chest" }, { 5, 0, 3, "crafting_table" } } },
+}
+local function shop(o, trade)
+    local name, inside = SHOPS[trade][1], SHOPS[trade][2]
+    local b = with(hut(o, 7, 5, 3, "oak_planks", "stripped_oak_log", "spruce_planks"), o, inside)
+    return with(b, o, { { 2, -1, 5, "cobblestone" }, { 2, 0, 5, "oak_sign|" .. name .. "|" } }), name
+end
+
 -- A bot's road, once its house stands: from its door south to the street in front of its row of lots (past the
 -- deepest building, the Wonder), along the street west to the town's edge and up that edge to the first row, so
 -- every house is joined to every other. Cobblestone with the space over it cleared.
@@ -448,6 +473,10 @@ local function homes(names, now)
             state.village[n] = h
         end
         local st = looks[n]
+        if (h.road or h.done) and not h.homed then
+            -- Its bed (the head, at the house's north-west corner): slept in every night from now on
+            h.homed = call("home", { bot = n, x = h.at.x + 1, y = h.at.y, z = h.at.z + 1 }) ~= nil
+        end
         if h.done or (state.work and state.work.bot == n) then
             -- built, or putting up the empire's building first
         elseif not h.handed then
@@ -466,6 +495,32 @@ local function homes(names, now)
                 end
             elseif now - h.handed >= 600 and not st.building then
                 hand(h)     -- the order was lost: again
+            end
+        end
+    end
+    -- Every house up: each trade's shop, built by the first bot of that trade
+    for _, n in ipairs(names) do if not (state.village[n] or {}).done then return end end
+    state.shops = state.shops or {}
+    for trade in pairs(SHOPS) do
+        local w, who = state.shops[trade], ((state.groups or {})[trade] or {})[1]
+        if not w and who then
+            local at = lot(call("leader", {}))
+            local blocks, name = shop(at, trade)
+            w = { name = name, bot = who, at = at, blocks = blocks }
+            state.shops[trade] = w
+            hand(w)
+            announce(who .. " builds the " .. name .. " at " .. at.x .. " " .. at.z)
+            last_split = 0
+        elseif w and not w.done then
+            local st = looks[w.bot]
+            if type(st) == "table" then
+                if st.building then w.started = true end
+                if w.started and not st.building and (st.build_left or 0) == 0 then
+                    w.done, w.blocks, last_split = true, nil, 0
+                    announce("the " .. w.name .. " is open at " .. w.at.x .. " " .. w.at.z)
+                elseif now - w.handed >= 600 and not st.building then
+                    hand(w)
+                end
             end
         end
     end
@@ -589,7 +644,7 @@ end)
 
 bot.tool{
     name = "empire",
-    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name), then a road joining it to the others, and then take a trade (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
+    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name; it sleeps there every night), then a road joining it to the others, and then take a trade; once every house stands, each trade's shop goes up (bakery, farm store, butcher's, mining office, smithy) (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
     params = { start = "boolean", stop = "boolean", village = "boolean" },
     run = function(args)
         if args.village then
@@ -617,6 +672,7 @@ bot.tool{
             techs = techs, groups = state.groups, events = state.log, village = state.village and (function()
                 local v = {}
                 for n, h in pairs(state.village) do v[n] = (h.done and "house at " or h.road and "paving its road from " or "building its house at ") .. h.at.x .. " " .. h.at.z end
+                for _, w in pairs(state.shops or {}) do v[w.name] = (w.done and "open at " or (w.bot .. " building it at ")) .. w.at.x .. " " .. w.at.z end
                 return v end)() }
     end,
 }
