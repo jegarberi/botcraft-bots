@@ -310,6 +310,9 @@ public:
     /// @brief Blocks this bot could not get (a tree it can't reach, ore it can't dig to): not tried again
     /// for 10 minutes. Behaviour thread only
     std::map<Botcraft::Position, std::chrono::steady_clock::time_point> unreachable;
+    /// @brief Where the server last refused every placement nearby (protected area), and until when to not try there
+    Botcraft::Position refused_at;
+    std::chrono::steady_clock::time_point refused_until;
     /// @brief After a store that failed (chests out of reach): not before this time again
     std::chrono::steady_clock::time_point store_retry_at;
     std::string assist_type;
@@ -2512,6 +2515,12 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
     const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
     const auto is_air = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsAir(); };
     int refused = 0;
+    McpBot* const bot = dynamic_cast<McpBot*>(&c);
+    if (bot != nullptr && std::chrono::steady_clock::now() < bot->refused_until &&
+        std::abs(feet.x - bot->refused_at.x) <= 16 && std::abs(feet.z - bot->refused_at.z) <= 16)
+    {
+        return false;
+    }
     for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.IsAir(); }, 4, 729))
     {
         const Blockstate* floor = world->GetBlock(p + Position(0, -1, 0));
@@ -2530,6 +2539,12 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
         // for bots that are not operators), and every other spot would be waited for in vain
         if (++refused >= 3)
         {
+            // And not again around here for 5 minutes (a store tries a chest for each kind of item it carries)
+            if (bot != nullptr)
+            {
+                bot->refused_at = feet;
+                bot->refused_until = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+            }
             return false;
         }
     }
