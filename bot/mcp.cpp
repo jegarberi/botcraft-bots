@@ -2511,6 +2511,7 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
     // and not touching a chest (two chests would merge into a double chest and mix two resources)
     const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
     const auto is_air = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsAir(); };
+    int refused = 0;
     for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.IsAir(); }, 4, 729))
     {
         const Blockstate* floor = world->GetBlock(p + Position(0, -1, 0));
@@ -2524,6 +2525,12 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
         {
             placed = p;
             return true;
+        }
+        // Three spots side by side refused by the server: the area is protected (around the world spawn,
+        // for bots that are not operators), and every other spot would be waited for in vain
+        if (++refused >= 3)
+        {
+            return false;
         }
     }
     return false;
@@ -3426,6 +3433,16 @@ static bool HasWood(BehaviourClient& c)
 static Status GetFoodStep(McpBot& c)
 {
     c.SetState("getting food");
+    // Wheat in the pack is bread (3 a loaf), no hunt needed; a bot carried 64 wheat while starving
+    if (CountItem(c, "minecraft:wheat") >= 3)
+    {
+        std::string error;
+        c.SetNote("no food: baking bread from its wheat");
+        if (CraftOne(c, "minecraft:bread", error) > 0)
+        {
+            return Status::Success;
+        }
+    }
     for (const char* animal : { "cow", "pig", "sheep" })
     {
         if (!WildAnimals(c, animal, 32.0).empty())
