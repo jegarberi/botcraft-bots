@@ -4,6 +4,8 @@
 --   ages       Dark -> Feudal -> Castle -> Imperial: each one paid for, announced in the chat, and with its own
 --              split of the bots ("villagers") over the trades, shifted toward the resource the next age lacks most
 --   techs      paid for once their age is reached: better tools and armor, made by the crafters and soldiers
+--   the leader decides every bot's trade (the first bot leads if no one does): the age's split, filled with the bots
+--              whose tools and things fit each trade best, the moves told in the chat
 --   attacks    from the Castle Age, every 10 minutes the soldiers go out together after hostile mobs
 -- It decides the groups (the groups plugin carries them out, each trade's network still picks what a bot does), so the
 -- brain rests while it plays and works again when it stops.
@@ -57,6 +59,7 @@ end
 
 local state = { enabled = false, age = 1, stock = { food = 0, wood = 0, stone = 0, ore = 0 }, techs = {}, groups = nil, log = {} }
 local seen = {}             -- bot -> resource -> what it carried at the last look
+local looks = {}            -- bot -> its status at the last look (what the leader judges it by)
 local last_split, last_attack, loaded_at = 0, 0, os.time()
 
 local function save()
@@ -104,6 +107,7 @@ local function gather(names)
     for _, name in ipairs(names) do
         local st = call("status", { bot = name })
         if type(st) == "table" and type(st.inventory) == "table" then
+            looks[name] = st
             local now = { food = 0, wood = 0, stone = 0, ore = 0 }
             for item, c in pairs(st.inventory) do
                 local k = kind(item)
@@ -145,36 +149,65 @@ local function targets(n)
     return out
 end
 
--- Moves as few bots as it takes to the targets; the leader stays a builder, the berry picker a farmer
+-- What makes a bot fit for a trade: the tools and things it carries (ends of item names)
+local FIT = {
+    soldiers = { "_sword", "_chestplate", "_helmet", "shield" }, miners = { "_pickaxe", "torch", "raw_iron", "coal" },
+    farmers = { "_hoe", "wheat_seeds", "wheat", "potato" }, breeders = { "carrot", "shears", "wool" },
+    cooks = { "beef", "porkchop", "mutton", "chicken", "bread" }, builders = { "cobblestone", "_planks", "_log" },
+    crafters = { "iron_ingot", "stick", "crafting_table", "furnace" }, explorers = { "boat", "map" },
+}
+local function fit(st, trade)
+    local score = 0
+    for item in pairs(st and st.inventory or {}) do
+        for _, end_ in ipairs(FIT[trade]) do if item:sub(-#end_) == end_ then score = score + 1 end end
+    end
+    if trade == "soldiers" then score = score + (tonumber(st and st.health) or 20) / 10 end
+    return score
+end
+
+-- The leader decides every bot's trade: the targets of the age, filled with the bots that fit each best (staying
+-- in its trade counts for 1: a move costs the work under way). It is a builder itself, the berry picker a farmer.
+-- No leader yet: the first bot leads.
 local function split(names)
     local want = targets(#names)
-    local g, placed, pool = {}, {}, {}
-    local keep = {}
     local leader = call("leader", {})
-    if type(leader) == "string" and leader ~= "" then keep[leader] = "builders" end
+    if type(leader) ~= "string" or leader == "" then
+        leader = names[1]
+        call("leader", { name = leader })
+    end
+    local keep = { [leader] = "builders" }
     local picker = call("berries", {})
-    if type(picker) == "table" and picker.bot then keep[picker.bot] = "farmers" end
-    local here = {}
-    for _, n in ipairs(names) do here[n] = true end
-    for _, t in ipairs(TRADES) do
-        g[t] = {}
-        for _, n in ipairs((state.groups or {})[t] or {}) do
-            if here[n] and not placed[n] and (not keep[n] or keep[n] == t) then g[t][#g[t] + 1] = n; placed[n] = true end
+    if type(picker) == "table" and picker.bot and picker.bot ~= leader then keep[picker.bot] = "farmers" end
+    local was = {}
+    for t, list in pairs(state.groups or {}) do for _, n in ipairs(list) do was[n] = t end end
+    local g, placed, pairs_ = {}, {}, {}
+    for _, t in ipairs(TRADES) do g[t] = {} end
+    for _, n in ipairs(names) do
+        if keep[n] then
+            g[keep[n]][#g[keep[n]] + 1] = n; placed[n] = true
+        else
+            for _, t in ipairs(TRADES) do
+                pairs_[#pairs_ + 1] = { n, t, fit(looks[n], t) + (was[n] == t and 1 or 0) }
+            end
         end
     end
-    for n, t in pairs(keep) do if here[n] and not placed[n] then g[t][#g[t] + 1] = n; placed[n] = true end end
-    for _, n in ipairs(names) do if not placed[n] then pool[#pool + 1] = n end end
-    for _, t in ipairs(TRADES) do
-        for i = #g[t], 1, -1 do
-            if #g[t] <= want[t] then break end
-            if not keep[g[t][i]] then pool[#pool + 1] = table.remove(g[t], i) end
-        end
+    table.sort(pairs_, function(a, b)
+        if a[3] ~= b[3] then return a[3] > b[3] end
+        return a[1] .. a[2] < b[1] .. b[2]
+    end)
+    for _, p in ipairs(pairs_) do
+        if not placed[p[1]] and #g[p[2]] < want[p[2]] then g[p[2]][#g[p[2]] + 1] = p[1]; placed[p[1]] = true end
     end
+    for _, n in ipairs(names) do if not placed[n] then g.builders[#g.builders + 1] = n end end
+    -- The leader tells the bots it moved
+    local moves = {}
     for _, t in ipairs(TRADES) do
-        while #g[t] < want[t] and #pool > 0 do g[t][#g[t] + 1] = table.remove(pool) end
+        for _, n in ipairs(g[t]) do if was[n] ~= t then moves[#moves + 1] = n .. " -> " .. t end end
     end
-    for _, n in ipairs(pool) do g.builders[#g.builders + 1] = n end
-    return g
+    for i = 1, #moves, 6 do
+        call("chat", { bot = leader, message = "[empire] " .. table.concat(moves, ", ", i, math.min(i + 5, #moves)) })
+    end
+    return g, leader
 end
 
 local function same(a, b)
@@ -212,13 +245,13 @@ local function play(now)
     end
     if now - last_split >= REBALANCE then
         last_split = now
-        local g = split(names)
+        local g, leader = split(names)
         if not same(g, state.groups) then
             state.groups = g
             call("groups", { assign = g })
             local counts = {}
             for _, t in ipairs(TRADES) do if #g[t] > 0 then counts[#counts + 1] = #g[t] .. " " .. t end end
-            note("villagers: " .. table.concat(counts, ", "))
+            note(leader .. " splits the villagers: " .. table.concat(counts, ", "))
         end
     end
     local soldiers = (state.groups or {}).soldiers or {}
