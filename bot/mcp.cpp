@@ -909,7 +909,13 @@ static sqlite3* SharedDb()
                     "CREATE TABLE IF NOT EXISTS finds (kind TEXT NOT NULL, dimension TEXT NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL,"
                     "  cz INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
                     "  PRIMARY KEY (kind, dimension, cx, cy, cz));"
-                    "CREATE INDEX IF NOT EXISTS finds_kind ON finds (kind);",
+                    "CREATE INDEX IF NOT EXISTS finds_kind ON finds (kind);"
+                    // What is in each chest, as the last bot that opened it saw it (see RememberChest): every bot
+                    // reads it. A row with item '' marks the chest itself, empty or not
+                    "CREATE TABLE IF NOT EXISTS chest_contents (dimension TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,"
+                    "  z INTEGER NOT NULL, item TEXT NOT NULL, count INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
+                    "  PRIMARY KEY (dimension, x, y, z, item));"
+                    "CREATE INDEX IF NOT EXISTS chest_contents_item ON chest_contents (item);",
                     nullptr, nullptr, nullptr) != SQLITE_OK)
             {
                 LOG_ERROR("Can't open the shared database: " << (db ? sqlite3_errmsg(db) : "out of memory"));
@@ -1371,17 +1377,55 @@ static void Remember(McpBot& c)
     sqlite3_exec(memory_db, "DELETE FROM places WHERE kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800", nullptr, nullptr, nullptr);
     sqlite3_exec(memory_db, "COMMIT", nullptr, nullptr, nullptr);
 
-    // And the finds worth sharing, for the other bots: everything but its own furniture (beds, tables, furnaces,
-    // chests, barrels: the chests the bots share have their own table) and the monsters (called out in the chat)
+    // And the finds worth sharing, for the other bots: everything but its own furniture (beds, tables, furnaces)
+    // and the monsters (called out in the chat). Chests and barrels are shared: what is in them is known once
+    // a bot opens one (chest_contents)
     std::vector<std::pair<std::string, Position>> finds;
     for (const Position& p : found)
     {
         const Blockstate* block = world->GetBlock(p);
         const std::string kind = block == nullptr ? "" : block->GetName().substr(block->GetName().find(':') + 1);
         const auto ends = [&](const std::string& end) { return kind.size() >= end.size() && kind.compare(kind.size() - end.size(), end.size(), end) == 0; };
-        if (!kind.empty() && !ends("_bed") && kind != "crafting_table" && kind != "furnace" && kind != "chest" && kind != "barrel")
+        if (!kind.empty() && !ends("_bed") && kind != "crafting_table" && kind != "furnace")
         {
             finds.push_back({ kind, p });
+        }
+    }
+    // Chests remembered in this box that are not there any more: their contents are forgotten
+    {
+        sqlite3* shared = SharedDb();
+        sqlite3_stmt* statement = nullptr;
+        std::vector<Position> gone;
+        if (shared != nullptr && sqlite3_prepare_v2(shared, "SELECT DISTINCT x, y, z FROM chest_contents WHERE dimension = ?1"
+            " AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7", -1, &statement, nullptr) == SQLITE_OK)
+        {
+            sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(statement, 2, center.x - radius);
+            sqlite3_bind_int(statement, 3, center.x + radius);
+            sqlite3_bind_int(statement, 4, center.y - radius);
+            sqlite3_bind_int(statement, 5, center.y + radius);
+            sqlite3_bind_int(statement, 6, center.z - radius);
+            sqlite3_bind_int(statement, 7, center.z + radius);
+            while (sqlite3_step(statement) == SQLITE_ROW)
+            {
+                const Position p(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2));
+                const Blockstate* block = world->GetBlock(p);
+                if (block != nullptr && block->GetName().find("chest") == std::string::npos && block->GetName().find("barrel") == std::string::npos)
+                {
+                    gone.push_back(p);
+                }
+            }
+            sqlite3_finalize(statement);
+        }
+        for (const Position& p : gone)
+        {
+            sqlite3_prepare_v2(shared, "DELETE FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4", -1, &statement, nullptr);
+            sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(statement, 2, p.x);
+            sqlite3_bind_int(statement, 3, p.y);
+            sqlite3_bind_int(statement, 4, p.z);
+            sqlite3_step(statement);
+            sqlite3_finalize(statement);
         }
     }
     for (size_t i = monsters.size(); i < seen_alive.size(); ++i)
@@ -2749,6 +2793,83 @@ static short EmptySlot(const std::shared_ptr<Window>& window, const short begin,
     return -1;
 }
 
+/// @brief Tell every bot what is in this chest (the shared chest_contents table), as the open window shows it
+static void RememberChest(BehaviourClient& c, const Position& p, const std::shared_ptr<Window>& window)
+{
+    sqlite3* db = SharedDb();
+    if (db == nullptr || window == nullptr)
+    {
+        return;
+    }
+    std::map<std::string, int> contents = { { "", 0 } };
+    for (const auto& [index, slot] : window->GetSlots())
+    {
+        if (index < window->GetFirstPlayerInventorySlot() && !slot.IsEmptySlot())
+        {
+            contents[AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName()] += slot.GetItemCount();
+        }
+    }
+    const std::string dimension = c.GetWorld()->GetCurrentDimension();
+    const std::string by = c.GetNetworkManager()->GetMyName();
+    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+    sqlite3_stmt* statement = nullptr;
+    sqlite3_prepare_v2(db, "DELETE FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4", -1, &statement, nullptr);
+    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, p.x);
+    sqlite3_bind_int(statement, 3, p.y);
+    sqlite3_bind_int(statement, 4, p.z);
+    sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    sqlite3_prepare_v2(db, "INSERT INTO chest_contents (dimension, x, y, z, item, count, seen, by)"
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'), ?7)", -1, &statement, nullptr);
+    for (const auto& [item, count] : contents)
+    {
+        sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 2, p.x);
+        sqlite3_bind_int(statement, 3, p.y);
+        sqlite3_bind_int(statement, 4, p.z);
+        sqlite3_bind_text(statement, 5, item.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 6, count);
+        sqlite3_bind_text(statement, 7, by.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_reset(statement);
+    }
+    sqlite3_finalize(statement);
+    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+}
+
+/// @brief Close a chest, telling the other bots what is left in it
+static void CloseChest(BehaviourClient& c, const short container_id, const Position& p)
+{
+    RememberChest(c, p, c.GetInventoryManager()->GetWindow(container_id));
+    CloseContainer(c, container_id);
+}
+
+/// @brief The nearest chest within 96 blocks that some bot saw holding this item
+static bool ChestHolding(BehaviourClient& c, const std::string& item, Position& chest)
+{
+    sqlite3* db = SharedDb();
+    sqlite3_stmt* statement = nullptr;
+    const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
+    if (db == nullptr || sqlite3_prepare_v2(db, "SELECT x, y, z FROM chest_contents WHERE dimension = ?1 AND item = ?2 AND count > 0"
+        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT 1", -1, &statement, nullptr) != SQLITE_OK)
+    {
+        return false;
+    }
+    sqlite3_bind_text(statement, 1, c.GetWorld()->GetCurrentDimension().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement, 2, item.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
+    sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
+    sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
+    const bool found = sqlite3_step(statement) == SQLITE_ROW;
+    if (found)
+    {
+        chest = Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2));
+    }
+    sqlite3_finalize(statement);
+    return found && me.SqrDist(Vector3<double>(chest.x, chest.y, chest.z)) <= 96.0 * 96.0;
+}
+
 /// @brief A chest within 16 blocks with a free slot, so that no new one is placed while one has room: the nearest
 /// few looked into (not the vault's: those keep to their category), the ones found full passed over for ten minutes
 static bool RoomyChest(BehaviourClient& c, Position& chest)
@@ -2776,7 +2897,7 @@ static bool RoomyChest(BehaviourClient& c, Position& chest)
             const short id = c.GetInventoryManager()->GetFirstOpenedWindowId();
             const std::shared_ptr<Window> window = c.GetInventoryManager()->GetWindow(id);
             room = EmptySlot(window, 0, window->GetFirstPlayerInventorySlot()) >= 0;
-            CloseContainer(c, id);
+            CloseChest(c, id, p);
         }
         if (room)
         {
@@ -2950,7 +3071,7 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
                 Count(c, "stored", rest);
             }
         }
-        CloseContainer(c, container_id);
+        CloseChest(c, container_id, chest);
     }
     return result;
 }
@@ -5058,6 +5179,11 @@ static bool TeleportNear(McpBot& c, const int x, const int y, const int z, const
 /// @brief The team's chest for this item, if there is one within 96 blocks
 static bool SharedChest(McpBot& c, const std::string& item, Position& chest)
 {
+    // One that a bot saw holding it, wherever that is (within 96 blocks)
+    if (CountItem(c, item) == 0 && ChestHolding(c, item, chest))
+    {
+        return true;
+    }
     if (CategoryChest(c, item, chest))
     {
         return true;
@@ -5102,7 +5228,7 @@ static bool TakeFromChest(McpBot& c, const std::string& item)
             break;
         }
     }
-    CloseContainer(c, container_id);
+    CloseChest(c, container_id, chest);
     const bool got = CountItem(c, item) > 0;
     if (got)
     {
@@ -5157,7 +5283,7 @@ static void ShareSurplus(McpBot& c, const std::string& item)
             given += slot.GetItemCount();
         }
     }
-    CloseContainer(c, container_id);
+    CloseChest(c, container_id, chest);
     if (given > 0)
     {
         c.SetNote("shared " + std::to_string(given) + " " + item + " in the team's chest");
@@ -6556,6 +6682,7 @@ static const char* tools_json = R"JSON([
 {"name":"interact_block","description":"Right-click the block at a position (button, lever, door, chest...). Walks there if needed.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"use_item","description":"Use an item while looking at a point (walks within reach first): how a bucket is filled (x y z of a still water block, y its surface) and emptied (x z of the spot, y the top of the block the water goes on). item: what to use, default what is in hand. For buttons, doors and chests use interact_block instead.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"item":{"type":"string"}},"required":["x","y","z"]}},
 {"name":"equip","description":"Put an inventory item in the bot's main hand.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
+{"name":"chests","description":"What the bots know is in the chests: every bot that opens a chest (to store, take or look for room) tells the others what it holds, and chests and barrels seen while scanning are reported as finds (recall kind chest). With item: the chests holding it, fullest first; without: every known chest, newest first, with its contents and who saw it last. The bots themselves go to a chest known to hold what they need.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"max":{"type":"number","default":20}}}},
 {"name":"home","description":"Give the bot a bed of its own (the one in its house): at night it goes back there to sleep, from wherever it is.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"eat","description":"Eat a food item from the inventory.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
 {"name":"collect","description":"Collect resources: repeatedly find the nearest block with this exact id, mine it and pick up the drop, until count is reached. Equip a suitable tool first. For a log the whole tree is cut (every connected log within reach, so the result can exceed count), and a sapling of that kind is replanted if the bot has one.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":32}},"required":["block"]}},
@@ -7255,6 +7382,52 @@ static std::string TradeOf(const std::string& bot)
 
 static Value CallTool(const std::string& name, const Value& a)
 {
+    // What the bots know is in the chests (chest_contents): all of them, or those holding an item, fullest first
+    if (name == "chests")
+    {
+        sqlite3* db = SharedDb();
+        const std::string item = a.is_object() && a.contains("item") ? Id(Str(a, "item")) : "";
+        const int max = static_cast<int>(Num(a, "max", 20));
+        Value list = Json::Array();
+        sqlite3_stmt* statement = nullptr;
+        if (db == nullptr || sqlite3_prepare_v2(db, item.empty()
+            ? "SELECT x, y, z, dimension, MAX(seen), MAX(by) FROM chest_contents GROUP BY dimension, x, y, z ORDER BY MAX(seen) DESC LIMIT ?2"
+            : "SELECT x, y, z, dimension, seen, by FROM chest_contents WHERE item = ?1 AND count > 0 ORDER BY count DESC LIMIT ?2", -1, &statement, nullptr) != SQLITE_OK)
+        {
+            return list;
+        }
+        sqlite3_bind_text(statement, 1, item.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 2, max);
+        while (sqlite3_step(statement) == SQLITE_ROW)
+        {
+            Value o;
+            o["x"] = sqlite3_column_int(statement, 0);
+            o["y"] = sqlite3_column_int(statement, 1);
+            o["z"] = sqlite3_column_int(statement, 2);
+            o["dimension"] = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
+            o["seen_minutes_ago"] = static_cast<int>((std::time(nullptr) - sqlite3_column_int64(statement, 4)) / 60);
+            o["by"] = reinterpret_cast<const char*>(sqlite3_column_text(statement, 5));
+            list.push_back(o);
+        }
+        sqlite3_finalize(statement);
+        for (size_t i = 0; i < list.size(); ++i)
+        {
+            Value contents = Json::Object();
+            sqlite3_prepare_v2(db, "SELECT item, count FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4 AND item <> ''", -1, &statement, nullptr);
+            sqlite3_bind_text(statement, 1, list[i]["dimension"].get_string().c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(statement, 2, list[i]["x"].get_number<int>());
+            sqlite3_bind_int(statement, 3, list[i]["y"].get_number<int>());
+            sqlite3_bind_int(statement, 4, list[i]["z"].get_number<int>());
+            while (sqlite3_step(statement) == SQLITE_ROW)
+            {
+                const std::string name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+                contents[name.substr(name.find(':') + 1)] = sqlite3_column_int(statement, 1);
+            }
+            sqlite3_finalize(statement);
+            list[i]["contents"] = contents;
+        }
+        return list;
+    }
     // The groups plugin telling each bot's trade (trade "" for none)
     if (name == "trade" && a.is_object() && a.contains("bot") && a["bot"].is_string())
     {
