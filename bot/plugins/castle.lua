@@ -1014,6 +1014,7 @@ bot.every(20, function()
     job.best, job.best_at, job.idle_since, job.since = nil, nil, nil, nil
     if job.saved then
         job.saved.index = job.index
+        job.saved.stage = job.stages[job.index] and job.stages[job.index].name or nil
         save(JOB_FILE, job.saved)
     end
     if job.index > #job.stages then
@@ -1239,7 +1240,7 @@ castle_tool.run = function(args)
     elseif job and type(result) == "table" and result.started and (action == "start" or action == "test" or action == "level" or action == "roads") then
         local kept = {}
         for k, v in pairs(args) do if k ~= "bot" then kept[k] = v end end
-        job.saved = { args = kept, index = job.index }
+        job.saved = { args = kept, index = job.index, stage = job.stages[job.index] and job.stages[job.index].name or nil }
         save(JOB_FILE, job.saved)
     end
     return result
@@ -1251,14 +1252,40 @@ bot.tool(castle_tool)
 bot.every(20, function()
     if not castle_saved or job or os.time() - loaded_at < 120 then return end
     local saved = castle_saved
+    -- The ground is looked at through the eyes of the bot nearest the centre: wait (10 minutes at most) for one
+    -- within 48 blocks of it, or the levelling plan leaves out all it cannot see, for good
+    local args = saved.args or {}
+    if args.x and args.z and os.time() - loaded_at < 600 then
+        local near = false
+        for _, b in ipairs(bot.call("bots") or {}) do
+            local ok, st = pcall(bot.call, "status", { bot = b.name })
+            if ok and type(st) == "table" and st.position and math.abs(st.position.x - args.x) <= 48 and math.abs(st.position.z - args.z) <= 48 then
+                near = true
+                break
+            end
+        end
+        if not near then return end
+    end
     castle_saved = nil
     local ok, err = pcall(castle_tool.run, saved.args)
     if ok and job then
-        job.index = math.max(1, math.min(saved.index or 1, #job.stages))
+        -- Where it was, by the stage's name: the levelling and lighting are planned again from the ground as it
+        -- is now (only what is left, from the start of the list); the rest is the same plan, found by name
+        -- (its number moved, the levelling being shorter). Taken by number, a restart skipped levelling still to do
+        local name = saved.stage or ""
+        if name:match("^levelling") or name:match("^lighting") or name:match("^test levelling") or name:match("^test lighting") then
+            job.index = 1
+        else
+            job.index = math.max(1, math.min(saved.index or 1, #job.stages))
+            for i, s in ipairs(job.stages) do
+                if s.name == name then job.index = i; break end
+            end
+        end
         job.saved.index = job.index
         save(JOB_FILE, job.saved)
         hand_over()
-        io.stderr:write(os.date("%H:%M:%S"), " [castle] taken up again at stage ", job.index, " of ", #job.stages, "\n")
+        io.stderr:write(os.date("%H:%M:%S"), " [castle] taken up again at stage ", job.index, " of ", #job.stages,
+            type(err) == "table" and err.note and (" (" .. err.note .. ")") or "", "\n")
     else
         io.stderr:write("[castle] could not take the job up again: ", tostring(err), "\n")
     end
