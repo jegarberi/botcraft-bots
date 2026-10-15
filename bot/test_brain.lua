@@ -47,5 +47,30 @@ local said = false
 for _, m in ipairs(chats) do if m:match("^%[vote%]") then said = true end end
 assert(said, "the vote is announced in the chat")
 assert(io.open("../brain_state.lua"), "the brain is kept for a restart")
+
+-- Merging another program's network: checked, merged once, given to the bot doing worst as a challenger
+local mine = tool.run({ export = true })
+assert(mine.arch and #mine.w == 17 * 10 + 10 + 10 * 5 + 5 + 10 + 1, "the network goes out with its critic and its architecture")
+local w = {}
+for i, v in ipairs(mine.w) do w[i] = v + 0.5 end
+local function rejected(m) local ok, err = pcall(tool.run, { merge = m }) return not ok and tostring(err) end
+local nan = {}
+for i, v in ipairs(w) do nan[i] = v end
+nan[3] = 0 / 0
+assert(rejected({ w = nan, samples = 10, origin = "abcdef", arch = mine.arch }):match("not_finite"), "NaN refused")
+assert(rejected({ w = w, samples = 10, origin = "abcdef", arch = "brain:other" }):match("other_architecture"), "other architecture refused")
+-- (a peer with far more lessons: the merge moves this network halfway)
+assert(tool.run({ merge = { w = w, samples = 1000000, origin = "abcdef", arch = mine.arch } }).mixed > 0.4, "merged")
+assert(rejected({ w = w, samples = 1000000, origin = "abcdef", arch = mine.arch }):match("already_merged"), "the same lessons once")
+local st2 = tool.run({})
+assert(st2.challenger and st2.challenger.origin == "abcdef", "the merged network is a challenger")
+-- Evolution: generations ran, each bot has its own network, and they differ (mutated copies of the winner)
+assert(st.generation == 12 and st.last_generation and st.last_generation.winner, "a generation every 5 days")
+local p1, p2 = st.bots.Bot1.wants_percent, st.bots.Bot2.wants_percent
+local differ = false
+for k, v in pairs(p1) do if v ~= p2[k] then differ = true end end
+assert(differ or st.last_generation.winner == "Bot1" or st.last_generation.winner == "Bot2", "the bots' networks differ")
+-- Rollback by hand to the network of an earlier morning
+assert(tool.run({ rollback = 1 }):match("back to the network of day"))
 os.remove("../brain_state.lua")
 print(string.format("brain plugin OK: wanting mining %.1f%% -> %.1f%%, leader %s (%d of %d votes)", before, after, st.leader, st.last_vote.votes, st.last_vote.voters))

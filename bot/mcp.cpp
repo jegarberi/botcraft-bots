@@ -5511,8 +5511,11 @@ static Status AssistStep(McpBot& c)
     {
         return Status::Failure;
     }
+    // Cooperation, for the brain's rewards: it came to the call, and what it killed there
+    Count(c, "answered");
     std::atomic<int> killed = 0;
     KillTask(c, type, count, search, killed);
+    Count(c, "assisted", killed.load());
     c.SetNote("fought " + type + " with the others: " + std::to_string(killed.load()) + " killed");
     return Status::Success;
 }
@@ -5554,6 +5557,7 @@ static Status SalvageStep(McpBot& c)
         GoTo(c, spot + step, 1);
         Wait(c, 300);
     }
+    Count(c, "salvaged");
     return Status::Success;
 }
 

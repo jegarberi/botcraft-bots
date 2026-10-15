@@ -1,7 +1,8 @@
 -- The bots' brain: a small neural network that picks each bot's trade every Minecraft day, trained by
 -- reinforcement on what the bot and the whole team achieved, and a vote for the leader every 10 days.
 --
--- The network (one for all the bots, so it learns from 15 examples a day instead of 1):
+-- The network (each bot its own; every 5 days the bot with the best average reward wins, and every other bot
+-- goes on from a slightly mutated copy of the winner's: training plus evolution):
 --   in   17 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
 --        carries, how many bots are hungry, how the castle advanced, the trade it had (one-hot), a bias
 --   ->   10 hidden units (tanh)
@@ -27,6 +28,11 @@ local IN, HID, OUT = 17, 10, 5
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
 local VOTE_EVERY = 10
+local VALUE_RATE = 0.2        -- how fast the critic follows the rewards
+-- What a network is made of, sent with it: one of another shape is never merged into this one
+local ARCH = "brain:17x10x5+critic:v2"
+local GENERATION_DAYS = 5      -- each bot trains its own network; every 5 days the best one is copied to the others
+local MUTATION = 0.05          -- with this much noise (a normal spread) on every weight of the copies
 
 local function call(tool, args)
     local ok, r = pcall(bot.call, tool, args)
@@ -77,7 +83,42 @@ local function new_network()
         for h = 1, HID do net.w2[o][h] = rand() * 0.6 end
         net.b2[o] = 0
     end
+    -- The critic: what a day usually brings from such a situation (a linear head on the same hidden layer)
+    net.v, net.vb = {}, 0
+    for h = 1, HID do net.v[h] = 0 end
     return net
+end
+
+local function copy_net(net)
+    local out = { w1 = {}, b1 = {}, w2 = {}, b2 = {}, v = {}, vb = net.vb or 0 }
+    for h = 1, HID do
+        out.w1[h] = {}
+        for i = 1, IN do out.w1[h][i] = net.w1[h][i] end
+        out.b1[h] = net.b1[h]
+        out.v[h] = net.v and net.v[h] or 0
+    end
+    for o = 1, OUT do
+        out.w2[o] = {}
+        for h = 1, HID do out.w2[o][h] = net.w2[o][h] end
+        out.b2[o] = net.b2[o]
+    end
+    return out
+end
+
+-- A copy with a little noise on every weight (Box-Muller normal numbers)
+local function mutated(net)
+    local out = copy_net(net)
+    local function n() return MUTATION * math.sqrt(-2 * math.log(1 - math.random())) * math.cos(2 * math.pi * math.random()) end
+    for h = 1, HID do
+        for i = 1, IN do out.w1[h][i] = out.w1[h][i] + n() end
+        out.b1[h] = out.b1[h] + n()
+        out.v[h] = out.v[h] + n()
+    end
+    for o = 1, OUT do
+        for h = 1, HID do out.w2[o][h] = out.w2[o][h] + n() end
+        out.b2[o] = out.b2[o] + n()
+    end
+    return out
 end
 
 local function forward(net, x)
@@ -97,12 +138,19 @@ local function forward(net, x)
     local p, sum = {}, 0
     for o = 1, OUT do p[o] = math.exp(logits[o] - top); sum = sum + p[o] end
     for o = 1, OUT do p[o] = p[o] / sum end
-    return p, hidden
+    local value = net.vb or 0
+    for h = 1, HID do value = value + (net.v and net.v[h] or 0) * hidden[h] end
+    return p, hidden, value
 end
 
--- One step of REINFORCE: the log-probability of the chosen trade, up by the advantage
-local function learn(net, x, action, advantage)
-    local p, hidden = forward(net, x)
+-- One step of actor-critic: the critic says what such a day usually brings; the chosen trade's
+-- log-probability goes up by how much better the day was (the advantage), and the critic moves toward the
+-- reward. (REINFORCE with a learnt, situation-dependent baseline)
+local function learn(net, x, action, reward)
+    local p, hidden, value = forward(net, x)
+    local advantage = reward - value
+    for h = 1, HID do net.v[h] = net.v[h] + VALUE_RATE * advantage * hidden[h] end
+    net.vb = net.vb + VALUE_RATE * advantage
     local clip = math.max(-2, math.min(2, advantage))
     -- The policy gradient, plus the gradient of the entropy (how spread the wants are)
     local entropy = 0
@@ -157,7 +205,23 @@ local function features(st, trade, team)
     return x
 end
 
-local WEIGHTS = { built = 1, collected = 1, harvested = 1, killed = 3, bred = 5, given = 0.5, stored = 0.05 }
+-- What a bot does for itself, and what it does for the others (cooperation: building the team's project,
+-- handing over food and items, coming when called to a fight and killing there, picking up a fallen
+-- teammate's things). Each its own part of the reward
+local WEIGHTS = { collected = 1, harvested = 1, killed = 3, bred = 5, stored = 0.05 }
+local COOP_WEIGHTS = { built = 1, given = 1, answered = 3, assisted = 5, salvaged = 2 }
+
+local function counted(now, before, weights)
+    local score = 0
+    local stats, old = now.stats or {}, (before and before.stats) or {}
+    for what, w in pairs(weights) do
+        local a, b = tonumber(stats[what]) or 0, tonumber(old[what]) or 0
+        score = score + w * (a >= b and a - b or a)
+    end
+    return score
+end
+
+local function coop_score(now, before) return counted(now, before, COOP_WEIGHTS) end
 
 -- The bot's own score for the day: what its counters grew by (a counter that went down was reset by a
 -- restart of its process: then all of it is new)
@@ -181,7 +245,10 @@ local state = restore() or {
     day = 0,                 -- Minecraft days seen
     last_time = nil,         -- the time of day at the last look, to see a new day start
     last_day_at = os.time(),
-    net = new_network(),
+    net = new_network(),     -- the champion: the best network of the last generation (shared with netlink)
+    nets = {},               -- bot -> its own network
+    fitness = {},            -- bot -> { sum of its rewards, days } in this generation
+    generation = 0,
     baseline = 0,            -- running average of the rewards
     own_scale = 10,          -- running average size of the own and team scores, to keep the rewards near 1
     team_scale = 100,
@@ -214,6 +281,33 @@ local function castle_stage()
     return type(st) == "table" and (st.stage_number or 0) or 0
 end
 
+-- Each bot's own network: a mutated copy of the champion the first time
+local function net_of(name)
+    state.nets = state.nets or {}
+    if not state.nets[name] then state.nets[name] = mutated(state.net) end
+    return state.nets[name]
+end
+
+-- The end of a generation: the bot with the best average reward wins; its network becomes the champion
+-- and every other bot continues from a slightly mutated copy of it
+local function evolve()
+    local best, best_fit, ranking = nil, -math.huge, {}
+    for name, f in pairs(state.fitness or {}) do
+        local avg = f[2] > 0 and f[1] / f[2] or -math.huge
+        ranking[#ranking + 1] = { bot = name, fitness = avg }
+        if state.nets[name] and avg > best_fit then best, best_fit = name, avg end
+    end
+    state.fitness = {}
+    if not best then return end
+    table.sort(ranking, function(a, b) return a.fitness > b.fitness end)
+    state.net = copy_net(state.nets[best])
+    for name in pairs(state.nets) do
+        if name ~= best then state.nets[name] = mutated(state.net) end
+    end
+    state.generation = (state.generation or 0) + 1
+    state.last_generation = { generation = state.generation, day = state.day, winner = best, fitness = best_fit, ranking = ranking }
+end
+
 -- Which bot does what today: each draws from its wants, the most decided first, three to a trade
 -- (the leader is a builder, the berry picker a farmer)
 local function assign(list, team)
@@ -223,7 +317,7 @@ local function assign(list, team)
     local wants = {}
     for _, st in ipairs(list) do
         local x = features(st, state.trades[st.name] or 5, team)
-        local p = forward(state.net, x)
+        local p = forward(net_of(st.name), x)
         -- Drawn at random by the wants: what is not tried is never learnt
         local r, pick = math.random(), OUT
         for o = 1, OUT do
@@ -267,10 +361,11 @@ end
 -- ---------------------------------------------------------------- the vote
 local function vote(list)
     local days = state.history
-    local own_total, led, team_all = {}, {}, {}
+    local own_total, coop_total, led, team_all = {}, {}, {}, {}
     for _, d in ipairs(days) do
         team_all[#team_all + 1] = d.team
         for name, s in pairs(d.own or {}) do own_total[name] = (own_total[name] or 0) + s end
+        for name, s in pairs(d.coop or {}) do coop_total[name] = (coop_total[name] or 0) + s end
         if d.leader then
             led[d.leader] = led[d.leader] or {}
             led[d.leader][#led[d.leader] + 1] = d.team
@@ -280,12 +375,14 @@ local function vote(list)
     local function spread(t) local m, s = mean(t), 0 for _, v in ipairs(t) do s = s + (v - m) ^ 2 end return math.sqrt(s / math.max(1, #t)) + 1e-6 end
     local names = {}
     for _, st in ipairs(list) do names[#names + 1] = st.name end
-    local owns, leads = {}, {}
+    local owns, coops, leads = {}, {}, {}
     for _, n in ipairs(names) do
         owns[#owns + 1] = own_total[n] or 0
+        coops[#coops + 1] = coop_total[n] or 0
         leads[#leads + 1] = led[n] and mean(led[n]) or mean(team_all)
     end
     local m_own, s_own, m_lead, s_lead = mean(owns), spread(owns), mean(leads), spread(leads)
+    local m_coop, s_coop = mean(coops), spread(coops)
     -- Did the team do better under the current leader than before it? A bonus to keep it
     local half = math.floor(#days / 2)
     local first, second = {}, {}
@@ -295,7 +392,8 @@ local function vote(list)
     for _, voter in ipairs(names) do
         local best, best_score = nil, -math.huge
         for i, c in ipairs(names) do
-            local score = 0.6 * (owns[i] - m_own) / s_own + 0.4 * (leads[i] - m_lead) / s_lead
+            -- Its own work, how much it helped the others, and how the team did when it led
+            local score = 0.35 * (owns[i] - m_own) / s_own + 0.35 * (coops[i] - m_coop) / s_coop + 0.3 * (leads[i] - m_lead) / s_lead
             if c == state.leader and improving then score = score + 0.5 end
             -- Each one's own judgement: no two voters see it quite the same
             score = score + (math.random() - 0.5) * 0.6
@@ -323,39 +421,52 @@ local function end_of_day()
     local stage = castle_stage()
     local castle_delta = state.castle_before and math.max(0, stage - state.castle_before) or 0
     -- Scores: each bot's, and the team's
-    local own, team_sum, fed = {}, 0, 0
+    local own, coop, team_sum, coop_sum, fed = {}, {}, 0, 0, 0
     for _, st in ipairs(list) do
         own[st.name] = own_score(st, state.before[st.name])
+        coop[st.name] = coop_score(st, state.before[st.name])
         team_sum = team_sum + own[st.name]
+        coop_sum = coop_sum + coop[st.name]
         fed = fed + (st.food or 0) / 20
     end
-    local team = team_sum + 50 * castle_delta + 20 * fed / #list
-    state.history[#state.history + 1] = { leader = state.leader, team = team, own = own }
+    local team = team_sum + coop_sum + 50 * castle_delta + 20 * fed / #list
+    state.history[#state.history + 1] = { leader = state.leader, team = team, own = own, coop = coop }
     while #state.history > VOTE_EVERY do table.remove(state.history, 1) end
     -- Learning: the trades of today, judged by half the bot's own score and half the team's
     state.own_scale = 0.9 * state.own_scale + 0.1 * math.max(1, team_sum / #list)
+    state.coop_scale = 0.9 * (state.coop_scale or 5) + 0.1 * math.max(1, coop_sum / #list)
     state.team_scale = 0.9 * state.team_scale + 0.1 * math.max(1, math.abs(team))
     local rewards, sum, n = {}, 0, 0
     for _, st in ipairs(list) do
         if state.inputs[st.name] and state.trades[st.name] then
-            rewards[st.name] = 0.5 * own[st.name] / state.own_scale + 0.5 * team / state.team_scale
+            -- 40% its own work, 30% what it did for the others, 30% how the whole team did
+            rewards[st.name] = 0.4 * own[st.name] / state.own_scale + 0.3 * coop[st.name] / state.coop_scale + 0.3 * team / state.team_scale
             sum, n = sum + rewards[st.name], n + 1
         end
     end
     -- Each bot's choice is judged against the day's average (the team half is the same for everyone: it
     -- moves the baseline, kept for the record, and how the whole day compares with the usual)
     local mean = n > 0 and sum / n or 0
+    -- The network as it was this morning: kept (the last 3 days) to roll back to
+    state.checkpoints = state.checkpoints or {}
+    table.insert(state.checkpoints, 1, { day = state.day, net = copy_net(state.net) })
+    while #state.checkpoints > 3 do table.remove(state.checkpoints) end
     for name, r in pairs(rewards) do
         if (state.drawn or {})[name] ~= false then
-            learn(state.net, state.inputs[name], state.trades[name], (r - mean) + 0.25 * (mean - state.baseline))
+            learn(net_of(name), state.inputs[name], state.trades[name], r)
             state.samples = (state.samples or 0) + 1
         end
+        state.fitness = state.fitness or {}
+        local f = state.fitness[name] or { 0, 0 }
+        state.fitness[name] = { f[1] + r, f[2] + 1 }
     end
     state.baseline = 0.9 * state.baseline + 0.1 * mean
     state.last_rewards = rewards
     state.last_team = team
+    state.last_coop = coop
     -- The new day: figures to compare with tomorrow, then the trades
     state.day = state.day + 1
+    if state.day % GENERATION_DAYS == 0 then evolve() end
     for _, st in ipairs(list) do state.before[st.name] = snapshot(st) end
     state.castle_before = stage
     if state.day % VOTE_EVERY == 0 then vote(list) end
@@ -370,6 +481,11 @@ end
 -- if the clock gives nothing for 25 minutes (20 is a day), a day anyway
 local busy = false
 local loaded_at = os.time()
+-- A network saved before the critic existed gets one (zero: it learns from the next day on)
+if not state.net.v then
+    state.net.v, state.net.vb = {}, 0
+    for h = 1, HID do state.net.v[h] = 0 end
+end
 bot.every(30, function()
     if not state.enabled or busy then return end
     busy = true
@@ -404,19 +520,48 @@ local function flatten(net)
     local w = {}
     for h = 1, HID do for i = 1, IN do w[#w + 1] = net.w1[h][i] end; w[#w + 1] = net.b1[h] end
     for o = 1, OUT do for h = 1, HID do w[#w + 1] = net.w2[o][h] end; w[#w + 1] = net.b2[o] end
+    for h = 1, HID do w[#w + 1] = net.v[h] end
+    w[#w + 1] = net.vb
     return w
 end
 
 -- What another program's bots learnt: a step toward their network, bigger the more lessons it comes from
 -- (a peer with as many as ours moves us a quarter of the way; it moves toward us the same way)
-local function merge(w, samples)
+local function merge(w, samples, origin, arch)
     local mine = state.samples or 0
-    if type(w) ~= "table" or #w ~= #flatten(state.net) or (samples or 0) <= 0 then return nil end
+    if arch ~= nil and arch ~= ARCH then return nil, "other_architecture" end
+    if type(w) ~= "table" or #w ~= #flatten(state.net) then return nil, "other_shape" end
+    if (samples or 0) <= 0 then return nil, "no_lessons" end
+    -- Every number a real one: a NaN or an infinity would spread through the whole network
+    for _, v in ipairs(w) do
+        if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge or math.abs(v) > 1e6 then return nil, "not_finite" end
+    end
+    -- The same lessons twice from the same program are merged once
+    state.merged_from = state.merged_from or {}
+    if origin and (state.merged_from[origin] or -1) >= samples then return nil, "already_merged" end
+    if origin then state.merged_from[origin] = samples end
+    -- The champion moved toward the peer's network becomes a challenger: the network of the bot doing worst in
+    -- this generation. If it does well it wins a generation and spreads; if not, it is replaced like any other
     local mix = 0.5 * samples / (mine + samples)
-    local k = 0
+    local net, k = copy_net(state.net), 0
     local function step(old) k = k + 1; return old + mix * ((tonumber(w[k]) or old) - old) end
-    for h = 1, HID do for i = 1, IN do state.net.w1[h][i] = step(state.net.w1[h][i]) end; state.net.b1[h] = step(state.net.b1[h]) end
-    for o = 1, OUT do for h = 1, HID do state.net.w2[o][h] = step(state.net.w2[o][h]) end; state.net.b2[o] = step(state.net.b2[o]) end
+    for h = 1, HID do for i = 1, IN do net.w1[h][i] = step(net.w1[h][i]) end; net.b1[h] = step(net.b1[h]) end
+    for o = 1, OUT do for h = 1, HID do net.w2[o][h] = step(net.w2[o][h]) end; net.b2[o] = step(net.b2[o]) end
+    for h = 1, HID do net.v[h] = step(net.v[h]) end
+    net.vb = step(net.vb)
+    local worst, worst_fit = nil, math.huge
+    for name in pairs(state.nets or {}) do
+        local f = (state.fitness or {})[name]
+        local avg = f and f[2] > 0 and f[1] / f[2] or 0
+        if avg < worst_fit then worst, worst_fit = name, avg end
+    end
+    if worst then
+        state.nets[worst] = net
+        state.fitness[worst] = nil
+        state.challenger = { bot = worst, origin = origin, day = state.day }
+    else
+        state.net = net
+    end
     state.merged = (state.merged or 0) + 1
     save(state)
     return mix
@@ -424,15 +569,25 @@ end
 
 bot.tool{
     name = "brain",
-    description = "The bots' brain: a small neural network (17 inputs about the bot and the team, 10 hidden, 5 outputs) shared by all bots picks each bot's trade every Minecraft day (hunter, farmer, breeder, miner, builder; groups of three), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
-    params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object" },
+    description = "The bots' brain: a small neural network (17 inputs about the bot and the team, 10 hidden, 5 outputs) of its own (every 5 days the best-scoring bot's is copied, slightly mutated, to all the others) picks each bot's trade every Minecraft day (hunter, farmer, breeder, miner, builder; groups of three), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
+    params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in
-        if args.export then return { samples = state.samples or 0, w = flatten(state.net) } end
+        if args.export then return { samples = state.samples or 0, w = flatten(state.net), arch = ARCH } end
         if type(args.merge) == "table" then
-            local mix = merge(args.merge.w, args.merge.samples)
-            if not mix then error("not a network of the same shape, or no lessons in it") end
+            local mix, why = merge(args.merge.w, args.merge.samples, args.merge.origin, args.merge.arch)
+            if not mix then error("rejected:" .. tostring(why)) end
             return { mixed = mix, merged_so_far = state.merged }
+        end
+        -- Back to the network as it was n mornings ago (1 to 3)
+        if args.rollback then
+            local cp = (state.checkpoints or {})[math.floor(args.rollback)]
+            if not cp then error("no checkpoint that far back (" .. #(state.checkpoints or {}) .. " kept)") end
+            state.net = copy_net(cp.net)
+            for name in pairs(state.nets or {}) do state.nets[name] = copy_net(cp.net) end
+            state.fitness = {}
+            save(state)
+            return "back to the network of day " .. cp.day
         end
         if args.stop then state.enabled = false; save(state); return "the brain rests: the groups stay as they are" end
         if args.start then state.enabled = true; save(state); return "the brain is working" end
@@ -448,13 +603,17 @@ bot.tool{
         local list = statuses()
         for _, st in ipairs(list) do if (st.food or 20) <= 8 then hungry = hungry + 1 end end
         for _, st in ipairs(list) do
-            local p = forward(state.net, features(st, state.trades[st.name] or 5, { hungry = hungry / math.max(1, #list), castle = 0 }))
+            local p = forward(net_of(st.name), features(st, state.trades[st.name] or 5, { hungry = hungry / math.max(1, #list), castle = 0 }))
             local wants = {}
             for o = 1, OUT do wants[TRADES[o]] = math.floor(p[o] * 100 + 0.5) end
             bots[st.name] = { trade = TRADES[state.trades[st.name] or 5], wants_percent = wants,
-                last_reward = state.last_rewards and state.last_rewards[st.name] }
+                last_reward = state.last_rewards and state.last_rewards[st.name],
+                last_cooperation = state.last_coop and state.last_coop[st.name],
+                fitness = (function(f) return f and f[2] > 0 and f[1] / f[2] or nil end)((state.fitness or {})[st.name]) }
         end
-        return { enabled = state.enabled, day = state.day, lessons = state.samples or 0, networks_merged = state.merged or 0, next_vote_in_days = VOTE_EVERY - state.day % VOTE_EVERY,
+        return { enabled = state.enabled, day = state.day, lessons = state.samples or 0, networks_merged = state.merged or 0,
+            generation = state.generation or 0, next_generation_in_days = GENERATION_DAYS - state.day % GENERATION_DAYS,
+            last_generation = state.last_generation, challenger = state.challenger, next_vote_in_days = VOTE_EVERY - state.day % VOTE_EVERY,
             leader = state.leader, last_vote = state.last_vote, team_score_last_day = state.last_team, bots = bots }
     end,
 }
