@@ -5762,11 +5762,16 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             }
                         }
                         // Hurt, or with nothing to fight with: it stays out of it
-                        // (a pillager: everyone who can still stand a few arrows, 8 health)
+                        // (a pillager: everyone who can still stand a few arrows, 8 health; a builder answers only
+                        // that call, the others took it away from the castle all the time)
                         float fit = 12.0f;
                         {
                             std::lock_guard<std::mutex> lock(c.team_mutex);
                             fit = c.assist_type == "pillager" ? 8.0f : 12.0f;
+                            if (c.team.building && c.assist_type != "pillager")
+                            {
+                                return Status::Failure;
+                            }
                         }
                         return c.GetLocalPlayer()->GetHealth() >= fit && (!HeldTool(c, "sword").empty() || !HeldTool(c, "axe").empty()) ? Status::Success : Status::Failure;
                     })
@@ -6578,6 +6583,7 @@ static void Watchdog(McpBot& bot)
     {
         std::lock_guard<std::mutex> team_lock(bot.team_mutex);
         if (bot.assist_count > 0 && now < bot.assist_until && !bot.assist_interrupted &&
+            (!bot.team.building || bot.assist_type == "pillager") &&
             bot.GetLocalPlayer()->GetHealth() >= (bot.assist_type == "pillager" ? 8.0f : 12.0f))
         {
             bot.assist_interrupted = true;
