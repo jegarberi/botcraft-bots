@@ -903,7 +903,13 @@ static sqlite3* SharedDb()
                     "CREATE TABLE IF NOT EXISTS chests (item TEXT PRIMARY KEY, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS mines (x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, resources TEXT NOT NULL);"
                     // Jobs the main program gives (feeders): given again after a restart
-                    "CREATE TABLE IF NOT EXISTS roles (bot TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY (bot, role));",
+                    "CREATE TABLE IF NOT EXISTS roles (bot TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY (bot, role));"
+                    // What each bot reports to the others (see ReportFinds): ores, logs, crops, berry bushes and
+                    // farm animals, one place per kind and 16-block cell. Recall reads it with the bot's own memory
+                    "CREATE TABLE IF NOT EXISTS finds (kind TEXT NOT NULL, dimension TEXT NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL,"
+                    "  cz INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
+                    "  PRIMARY KEY (kind, dimension, cx, cy, cz));"
+                    "CREATE INDEX IF NOT EXISTS finds_kind ON finds (kind);",
                     nullptr, nullptr, nullptr) != SQLITE_OK)
             {
                 LOG_ERROR("Can't open the shared database: " << (db ? sqlite3_errmsg(db) : "out of memory"));
@@ -954,7 +960,7 @@ static bool GetOwn(const std::string& what, Position& p)
 static bool IsMemorable(const Blockstate& b)
 {
     const std::string& name = b.GetName();
-    for (const char* suffix : { "_ore", "_log", "_bed", ":crafting_table", ":furnace", ":chest", ":barrel", ":wheat", ":carrots", ":potatoes", ":beetroots" })
+    for (const char* suffix : { "_ore", "_log", "_bed", ":crafting_table", ":furnace", ":chest", ":barrel", ":wheat", ":carrots", ":potatoes", ":beetroots", ":sweet_berry_bush" })
     {
         const size_t size = std::char_traits<char>::length(suffix);
         if (name.size() >= size && name.compare(name.size() - size, size, suffix) == 0)
@@ -1178,6 +1184,9 @@ static bool IsPenned(BehaviourClient& c, const Vector3<double>& animal);
 /// @brief Replace what is remembered in the 24 blocks around the bot with what is there now (monsters
 /// included), tell the team about the first new find of something it is after, and call the bots around
 /// to a fight when monsters gather
+static void ReportFinds(const std::string& by, const std::string& dimension, const Position& center, const int radius,
+    const std::vector<std::pair<std::string, Position>>& finds);
+
 static void Remember(McpBot& c)
 {
     constexpr int radius = 24;
@@ -1361,6 +1370,70 @@ static void Remember(McpBot& c)
     // Mobs wander off and despawn: a sighting older than half an hour is forgotten
     sqlite3_exec(memory_db, "DELETE FROM places WHERE kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800", nullptr, nullptr, nullptr);
     sqlite3_exec(memory_db, "COMMIT", nullptr, nullptr, nullptr);
+
+    // And the finds worth sharing, for the other bots: everything but its own furniture (beds, tables, furnaces,
+    // chests, barrels: the chests the bots share have their own table) and the monsters (called out in the chat)
+    std::vector<std::pair<std::string, Position>> finds;
+    for (const Position& p : found)
+    {
+        const Blockstate* block = world->GetBlock(p);
+        const std::string kind = block == nullptr ? "" : block->GetName().substr(block->GetName().find(':') + 1);
+        const auto ends = [&](const std::string& end) { return kind.size() >= end.size() && kind.compare(kind.size() - end.size(), end.size(), end) == 0; };
+        if (!kind.empty() && !ends("_bed") && kind != "crafting_table" && kind != "furnace" && kind != "chest" && kind != "barrel")
+        {
+            finds.push_back({ kind, p });
+        }
+    }
+    for (size_t i = monsters.size(); i < seen_alive.size(); ++i)
+    {
+        finds.push_back({ "mob:" + seen_alive[i].name, BlockPos(seen_alive[i].pos) });
+    }
+    ReportFinds(c.GetNetworkManager()->GetMyName(), dimension, center, radius, finds);
+}
+
+/// @brief Tell the other bots what this scan of the box around center found: what was reported in the box before
+/// and is not there any more is taken back, the rest is written, one place per kind and 16-block cell
+static void ReportFinds(const std::string& by, const std::string& dimension, const Position& center, const int radius,
+    const std::vector<std::pair<std::string, Position>>& finds)
+{
+    sqlite3* db = SharedDb();
+    if (db == nullptr)
+    {
+        return;
+    }
+    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+    sqlite3_stmt* statement = nullptr;
+    sqlite3_prepare_v2(db, "DELETE FROM finds WHERE dimension = ?1 AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7"
+        " OR (kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800)", -1, &statement, nullptr);
+    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement, 2, center.x - radius);
+    sqlite3_bind_int(statement, 3, center.x + radius);
+    sqlite3_bind_int(statement, 4, center.y - radius);
+    sqlite3_bind_int(statement, 5, center.y + radius);
+    sqlite3_bind_int(statement, 6, center.z - radius);
+    sqlite3_bind_int(statement, 7, center.z + radius);
+    sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO finds (kind, dimension, cx, cy, cz, x, y, z, seen, by)"
+        " VALUES (?1, ?2, ?3 >> 4, ?4 >> 4, ?5 >> 4, ?3, ?4, ?5, strftime('%s', 'now'), ?6)", -1, &statement, nullptr);
+    std::set<std::tuple<std::string, int, int, int>> cells;
+    for (const auto& [kind, p] : finds)
+    {
+        if (!cells.insert({ kind, p.x >> 4, p.y >> 4, p.z >> 4 }).second)
+        {
+            continue;
+        }
+        sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 3, p.x);
+        sqlite3_bind_int(statement, 4, p.y);
+        sqlite3_bind_int(statement, 5, p.z);
+        sqlite3_bind_text(statement, 6, by.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(statement);
+        sqlite3_reset(statement);
+    }
+    sqlite3_finalize(statement);
+    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
 }
 
 /// @brief Remembered places whose kind ends with this ("iron_ore" also finds deepslate_iron_ore, "_log" any log,
@@ -1392,6 +1465,31 @@ static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, 
             Position(sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_int(statement, 3)) });
     }
     sqlite3_finalize(statement);
+    // And what the other bots reported (ReportFinds), the nearest of both
+    sqlite3* shared = SharedDb();
+    if (shared != nullptr && sqlite3_prepare_v2(shared,
+        "SELECT kind, x, y, z FROM finds WHERE dimension = ?1 AND kind LIKE '%' || ?2"
+        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT ?6", -1, &statement, nullptr) == SQLITE_OK)
+    {
+        sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, kind.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
+        sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
+        sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
+        sqlite3_bind_int(statement, 6, max_results);
+        while (sqlite3_step(statement) == SQLITE_ROW)
+        {
+            const Position p(sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_int(statement, 3));
+            if (std::none_of(places.begin(), places.end(), [&](const auto& known) { return known.second == p; }))
+            {
+                places.push_back({ reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)), p });
+            }
+        }
+        sqlite3_finalize(statement);
+        const auto distance = [&](const Position& p) { return (p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) + (p.z - me.z) * (p.z - me.z); };
+        std::sort(places.begin(), places.end(), [&](const auto& a, const auto& b) { return distance(a.second) < distance(b.second); });
+        places.resize(std::min(places.size(), static_cast<size_t>(max_results)));
+    }
     return places;
 }
 
@@ -1409,6 +1507,15 @@ static void Forget(const Position& p)
     sqlite3_bind_int(statement, 3, p.z);
     sqlite3_step(statement);
     sqlite3_finalize(statement);
+    // Gone for the other bots too
+    if (sqlite3* shared = SharedDb(); shared != nullptr && sqlite3_prepare_v2(shared, "DELETE FROM finds WHERE x = ?1 AND y = ?2 AND z = ?3", -1, &statement, nullptr) == SQLITE_OK)
+    {
+        sqlite3_bind_int(statement, 1, p.x);
+        sqlite3_bind_int(statement, 2, p.y);
+        sqlite3_bind_int(statement, 3, p.z);
+        sqlite3_step(statement);
+        sqlite3_finalize(statement);
+    }
 }
 
 /// @brief How many places of each kind are remembered, most numerous first
@@ -6325,7 +6432,7 @@ static const char* tools_json = R"JSON([
 {"name":"make_farm","description":"Start a crop plot: till the dirt and grass within radius (max 4, the reach of water) of the nearest water that has soil beside it, and plant the seeds the bot carries (wheat_seeds, carrot, potato, beetroot_seeds). Needs a hoe (craft_item wooden_hoe). One water block in the middle keeps a 9x9 plot hydrated. The farm tool harvests and replants later.","inputSchema":{"type":"object","properties":{"radius":{"type":"number","default":4}}}},
 {"name":"locate","description":"Ask the server where the nearest biome, structure or point of interest is, with its /locate command (the bot must be a server operator). kind: biome, structure or poi. name: its id, e.g. forest, plains, village_plains, mineshaft, or a #tag like #minecraft:village. go=true also walks there. Good for going straight to resources: forest for wood, village for food and beds, mineshaft for ores and rails.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["biome","structure","poi"]},"name":{"type":"string"},"go":{"type":"boolean","default":false}},"required":["kind","name"]}},
 {"name":"travel","description":"Walk a long distance to x z (any height), in hops, for places too far for goto. Fails if the way is blocked three hops in a row.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"z":{"type":"number"}},"required":["x","z"]}},
-{"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds and crops. kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
+{"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds, crops, berry bushes and animals (mob:cow), with what the other bots reported (ores, logs, crops, berry bushes, animals). kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
 {"name":"schematic","description":"Materials and building plan of a structure from createmod.com. url: the link of a schematic page (https://createmod.com/schematics/<name>): returns its title, size, required mods and material list, and which materials this game does not have (blocks of other mods). The site gives the block-by-block file to players only, so the user downloads the .nbt from that page into bot/schematics/; then file=<name>.nbt returns the materials and the number of parts, and with x y z (the corner with the lowest coordinates) the team builds part `part` (default 1, 4000 blocks each, bottom up) there, gathering and crafting what it needs; blocks of other mods are left out.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"file":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"part":{"type":"number"}}}},
 {"name":"give","description":"The bot walks up to another player (a bot) and drops items at its feet, which it picks up. to: the player's name; item: an item id, food (anything edible) or wood (logs and planks), default food; count (default 16); x y z: where the player is, if out of sight.","inputSchema":{"type":"object","properties":{"to":{"type":"string"},"item":{"type":"string"},"count":{"type":"number"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["to"]}},
 {"name":"disconnect_all","description":"Every bot stores everything in the chests and disconnects, all at once. The program keeps running: connect brings bots back. None rejoins by itself.","inputSchema":{"type":"object","properties":{}}},

@@ -1,7 +1,7 @@
 -- A berry picker: one bot, out of the team, whose whole job is a patch of sweet berry bushes. Every minute it
 -- picks the ripe bushes (a right-click: the bush stays and grows again) and plants berries on the grass around
 -- them, so the patch spreads. The berries are food the bots eat, and that the feeders hand out.
---   berries { bot = "Bot15" }            the patch nearest to it (seen by itself, or by any other bot)
+--   berries { bot = "Bot15" }            the patch nearest to it (in sight of any bot, else reported by one)
 --   berries { bot = "Bot15", x =, z = }  a given place
 --   berries { stop = true }              back with the others
 --   berries {}                           what it is doing
@@ -130,7 +130,12 @@ bot.tool{
                     if not best or d < best.d then best = { x = bush.x, y = bush.y, z = bush.z, d = d } end
                 end
             end
-            if not best then error("no sweet berry bush in sight of any bot: give x and z") end
+            -- Else the nearest one it remembers or another bot reported
+            if not best then
+                local known = call("recall", { bot = who, kind = "sweet_berry_bush", max = 1 }) or {}
+                if known[1] then best = { x = known[1].x, y = known[1].y, z = known[1].z } end
+            end
+            if not best then error("no sweet berry bush in sight of any bot, or reported: give x and z") end
             patch = best
         end
         -- Out of the castle work: a team of one
