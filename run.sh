@@ -6,6 +6,9 @@
 #                                 attaches the terminal panel, bin/bot_tui: q leaves it (the bots keep running,
 #                                 bot/bin/bot_tui attaches again), Q stops the program. Logs go to bot/run.log
 #                                 (python3 bot/tui.py URL attaches over the web port instead)
+#   ./run.sh --headless --tui     the same, but the program lives with this panel: closing it (q, Ctrl-C) makes the
+#                                 bots store their items and the program stop. The flags go in any order
+#   ./run.sh --headless           in one terminal and ./run.sh --tui (or bot/bin/bot_tui) in another works too
 #   ./run.sh --bots 3 --delay 10  any bot_mcp options replace the defaults (see ./run.sh --help)
 # Build output goes to stderr, so this script can also be used as the MCP server command.
 set -euo pipefail
@@ -24,9 +27,18 @@ cmake --build build >&2
 [ -d data/data/minecraft/recipe ] || unzip -o -q ../Botcraft/Assets/26.3/client.jar 'data/minecraft/recipe/*' 'data/minecraft/tags/item/*' -d data >&2
 
 mode=${1:-}
+# --headless and --tui, anywhere and together: both give "--headless --tui"
+if [[ " $* " == *" --headless "* || " $* " == *" --tui "* ]]; then
+    flags=""
+    args=()
+    for a in "$@"; do
+        case "$a" in --headless|--tui) flags+=" $a" ;; *) args+=("$a") ;; esac
+    done
+    [[ "$flags" == *--headless* && "$flags" == *--tui* ]] && mode=both || mode=${flags# }
+    set -- ${args[@]+"${args[@]}"}
+fi
 case "$mode" in
-    --headless|--tui)
-        shift
+    --headless|--tui|both)
         # The panel's port: the one given, else 8090
         port=8090
         args=("$@")
@@ -36,6 +48,18 @@ case "$mode" in
         if [ "$mode" = --headless ]; then
             echo "Control panel: http://127.0.0.1:$port  (Ctrl-C to store items and quit)" >&2
             exec bin/bot_mcp --headless "$@"
+        fi
+        if [ "$mode" = both ]; then
+            # The program with this panel's lifetime: started here unless one already runs, stopped when the panel closes
+            if pgrep -x bot_mcp >/dev/null; then
+                echo "A program is already running: attaching to it (it keeps running after the panel)" >&2
+                exec bin/bot_tui
+            fi
+            bin/bot_mcp --headless "$@" >>run.log 2>&1 </dev/null &
+            program=$!
+            trap 'kill -TERM $program 2>/dev/null; echo "The bots store their items and leave (bot/run.log)..." >&2; wait $program' EXIT
+            bin/bot_tui || true
+            exit 0
         fi
         # The panel is its own program, talking to the bots and the program through bot/run/*.sock;
         # the program runs in its own session, so closing the panel or its terminal leaves it running
