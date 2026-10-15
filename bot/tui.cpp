@@ -116,10 +116,10 @@ namespace
         return at;
     }
 
-    /// @brief text cut or padded with spaces to exactly cols columns
+    /// @brief text cut or padded with spaces to exactly cols columns, the last one always a space
     std::string Column(const std::string& text, const int cols)
     {
-        std::string out = text.substr(0, Fit(text, cols));
+        std::string out = text.substr(0, Fit(text, cols - 1));
         int used = 0;
         std::mbstate_t state{};
         for (size_t at = 0; at < out.size();)
@@ -290,7 +290,28 @@ int main()
                 {
                     found.push_back(Field(b, "name"));
                 }
+                return found;
             }
+            // No program socket (a program from before it had one): the bot sockets that still take a connection
+            std::error_code error;
+            for (const auto& entry : std::filesystem::directory_iterator("../run", error))
+            {
+                const std::string name = entry.path().stem().string();
+                if (entry.path().extension() != ".sock" || name == program)
+                {
+                    continue;
+                }
+                const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+                sockaddr_un address{};
+                address.sun_family = AF_UNIX;
+                std::strncpy(address.sun_path, entry.path().c_str(), sizeof(address.sun_path) - 1);
+                if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0)
+                {
+                    found.push_back(name);
+                }
+                close(fd);
+            }
+            std::sort(found.begin(), found.end());
             return found;
         };
     const auto call_program = [](const std::string& tool, const Value& arguments)
@@ -455,7 +476,7 @@ int main()
             const std::string flags = std::string(Flag(b, "autopilot") ? "🚀" : "  ") + (Flag(b, "gear") ? "🔧" : "  ");
             const bool answered = b.is_object() && b.contains("state");
             line(2 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) +
-                Column(Field(b, "health"), 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
+                Column(b.is_object() && b.contains("health") && b["health"].is_number() ? std::to_string(static_cast<int>(std::round(b["health"].get_number<double>()))) : "", 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
         }
         if (!network.empty())
         {
