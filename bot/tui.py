@@ -4,7 +4,7 @@
     python3 tui.py [http://127.0.0.1:8090]
 
 Up/Down pick a bot. a autopilot on/off, e gear-up on/off, G gather, m make, s store in chests, f farm,
-l find a structure and go, d store all and disconnect, c connect a bot, t team order, x disband the team,
+l find a structure and go, d store all and disconnect, D every bot stores all and disconnects, c connect a bot, t team order, x disband the team,
 : any tool call (name {json args}, the picked bot is added), q quit (the bots keep running)."""
 import curses, json, sys, textwrap, threading, time, urllib.request
 
@@ -83,7 +83,7 @@ def main(screen):
         h, w = screen.getmaxyx()
         screen.erase()
         line = lambda y, text, attr=0: y < h - 1 and screen.addnstr(y, 0, text, w - 1, attr)
-        line(0, "botcraft  %s  %d bots   ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  l find  d disconnect  c connect  t team  x disband  : tool  q quit"
+        line(0, "botcraft  %s  %d bots   ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  l find  d disconnect  D all  c connect  t team  x disband  : tool  q quit"
              % (URL, len(bots)), curses.A_REVERSE)
         line(1, "%-12s %-22s %6s %4s %-15s %s" % ("bot", "state", "health", "food", "position", "doing"), curses.A_BOLD)
         top = 2
@@ -133,6 +133,9 @@ def main(screen):
                     args = {"objective": order[0], "block": what, "type": what, "item": what, "count": int(order[2]) if len(order) > 2 else 16}
                     args.update(zip(["x1", "y1", "z1", "x2", "y2", "z2"], map(int, order[3:9])))
                     run("team", args)
+            elif key == ord("D"):
+                if ask(screen, "every bot stores everything and disconnects? (y/n) ").lower().startswith("y"):
+                    run("disconnect_all", {})
             elif key == ord("x"):
                 run("team", {"objective": "disband"})
             elif name is None:

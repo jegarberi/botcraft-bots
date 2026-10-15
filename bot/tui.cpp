@@ -255,7 +255,7 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                 }
             };
         line(0, "botcraft  " + std::to_string(bots.size()) + " bots   up/down pick  a autopilot  e gear  G gather  m make  s store  f farm  "
-            "l find  d disconnect  c connect  t team  x disband  : tool  q quit (bots store and leave)", A_REVERSE);
+            "l find  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q quit (bots store and leave)", A_REVERSE);
         char row[512];
         std::snprintf(row, sizeof(row), "%-12s %-22s %6s %4s %-15s %s", "bot", "state", "health", "food", "position", "doing");
         line(1, row, A_BOLD);
@@ -365,6 +365,14 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                     args[corners[i]] = Number(order, 3 + i, 0);
                 }
                 run("", "team", args);
+            }
+        }
+        else if (key == 'D')
+        {
+            const std::string sure = ask("every bot stores everything and disconnects? (y/n) ");
+            if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
+            {
+                run("", "disconnect_all", args);
             }
         }
         else if (key == 'x')

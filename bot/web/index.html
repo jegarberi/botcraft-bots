@@ -53,6 +53,7 @@
     <input type="text" id="box" placeholder="x1 y1 z1 x2 y2 z2" aria-label="Box corners for build" style="width: 14em">
     <button>Team up</button>
     <button type="button" id="disband">Disband</button>
+    <button type="button" id="leave-all" title="Every bot stores everything in the chests, then disconnects">Store all &amp; disconnect every bot</button>
   </form>
   <form class="row" id="schematic">
     <label for="schematic-source">Structure from createmod.com</label>
@@ -91,6 +92,7 @@ document.getElementById("schematic").onsubmit = e => {
   call("schematic", source.startsWith("http") ? { url: source } : at ? { file: source, x, y, z } : { file: source });
 };
 document.getElementById("disband").onclick = () => call("team", { objective: "disband" });
+document.getElementById("leave-all").onclick = () => confirm("Every bot stores everything in the chests and disconnects. Go on?") && call("disconnect_all");
 document.getElementById("connect").onsubmit = e => { e.preventDefault(); call("connect", { name: document.getElementById("name").value }); };
 
 function card(bot, tree) {
