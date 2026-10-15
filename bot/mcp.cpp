@@ -2762,8 +2762,32 @@ static Status ReachBlock(BehaviourClient& c, const Position& p)
 static int CraftOne(BehaviourClient& c, const std::string& item, std::string& error);
 
 /// @brief Craft one recipe, in the inventory grid if it fits in 2x2, at the nearest crafting table otherwise
+/// @brief Anything but a shield in the off hand goes back into the inventory: the crafting windows don't
+/// show that slot, and a bot with its sticks there failed every craft while counting 12 of them
+static void ClearOffhand(BehaviourClient& c)
+{
+    std::string item;
+    short free_slot = -1;
+    for (const auto& [index, slot] : PlayerSlots(c))
+    {
+        if (index == Window::INVENTORY_OFFHAND_INDEX && !slot.IsEmptySlot())
+        {
+            item = AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName();
+        }
+        if (free_slot < 0 && index >= Window::INVENTORY_STORAGE_START && index < Window::INVENTORY_OFFHAND_INDEX && slot.IsEmptySlot())
+        {
+            free_slot = index;
+        }
+    }
+    if (!item.empty() && item != "minecraft:shield" && item != "minecraft:totem_of_undying" && free_slot >= 0)
+    {
+        MoveStack(c, Window::PLAYER_INVENTORY_INDEX, Window::INVENTORY_OFFHAND_INDEX, free_slot);
+    }
+}
+
 static Status CraftAt(BehaviourClient& c, const Grid& grid, std::string& error)
 {
+    ClearOffhand(c);
     int min_x = 3, max_x = -1, min_y = 3, max_y = -1;
     for (int y = 0; y < 3; ++y)
     {
@@ -3732,7 +3756,15 @@ static void SmeltStep(McpBot& c, const std::string& stage)
 
 static bool IsShieldHeld(BehaviourClient& c)
 {
-    return !IsSlotEmpty(c, Window::INVENTORY_OFFHAND_INDEX);
+    // A shield, not anything at all (sticks ended up there, and passed for one)
+    for (const auto& [index, slot] : PlayerSlots(c))
+    {
+        if (index == Window::INVENTORY_OFFHAND_INDEX && !slot.IsEmptySlot())
+        {
+            return AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName() == "minecraft:shield";
+        }
+    }
+    return false;
 }
 
 /// @brief One action toward a shield in the off hand
