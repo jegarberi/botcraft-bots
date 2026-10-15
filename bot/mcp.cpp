@@ -7237,8 +7237,40 @@ static std::vector<std::string> LoadRole(const std::string& role)
     return names;
 }
 
+/// @brief The bot's trade (the groups plugin's: bakers, miners...), "" if none: a "trade:..." role in the shared
+/// database, so each bot's own process reads it for its status (the panels show it)
+static std::string TradeOf(const std::string& bot)
+{
+    std::string trade;
+    sqlite3_stmt* statement = nullptr;
+    sqlite3_prepare_v2(SharedDb(), "SELECT role FROM roles WHERE bot = ?1 AND role LIKE 'trade:%'", -1, &statement, nullptr);
+    sqlite3_bind_text(statement, 1, bot.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        trade = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)) + 6;
+    }
+    sqlite3_finalize(statement);
+    return trade;
+}
+
 static Value CallTool(const std::string& name, const Value& a)
 {
+    // The groups plugin telling each bot's trade (trade "" for none)
+    if (name == "trade" && a.is_object() && a.contains("bot") && a["bot"].is_string())
+    {
+        const std::string bot = a["bot"].get_string();
+        const std::string old = TradeOf(bot);
+        if (!old.empty())
+        {
+            SaveRole(bot, "trade:" + old, false);
+        }
+        const std::string trade = Str(a, "trade");
+        if (!trade.empty())
+        {
+            SaveRole(bot, "trade:" + trade, true);
+        }
+        return trade;
+    }
     if (name == "team_member" && a.is_object() && a.contains("solo") && a["solo"].is_bool() && a.contains("bot") && a["bot"].is_string())
     {
         std::lock_guard<std::mutex> lock(bots_mutex);
@@ -8134,6 +8166,7 @@ static Value CallTool(const std::string& name, const Value& a)
         }
         // Times the bot was detected stuck (busy but not moving for 20 seconds) and broke a block beside it
         o["times_stuck"] = bot.times_stuck.load();
+        o["trade"] = TradeOf(o["name"].get_string());
         {
             std::lock_guard<std::mutex> lock(bot.stats_mutex);
             Value stats = Json::Object();

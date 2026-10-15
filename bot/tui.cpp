@@ -467,7 +467,7 @@ int main()
             };
         line(0, Column("🤖 botcraft  " + std::to_string(bots.size()) + " bots   ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
             "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  c 🔌 connect  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
-        line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
+        line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
         const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
         for (size_t i = first; i < bots.size() && i < first + rows; ++i)
@@ -475,7 +475,7 @@ int main()
             const Value& b = bots[i].second;
             const std::string flags = std::string(Flag(b, "autopilot") ? "🚀" : "  ") + (Flag(b, "gear") ? "🔧" : "  ");
             const bool answered = b.is_object() && b.contains("state");
-            line(2 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) +
+            line(2 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) + Column(Field(b, "trade"), 13) +
                 Column(b.is_object() && b.contains("health") && b["health"].is_number() ? std::to_string(static_cast<int>(std::round(b["health"].get_number<double>()))) : "", 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
         }
         if (!network.empty())

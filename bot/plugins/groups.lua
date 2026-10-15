@@ -62,8 +62,14 @@ local function solo(name)
     call("team_member", { bot = name, objective = "disband", members = { name }, leader = "", count = 1, solo = true })
 end
 
+-- Each bot's trade, for its status (the panels show it); "" for none
+local function tell(g)
+    for _, t in ipairs(TRADES) do for _, n in ipairs(g and g[t] or {}) do call("trade", { bot = n, trade = t }) end end
+end
+
 local function apply(g)
     notes = {}                  -- what they did in their old trades says nothing now
+    tell(g)
     call("feeders", { stop = true })       -- the bakers do the feeding now, by their own network
     for _, t in ipairs(TRADES) do
         if t ~= "miners" and t ~= "builders" then for _, n in ipairs(g[t]) do solo(n) end end
@@ -125,6 +131,7 @@ bot.tool{
         end
         if args.stop then
             if groups then
+                for _, k in ipairs(TRADES) do for _, n in ipairs(groups[k]) do call("trade", { bot = n, trade = "" }) end end
                 for _, k in ipairs(TRADES) do
                     for _, n in ipairs(k ~= "builders" and groups[k] or {}) do
                         call("team_member", { bot = n, objective = "disband", members = {}, leader = "", count = 1, solo = false })

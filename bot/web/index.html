@@ -113,6 +113,7 @@ function card(bot, tree) {
   place.setAttribute("list", "places"); place.setAttribute("aria-label", "Structure or biome id"); placeKind.setAttribute("aria-label", "Kind of place");
   return $("section", { className: "bot" },
     $("div", { className: "row" }, $("h2", {}, bot.name), $("span", { className: "badge state" }, bot.state),
+      bot.trade ? $("span", { className: "badge" }, bot.trade) : "",
       bot.times_stuck ? $("span", { className: "badge" }, "stuck ×" + bot.times_stuck) : "",
       bot.deaths ? $("span", { className: "badge" }, "died ×" + bot.deaths + " (last at " + bot.died_at.x + " " + bot.died_at.y + " " + bot.died_at.z + ")") : "",
       bot.team_leader ? $("span", { className: "badge" }, bot.team_leader === bot.name ? "team leader" : "follows " + bot.team_leader) : "",
