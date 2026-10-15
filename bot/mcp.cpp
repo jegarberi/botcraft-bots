@@ -3340,6 +3340,25 @@ static void Check(McpBot& c, const Status result)
 }
 
 /// @brief Mine one matching block with the best tool of this kind in hand, or explore to find some
+/// @brief Up toward the sky, a staircase: each way in turn until one gets the bot somewhere (one way can run
+/// into lava, which the tunnel stops before: always the same way, a bot stayed put for good)
+static void DigUp(McpBot& c)
+{
+    static const Position ways[] = { Position(6, 12, 0), Position(0, 12, 6), Position(-6, 12, 0), Position(0, 12, -6) };
+    const Vector3<double> start = c.GetLocalPlayer()->GetPosition();
+    for (int i = 0; i < 4; ++i)
+    {
+        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+        TunnelToward(c, feet + ways[(c.explorations + i) % 4], 24, true);
+        if (c.GetLocalPlayer()->GetPosition().SqrDist(start) > 2.0 * 2.0)
+        {
+            return;
+        }
+    }
+    // Every way blocked: start from another one next time
+    ++c.explorations;
+}
+
 static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& match, const std::string& what, const std::string& tool_kind, const std::string& stage, const std::string& remembered_kind = "")
 {
     const bool ore = EndsWith(remembered_kind, "_ore");
@@ -3350,7 +3369,7 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
         if (tool_kind == "axe" && feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
         {
             c.SetNote(stage + ": underground, needs wood: digging up to the surface");
-            TunnelToward(c, feet + Position(6, 12, 0), 24, true);
+            DigUp(c);
             return;
         }
     }
@@ -3373,7 +3392,7 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
         if (tool_kind == "axe" && feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
         {
             c.SetNote(stage + ": underground, no trees: digging up to the surface");
-            TunnelToward(c, feet + Position(6, 12, 0), 24, true);
+            DigUp(c);
             return;
         }
         if (!remembered_kind.empty() && GoToRemembered(c, remembered_kind))
