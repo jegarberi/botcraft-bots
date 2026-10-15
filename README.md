@@ -9,7 +9,7 @@ remembers what it was doing across restarts. Together they build a castle (see `
 
     ./run.sh                 # window + web panel on http://127.0.0.1:8090 (MCP at /mcp)
     ./run.sh --headless      # no window; Ctrl-C or SIGTERM: the bots store their items and leave
-    ./run.sh --tui           # headless, with a terminal panel
+    ./run.sh --tui           # headless in the background, with a terminal panel (bot/bin/bot_tui re-attaches)
     ./run.sh --bots 15 --delay 8 --autopilot --chests --bind 0.0.0.0
 
 The first run clones Botcraft at the pinned commit, applies `patches/botcraft.diff` (protocol and stability
@@ -17,7 +17,7 @@ fixes, pathfinding changes) and extracts recipes from the game jar Botcraft down
 
 ## Layout
 
-- `bot/mcp.cpp` the bots, their decision tree and the MCP tools; `bot/tui.cpp` the terminal panel
+- `bot/mcp.cpp` the bots, their decision tree and the MCP tools; `bot/tui.cpp` the terminal panel (`bin/bot_tui`, over unix sockets)
 - `bot/plugins/` Lua plugins: `castle` (the castle, roads, road builder), `groups` (hunters, farmers, breeders,
   miners, builders), `players` (orders from players in the chat), `berries`, `example`
 - `bot/web/` the web panel

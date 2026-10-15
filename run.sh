@@ -2,8 +2,10 @@
 # Build the bot (only what changed) and start it.
 #   ./run.sh                      window + control panel (http://127.0.0.1:8090) + decision tree on
 #   ./run.sh --headless [opts]    no window, no views, no stdin: a service with the control panel, stops on Ctrl-C/SIGTERM
-#   ./run.sh --tui [opts]         headless, with a terminal control panel; q stores the items and stops the bots
-#                                 (python3 bot/tui.py URL attaches to a program already running, over its web port)
+#   ./run.sh --tui [opts]         starts the program headless in the background (unless one is running) and
+#                                 attaches the terminal panel, bin/bot_tui: q leaves it (the bots keep running,
+#                                 bot/bin/bot_tui attaches again), Q stops the program. Logs go to bot/run.log
+#                                 (python3 bot/tui.py URL attaches over the web port instead)
 #   ./run.sh --bots 3 --delay 10  any bot_mcp options replace the defaults (see ./run.sh --help)
 # Build output goes to stderr, so this script can also be used as the MCP server command.
 set -euo pipefail
@@ -35,9 +37,12 @@ case "$mode" in
             echo "Control panel: http://127.0.0.1:$port  (Ctrl-C to store items and quit)" >&2
             exec bin/bot_mcp --headless "$@"
         fi
-        # The panel runs inside the program and talks to each bot through its socket (bot/run/<name>.sock)
-        echo "Logs: bot/run.log" >&2
-        exec bin/bot_mcp --headless --tui "$@"
+        # The panel is its own program, talking to the bots and the program through bot/run/*.sock;
+        # the program runs in its own session, so closing the panel or its terminal leaves it running
+        if ! pgrep -x bot_mcp >/dev/null; then
+            setsid bin/bot_mcp --headless "$@" >>run.log 2>&1 </dev/null &
+        fi
+        exec bin/bot_tui
         ;;
     "")
         set -- --gui --autopilot --chests --web 8090 --snapshot snapshot.png

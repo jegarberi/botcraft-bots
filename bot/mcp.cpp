@@ -6404,10 +6404,6 @@ static bool start_autopilot = false;
 static bool show_gui = false;
 // No window, no views, no MCP on stdin: runs as a service until SIGINT or SIGTERM
 static bool headless = false;
-// The terminal panel (tui.cpp) instead of MCP on stdin
-static bool tui = false;
-void RunTui(const std::function<std::vector<std::string>()>& names, const std::function<std::string(const std::string&, const Value&)>& call_program,
-    const std::function<void()>& quit, const std::atomic<bool>& stop);
 static volatile std::sig_atomic_t quit_signal = 0;
 // --child: this process is one of the extra bots of another bot_mcp
 static bool is_child = false;
@@ -6702,7 +6698,7 @@ static void SpawnChild(const std::string& login)
     children.push_back(child);
 }
 
-static void ServeBotSocket(const std::string& name);
+static void ServeSocket(const std::string& path, const std::string& bot);
 static Value CallTool(const std::string& name, const Value& a);
 
 static void SpawnBot(const std::string& login)
@@ -6747,7 +6743,7 @@ static void SpawnBot(const std::string& login)
         }, 10000);
     bot->ResumeDefault();
     OpenMemory(login.empty() ? bot->GetNetworkManager()->GetMyName() : login);
-    ServeBotSocket(bot->GetNetworkManager()->GetMyName());
+    ServeSocket("../run/" + bot->GetNetworkManager()->GetMyName() + ".sock", bot->GetNetworkManager()->GetMyName());
     // Back to what it was doing when it left (its memory): autopilot and gear-up, what it was gathering or
     // making, its team order (a job of its own, a hunt). A castle build is handed over again by the castle
     {
@@ -9105,12 +9101,12 @@ static void LoadPlugins(const std::string& directory)
 /// @brief Answer one MCP JSON-RPC message. False if it needs no answer (notification, garbage)
 static bool HandleRpc(const Value& request, Value& response);
 
-/// @brief Each bot process answers on its own socket, run/<name>.sock: JSON-RPC lines as on stdin, every tool
-/// call aimed at that bot. The TUI talks to the bots through them
-static void ServeBotSocket(const std::string& name)
+/// @brief JSON-RPC lines as on stdin, on a unix socket. Each bot answers on its own, run/<name>.sock, every tool
+/// call aimed at that bot; the main program on run/.program.sock (no player name has a dot), which also takes
+/// {"method":"quit"}: the bots store everything and the program exits. The TUI (bot_tui) talks through them
+static void ServeSocket(const std::string& path, const std::string& name)
 {
     std::filesystem::create_directories("../run");
-    const std::string path = "../run/" + name + ".sock";
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
     std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
@@ -9124,9 +9120,9 @@ static void ServeBotSocket(const std::string& name)
         return;
     }
     // ponytail: the threads live as long as the process; the socket file is removed by the next bot of that name
-    std::thread([server, name]()
+    std::thread([server, name, path]()
         {
-            Logger::GetInstance().RegisterThread("socket " + name);
+            Logger::GetInstance().RegisterThread("socket " + (name.empty() ? std::string("program") : name));
             while (true)
             {
                 const int fd = accept(server, nullptr, nullptr);
@@ -9138,7 +9134,7 @@ static void ServeBotSocket(const std::string& name)
                     }
                     return;
                 }
-                std::thread([fd, name]()
+                std::thread([fd, name, path]()
                     {
                         std::string pending;
                         char buffer[65536];
@@ -9154,12 +9150,20 @@ static void ServeBotSocket(const std::string& name)
                                 try
                                 {
                                     Value request = Json::Parse(line);
-                                    if (request.is_object() && request.contains("method") && request["method"].is_string() && request["method"].get_string() == "tools/call")
+                                    const std::string method = request.is_object() && request.contains("method") && request["method"].is_string() ? request["method"].get_string() : "";
+                                    if (method == "tools/call" && !name.empty())
                                     {
                                         request["params"]["arguments"]["bot"] = name;
                                     }
                                     Value response;
-                                    if (HandleRpc(request, response))
+                                    if (method == "quit" && name.empty())
+                                    {
+                                        quit_signal = 1;
+                                        response["jsonrpc"] = "2.0";
+                                        response["id"] = request.contains("id") ? request["id"] : Value();
+                                        response["result"] = Json::Object();
+                                    }
+                                    if (response.is_object() || HandleRpc(request, response))
                                     {
                                         const std::string answer = response.Dump() + "\n";
                                         send(fd, answer.data(), answer.size(), MSG_NOSIGNAL);
@@ -9167,7 +9171,7 @@ static void ServeBotSocket(const std::string& name)
                                 }
                                 catch (const std::exception& e)
                                 {
-                                    LOG_WARNING("Socket of " << name << ": " << e.what());
+                                    LOG_WARNING("Socket " << path << ": " << e.what());
                                 }
                             }
                         }
@@ -9526,9 +9530,8 @@ static void Usage()
         << "                       FILE.NAME.png for the others\n"
         << "  --bind ADDRESS       address the control panel listens on (default 127.0.0.1, 0.0.0.0 for all)\n"
         << "  --plugins DIR        directory of Lua plugins (default: plugins/ next to the sources)\n"
-        << "  --headless           no window, no views, no MCP on stdin (use --web for control, or tui.py);\n"
+        << "  --headless           no window, no views, no MCP on stdin (use --web, bin/bot_tui or tui.py);\n"
         << "                       runs until Ctrl-C or SIGTERM. Without a display this is the default for views\n"
-        << "  --tui                control panel in the terminal (instead of MCP on stdin; logs go to run.log)\n"
         << "SIGHUP, SIGUSR1 or SIGUSR2 (any mode): the bots store everything in chests, disconnect, and it exits.\n"
         << "Then speaks MCP (JSON-RPC) on stdin/stdout. When stdin is closed (headless: on Ctrl-C/SIGTERM),\n"
         << "the bots store their inventory in chests and disconnect." << std::endl;
@@ -9576,7 +9579,6 @@ int main(int argc, char* argv[])
             else if (arg == "--bind") { web_bind = value(); }
             else if (arg == "--gui") { show_gui = true; }
             else if (arg == "--headless") { headless = true; }
-            else if (arg == "--tui") { tui = true; }
             else if (arg == "--child") { is_child = true; }
             // Paths are given relative to the caller's directory, resolve them before we leave it
             else if (arg == "--snapshot") { snapshot_path = std::filesystem::absolute(value()).string(); }
@@ -9590,18 +9592,6 @@ int main(int argc, char* argv[])
         // Botcraft loads ./Assets from the working directory, they are installed next to the executable
         self_path = std::filesystem::canonical("/proc/self/exe").string();
         std::filesystem::current_path(std::filesystem::path(self_path).parent_path());
-        if (tui && !is_child)
-        {
-            // The terminal is the panel's: the logs (this process's and the bots') go to run.log meanwhile
-            const int log = open("../run.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (log >= 0)
-            {
-                dup2(log, STDERR_FILENO);
-                dup2(log, STDOUT_FILENO);
-                close(log);
-            }
-        }
-
         // A bot process ends with the main program, however that one ends (closed, killed, crashed): it watches
         // for its parent to change. (The kernel's parent-death signal is no use here: it fires when the thread
         // that started the child ends, and those are short-lived.)
@@ -9753,41 +9743,10 @@ int main(int argc, char* argv[])
                     }
                 }
             });
-        std::thread panel([&]()
-            {
-                if (!tui || is_child)
-                {
-                    return;
-                }
-                Logger::GetInstance().RegisterThread("tui");
-                RunTui([]()
-                    {
-                        std::vector<std::string> names;
-                        std::lock_guard<std::mutex> lock(bots_mutex);
-                        for (const BotSlot& slot : bots)
-                        {
-                            names.push_back(slot.bot->GetNetworkManager()->GetMyName());
-                        }
-                        for (const std::shared_ptr<Child>& child : children)
-                        {
-                            names.push_back(child->name);
-                        }
-                        return names;
-                    },
-                    [](const std::string& tool, const Value& arguments)
-                    {
-                        try
-                        {
-                            const Value result = CallTool(tool, arguments);
-                            return tool + ": " + (result.is_string() ? result.get_string() : result.Dump());
-                        }
-                        catch (const std::exception& e)
-                        {
-                            return tool + " failed: " + e.what();
-                        }
-                    },
-                    []() { quit_signal = 1; }, stop);
-            });
+        if (!is_child)
+        {
+            ServeSocket("../run/.program.sock", "");
+        }
         std::thread web([&]()
             {
                 if (web_port > 0 && !is_child)
@@ -10023,7 +9982,7 @@ int main(int argc, char* argv[])
         {
             std::signal(sig, [](int) { quit_signal = 1; });
         }
-        if (headless || tui)
+        if (headless)
         {
             std::signal(SIGINT, [](int) { quit_signal = 1; });
             std::signal(SIGTERM, [](int) { quit_signal = 1; });
@@ -10041,7 +10000,7 @@ int main(int argc, char* argv[])
                         pending.erase(0, end + 1);
                         return true;
                     }
-                    if (headless || tui)
+                    if (headless)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                         continue;
@@ -10091,7 +10050,6 @@ int main(int argc, char* argv[])
         spawner.join();
         snapshots.join();
         chat_thread.join();
-        panel.join();
         web.join();
         team_feed.join();
         rejoin_thread.join();

@@ -1,13 +1,16 @@
-// Terminal control panel of bot_mcp (--tui), on its own thread. It talks to each bot through the bot's own
-// socket, run/<name>.sock (JSON-RPC lines, see ServeBotSocket in mcp.cpp); the few calls that are not about
-// one bot (connect, team) go straight to the program. Its own file: curses macros stay away from mcp.cpp
+// Terminal control panel of bot_mcp, a program of its own (bin/bot_tui): it can come and go while the bots run.
+// It talks to each bot through the bot's own socket, run/<name>.sock, and to the program through
+// run/.program.sock (JSON-RPC lines, see ServeSocket in mcp.cpp) for the list of bots and the calls that are
+// not about one bot (connect, team, disconnect)
 #include <protocolCraft/Utilities/Json.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -26,8 +29,11 @@ using ProtocolCraft::Json::Value;
 
 namespace
 {
-    /// @brief One tool call to one bot, through its socket. ok is false on an error from the tool or no answer
-    Value AskBot(const std::string& bot, const std::string& tool, Value arguments, const int timeout_s, bool& ok)
+    const std::string program = ".program";
+
+    /// @brief One request to one bot (or to the program), through its socket. ok is false on an error from the
+    /// tool or no answer. method "quit" to the program stops it
+    Value AskBot(const std::string& bot, const std::string& tool, Value arguments, const int timeout_s, bool& ok, const std::string& method = "tools/call")
     {
         ok = false;
         const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -44,7 +50,7 @@ namespace
         Value request;
         request["jsonrpc"] = "2.0";
         request["id"] = 1;
-        request["method"] = "tools/call";
+        request["method"] = method;
         request["params"]["name"] = tool;
         request["params"]["arguments"] = arguments;
         const std::string line = request.Dump() + "\n";
@@ -61,6 +67,11 @@ namespace
         {
             const Value response = ProtocolCraft::Json::Parse(reply.substr(0, reply.find('\n')));
             const Value& result = response["result"];
+            if (method != "tools/call")
+            {
+                ok = true;
+                return result;
+            }
             const std::string text = result["content"].get_array().at(0)["text"].get_string();
             ok = !(result.contains("isError") && result["isError"].is_bool() && result["isError"].get<bool>());
             try
@@ -220,18 +231,33 @@ namespace
     }
 }
 
-/// @brief Runs until q (then quit() is called) or until stop is set
-void RunTui(const std::function<std::vector<std::string>()>& names, const std::function<std::string(const std::string&, const Value&)>& call_program,
-    const std::function<void()>& quit, const std::atomic<bool>& stop)
+/// @brief Runs until q (the bots keep running) or Q (the program stops them and exits)
+int main()
 {
-    // The terminal itself, not stdin/stdout: those belong to the program (and its logs go to a file meanwhile)
-    FILE* tty = fopen("/dev/tty", "r+");
-    if (tty == nullptr)
-    {
-        return;
-    }
-    SCREEN* screen = newterm(nullptr, tty, tty);
-    set_term(screen);
+    // run/ is next to bin/, where bot_mcp works from
+    std::filesystem::current_path(std::filesystem::canonical("/proc/self/exe").parent_path());
+    const auto names = []()
+        {
+            bool ok;
+            const Value list = AskBot(program, "bots", Value(ProtocolCraft::Json::Object()), 3, ok);
+            std::vector<std::string> found;
+            if (ok && list.is_array())
+            {
+                for (const Value& b : list.get_array())
+                {
+                    found.push_back(Field(b, "name"));
+                }
+            }
+            return found;
+        };
+    const auto call_program = [](const std::string& tool, const Value& arguments)
+        {
+            bool ok;
+            const Value result = AskBot(program, tool, arguments, 600, ok);
+            return tool + (ok ? ": " : " failed: ") + Text(result);
+        };
+    const std::atomic<bool> stop = false;
+    initscr();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
@@ -373,7 +399,7 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                 }
             };
         line(0, "botcraft  " + std::to_string(bots.size()) + " bots   up/down pick  a autopilot  e gear  G gather  m make  s store  f farm  "
-            "l find  n neural network  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q quit (bots store and leave)", A_REVERSE);
+            "l find  n neural network  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q leave the panel  Q stop the program (bots store and leave)", A_REVERSE);
         char row[512];
         std::snprintf(row, sizeof(row), "%-12s %-22s %6s %4s %-15s %s", "bot", "state", "health", "food", "position", "doing");
         line(1, row, A_BOLD);
@@ -456,6 +482,16 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
         if (key == 'q')
         {
             break;
+        }
+        else if (key == 'Q')
+        {
+            const std::string sure = ask("every bot stores everything and the program stops? (y/n) ");
+            if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
+            {
+                bool ok;
+                AskBot(program, "", Value(), 3, ok, "quit");
+                break;
+            }
         }
         else if (key == KEY_UP && picked > 0)
         {
@@ -605,10 +641,6 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
     done = true;
     poller.join();
     endwin();
-    delscreen(screen);
-    fclose(tty);
-    if (!stop)
-    {
-        quit();
-    }
+    // A tool call still under way is dropped: the bot carries on with it
+    std::_Exit(0);
 }
