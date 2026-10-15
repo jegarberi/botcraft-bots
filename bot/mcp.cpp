@@ -2863,6 +2863,8 @@ static void MakeRoom(BehaviourClient& c)
     }
     LookAt(c, Vector3<double>(feet.x + 0.5 + away.x * 4, feet.y + 2.0, feet.z + 0.5 + away.z * 4));
     const Position step_back = feet - away * 3;
+    const int free_before = free_slots();
+    int thrown = 0;
     int cobblestone_kept = 0;
     for (const auto& [index, slot] : PlayerSlots(c))
     {
@@ -2874,7 +2876,8 @@ static void MakeRoom(BehaviourClient& c)
         const bool spare_cobblestone = item == "minecraft:cobblestone" && ++cobblestone_kept > 3;
         if (junk.count(item) != 0 || spare_cobblestone)
         {
-            DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, slot.GetItemCount());
+            // (the last argument is how many to keep)
+            thrown += DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, 0) == Status::Success;
             if (free_slots() >= 3)
             {
                 break;
@@ -2882,6 +2885,7 @@ static void MakeRoom(BehaviourClient& c)
         }
     }
     GoTo(c, step_back, 1);
+    LOG_INFO("Making room: " << thrown << " stacks thrown away, free slots " << free_before << " -> " << free_slots());
 }
 
 static Status CraftAt(BehaviourClient& c, const Grid& grid, std::string& error)
@@ -5447,7 +5451,8 @@ static Status GiveTask(McpBot& c, const std::string& to, const Position& to_at, 
         if (match)
         {
             const int n = std::min<int>(slot.GetItemCount(), count - given);
-            if (DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, static_cast<short>(n)) == Status::Success)
+            // (the last argument is how many stay in the slot, not how many go)
+            if (DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, static_cast<short>(slot.GetItemCount() - n)) == Status::Success)
             {
                 given += n;
                 Count(c, "given", n);
