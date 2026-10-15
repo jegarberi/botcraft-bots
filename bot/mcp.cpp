@@ -318,6 +318,11 @@ public:
     std::chrono::steady_clock::time_point assist_until;
     /// @brief When this bot last called the others to a fight: once every 30 seconds at most
     std::chrono::steady_clock::time_point mob_call_at;
+    /// @brief Health at the last watchdog look, to see it being hurt; and the last call against a pillager
+    float last_health = 20.0f;
+    /// @brief A call to fight has interrupted what the bot was doing already (once per call, under team_mutex)
+    bool assist_interrupted = false;
+    std::chrono::steady_clock::time_point pillager_call_at;
     Botcraft::Position salvage_at;
 
     /// @brief Resource the autopilot gathers: block id and how many are left to collect
@@ -1021,13 +1026,19 @@ void McpBot::OnTeamMessage(const std::string& sender, const std::string& message
         // A fight close by: join it (whether this bot is fit for it, health and weapon, is the tree's to say)
         const Position at(std::stoi(words[4]), std::stoi(words[5]), std::stoi(words[6]));
         const Vector3<double> here = GetLocalPlayer()->GetPosition();
-        if (sender != GetNetworkManager()->GetMyName() && std::abs(here.x - at.x) <= 48.0 && std::abs(here.z - at.z) <= 48.0 && std::abs(here.y - at.y) <= 16.0)
+        // A pillager calls everyone within 100 blocks (they come from afar: 3 minutes to get there), the
+        // others whoever is within 48
+        const bool pillager = words[1] == "pillager";
+        const double reach = pillager ? 100.0 : 48.0;
+        if (sender != GetNetworkManager()->GetMyName() && std::abs(here.x - at.x) <= reach && std::abs(here.z - at.z) <= reach &&
+            std::abs(here.y - at.y) <= (pillager ? 40.0 : 16.0))
         {
             std::lock_guard<std::mutex> lock(team_mutex);
             assist_type = words[1];
             assist_count = std::clamp(std::stoi(words[2]), 1, 8);
             assist_at = at;
-            assist_until = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+            assist_until = std::chrono::steady_clock::now() + std::chrono::seconds(pillager ? 180 : 90);
+            assist_interrupted = false;
         }
         return;
     }
@@ -2207,7 +2218,7 @@ static Status KillTask(BehaviourClient& c, const std::string& type, const int co
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
     // The sword, else an axe (it hits harder but recovers slower): the swing waits for a full recovery
     std::string weapon = HeldTool(c, "sword");
-    const bool axe = weapon.empty() && !(weapon = HeldTool(c, "_axe")).empty();
+    const bool axe = weapon.empty() && !(weapon = HeldTool(c, "axe")).empty();
     if (!weapon.empty())
     {
         SetItemInHand(c, weapon);
@@ -2446,6 +2457,13 @@ static bool CategoryChest(BehaviourClient& c, const std::string& item, Position&
         {
             return false;
         }
+        // In sight and not a chest (any more): not a vault to store in (a vault declared for a castle whose
+        // ground was levelled again sent every bot to an empty spot)
+        const Blockstate* block = c.GetWorld()->GetBlock(known->second);
+        if (block != nullptr && !EndsWith(block->GetName(), "chest"))
+        {
+            return false;
+        }
         chest = known->second;
         return true;
     }
@@ -2528,6 +2546,11 @@ static bool ChestFor(BehaviourClient& c, const std::string& item, Position& ches
     }
     if (CountItem(c, "minecraft:chest") == 0)
     {
+        std::string craft_error;
+        CraftOne(c, "minecraft:chest", craft_error);
+    }
+    if (CountItem(c, "minecraft:chest") == 0)
+    {
         error = "no chest item in the inventory to create storage for " + item + " (craft some: 8 planks in a ring)";
         return false;
     }
@@ -2601,7 +2624,30 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
     for (const std::string& item : items)
     {
         Position chest;
-        if ((!CategoryChest(c, item, chest) && !ChestFor(c, item, chest, error)) || GoTo(c, chest, 4, 0, 1) == Status::Failure || OpenContainer(c, chest) == Status::Failure)
+        bool found = CategoryChest(c, item, chest) || ChestFor(c, item, chest, error);
+        bool open = found && GoTo(c, chest, 4, 0, 1) == Status::Success && OpenContainer(c, chest) == Status::Success;
+        if (found && !open && item != "minecraft:chest")
+        {
+            // Its chest is out of reach (far away, behind the castle site): a new one here, crafted if need be,
+            // that is the item's chest from now on, for the bots working around here
+            std::string craft_error;
+            if (CountItem(c, "minecraft:chest") == 0)
+            {
+                CraftOne(c, "minecraft:chest", craft_error);
+            }
+            Position here;
+            if (CountItem(c, "minecraft:chest") > 0 && PlaceNearby(c, "minecraft:chest", here))
+            {
+                {
+                    std::lock_guard<std::mutex> lock(chests_mutex);
+                    chests[item] = here;
+                    SaveChests();
+                }
+                chest = here;
+                open = GoTo(c, chest, 4, 0, 1) == Status::Success && OpenContainer(c, chest) == Status::Success;
+            }
+        }
+        if (!open)
         {
             if (error.empty())
             {
@@ -5209,13 +5255,21 @@ static Status AssistStep(McpBot& c)
     }
     c.SetState("fighting with the others");
     c.SetNote("called to fight " + std::to_string(count) + " " + type + " at " + std::to_string(at.x) + " " + std::to_string(at.y) + " " + std::to_string(at.z));
+    // From afar (a pillager calls from 100 blocks): the long way first
+    const double away = std::sqrt(c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(at.x, at.y, at.z)));
+    if (away > 32.0)
+    {
+        TravelTask(c, at.x, at.z);
+    }
+    // It moves: looked for around where it was seen, wider for a pillager (it keeps its distance to shoot)
+    const double search = type == "pillager" ? 24.0 : 16.0;
     if (c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(at.x, at.y, at.z)) > 12.0 * 12.0 && GoTo(c, at, 6) == Status::Failure &&
-        FindEntities(c, type, 16.0).empty())
+        FindEntities(c, type, search).empty())
     {
         return Status::Failure;
     }
     std::atomic<int> killed = 0;
-    KillTask(c, type, count, 16.0, killed);
+    KillTask(c, type, count, search, killed);
     c.SetNote("fought " + type + " with the others: " + std::to_string(killed.load()) + " killed");
     return Status::Success;
 }
@@ -5484,7 +5538,13 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             }
                         }
                         // Hurt, or with nothing to fight with: it stays out of it
-                        return c.GetLocalPlayer()->GetHealth() >= 12.0f && (!HeldTool(c, "sword").empty() || !HeldTool(c, "_axe").empty()) ? Status::Success : Status::Failure;
+                        // (a pillager: everyone who can still stand a few arrows, 8 health)
+                        float fit = 12.0f;
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            fit = c.assist_type == "pillager" ? 8.0f : 12.0f;
+                        }
+                        return c.GetLocalPlayer()->GetHealth() >= fit && (!HeldTool(c, "sword").empty() || !HeldTool(c, "axe").empty()) ? Status::Success : Status::Failure;
                     })
                 .leaf("fight them together", AssistStep)
             .end()
@@ -6213,6 +6273,29 @@ static void Watchdog(McpBot& bot)
     {
         return;
     }
+    // Hurt with a pillager close by: it is attacking. Every bot within 100 blocks is called to it at once (and
+    // this one takes it on too); once it is dead each goes back to what it was doing
+    {
+        const float health = bot.GetLocalPlayer()->GetHealth();
+        const auto now = std::chrono::steady_clock::now();
+        if (health < bot.last_health && now >= bot.pillager_call_at)
+        {
+            const std::vector<Ent> pillagers = FindEntities(bot, "pillager", 24.0);
+            if (!pillagers.empty())
+            {
+                const Position at = BlockPos(pillagers.front().pos);
+                bot.pillager_call_at = now + std::chrono::seconds(15);
+                bot.Say("mob pillager " + std::to_string(pillagers.size()) + " at " + std::to_string(at.x) + " " + std::to_string(at.y) + " " + std::to_string(at.z));
+                std::lock_guard<std::mutex> team_lock(bot.team_mutex);
+                bot.assist_type = "pillager";
+                bot.assist_count = static_cast<int>(pillagers.size());
+                bot.assist_at = at;
+                bot.assist_until = now + std::chrono::seconds(180);
+                bot.assist_interrupted = false;
+            }
+        }
+        bot.last_health = health;
+    }
     // A tool call owns the tree: leave it alone
     std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
     const std::string state = bot.GetState();
@@ -6237,9 +6320,21 @@ static void Watchdog(McpBot& bot)
         ++bot.times_stuck;
         bot.moved_at = now;
     }
-    if (danger || stuck || blocked)
+    // A call to fight: drop what it is doing now, not when its current action ends (minutes, for a walk)
+    bool called = false;
+    if (state != "fighting" && state != "fighting with the others" && state != "eating")
     {
-        LOG_INFO("Watchdog: interrupting \"" << state << "\": " << (danger ? "monster nearby" : blocked ? "not moving, breaking a block beside" : "running for too long"));
+        std::lock_guard<std::mutex> team_lock(bot.team_mutex);
+        if (bot.assist_count > 0 && now < bot.assist_until && !bot.assist_interrupted &&
+            bot.GetLocalPlayer()->GetHealth() >= (bot.assist_type == "pillager" ? 8.0f : 12.0f))
+        {
+            bot.assist_interrupted = true;
+            called = true;
+        }
+    }
+    if (danger || stuck || blocked || called)
+    {
+        LOG_INFO("Watchdog: interrupting \"" << state << "\": " << (called ? "called to a fight" : danger ? "monster nearby" : blocked ? "not moving, breaking a block beside" : "running for too long"));
         // If the monster can't be reached the fight ends at once: don't interrupt again right away
         bot.danger_retry_at = now + std::chrono::seconds(10);
         bot.RestartStateClock();
