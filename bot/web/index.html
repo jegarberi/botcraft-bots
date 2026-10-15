@@ -28,6 +28,9 @@
   figure { margin: 0; } figcaption { color: var(--dim); }
   #message { color: var(--dim); min-height: 1.4em; }
   small { color: var(--dim); }
+  #network:empty { display: none; }
+  #network svg { width: 100%; height: auto; display: block; }
+  #network text { font-size: 11px; fill: currentColor; }
 </style>
 </head>
 <body>
@@ -63,6 +66,7 @@
   </form>
 </div>
 <div id="views"></div>
+<div id="network" class="top"></div>
 <div id="bots"></div>
 <datalist id="places">
   <option value="village_plains"><option value="village_taiga"><option value="village_snowy"><option value="village_desert"><option value="village_savanna">
@@ -121,7 +125,8 @@ function card(bot, tree) {
       $("button", { onclick: () => gather.value && call("make", { bot: bot.name, item: gather.value, count: +count.value }) }, "Make"),
       $("button", { onclick: () => call("store", { bot: bot.name }) }, "Store in chests"),
       $("button", { onclick: () => call("farm", { bot: bot.name }) }, "Farm"),
-      $("button", { onclick: () => call("disconnect", { bot: bot.name }) }, "Store all & disconnect")),
+      $("button", { onclick: () => call("disconnect", { bot: bot.name }) }, "Store all & disconnect"),
+      $("button", { onclick: () => showNetwork(bot.name) }, "Neural network")),
     $("div", { className: "row" }, $("b", {}, "Find and go to the nearest"), placeKind, place,
       $("button", { onclick: () => place.value && call("locate", { bot: bot.name, kind: placeKind.value, name: place.value, go: true }) }, "Find & go"),
       $("small", {}, "needs the bot to be op; the walk can take minutes")),
@@ -167,6 +172,48 @@ function refreshViews() {
   [...box.querySelectorAll("img")].forEach((img, i) => img.src = "/snapshot.png?bot=" + encodeURIComponent(views[i]) + "&t=" + Date.now());
 }
 setInterval(refreshViews, 5000); setTimeout(refreshViews, 1500);
+
+// One bot's neural network (the brain plugin): inputs -> hidden -> trades, and the critic's value.
+// Lines: blue positive, red negative weights, stronger the bigger; circles filled by how active they are
+let networkBot = null;
+function showNetwork(name) { networkBot = name; drawNetwork(); document.getElementById("network").scrollIntoView({ behavior: "smooth" }); }
+async function drawNetwork() {
+  const box = document.getElementById("network");
+  if (!networkBot) return box.replaceChildren();
+  const r = await (await fetch("/call", { method: "POST", headers: { "X-Bot": "1" }, body: JSON.stringify({ name: "brain", arguments: { network: networkBot } }) })).json();
+  const close = $("button", { onclick: () => { networkBot = null; drawNetwork(); } }, "Close");
+  if (!r.ok || typeof r.result !== "object") return box.replaceChildren($("div", { className: "row" }, $("h2", {}, networkBot + "'s neural network"), close), $("p", {}, String(r.result)));
+  const n = r.result, NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; };
+  const W = 760, H = 18 * n.inputs.length + 30, xs = [150, 380, 600];
+  const ys = count => Array.from({ length: count }, (_, i) => 15 + (i + 0.5) * (H - 30) / count);
+  const yi = ys(n.inputs.length), yh = ys(n.hidden.length), yo = ys(n.outputs.length + 1);
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": n.bot + "'s neural network" });
+  const top = Math.max(...n.w1.flat().map(Math.abs), ...n.w2.flat().map(Math.abs), ...n.v.map(Math.abs), 1e-6);
+  const edge = (x1, y1, x2, y2, w) => {
+    const line = el("line", { x1, y1, x2, y2, stroke: w >= 0 ? "#3b7dd8" : "#d84a3b", "stroke-opacity": (0.08 + 0.9 * Math.abs(w) / top).toFixed(2), "stroke-width": (0.4 + 2.6 * Math.abs(w) / top).toFixed(2) });
+    line.append(el("title", {}, "weight " + w.toFixed(3)));
+    svg.append(line);
+  };
+  n.w1.forEach((row, h) => row.forEach((w, i) => edge(xs[0], yi[i], xs[1], yh[h], w)));
+  n.w2.forEach((row, o) => row.forEach((w, h) => edge(xs[1], yh[h], xs[2], yo[o], w)));
+  n.v.forEach((w, h) => edge(xs[1], yh[h], xs[2], yo[n.outputs.length], w));
+  const node = (x, y, a, label, side, tip) => {
+    const c = el("circle", { cx: x, cy: y, r: 7, stroke: "currentColor", "stroke-width": 1, fill: a >= 0 ? `rgba(46,158,91,${Math.min(1, a)})` : `rgba(216,74,59,${Math.min(1, -a)})` });
+    c.append(el("title", {}, tip)); svg.append(c);
+    if (label) svg.append(el("text", { x: x + (side < 0 ? -12 : 12), y: y + 4, "text-anchor": side < 0 ? "end" : "start" }, label));
+  };
+  n.inputs.forEach((x, i) => node(xs[0], yi[i], x.value, `${x.name} ${(+x.value).toFixed(2)}`, -1, x.name + " = " + x.value));
+  n.hidden.forEach((a, h) => node(xs[1], yh[h], a, "", 1, `hidden ${h + 1}: ${a.toFixed(3)} (bias ${n.hidden_bias[h].toFixed(3)})`));
+  n.outputs.forEach((o, i) => node(xs[2], yo[i], o.percent / 100, `${o.name} ${o.percent}%`, 1, `${o.name}: wants it ${o.percent}% (bias ${o.bias.toFixed(3)})`));
+  node(xs[2], yo[n.outputs.length], Math.tanh(n.value), `critic value ${n.value.toFixed(2)}`, 1, "what the critic expects today to bring");
+  box.replaceChildren($("div", { className: "row" }, $("h2", {}, n.bot + "'s neural network"),
+      $("span", { className: "badge" }, "trade: " + n.trade), $("span", { className: "badge" }, "generation " + n.generation),
+      $("span", { className: "badge" }, n.fitness === undefined || n.fitness === null ? "no fitness yet this generation" : `fitness ${n.fitness.toFixed(2)} (${n.days_in_generation} days)`),
+      n.champion ? $("span", { className: "badge" }, "last winner: " + n.champion) : "", close),
+    $("small", {}, "Blue lines: positive weights, red: negative; thicker = stronger. Circles: green active, red negative. Hover for numbers. Updated every 5 s."), svg);
+}
+setInterval(() => networkBot && drawNetwork(), 5000);
 </script>
 </body>
 </html>

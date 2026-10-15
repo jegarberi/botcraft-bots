@@ -188,6 +188,9 @@ end
 local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
+local INPUT_NAMES = { "bias", "health", "food level", "has pickaxe", "has axe", "has sword", "has hoe", "food carried", "wood carried",
+    "stone carried", "team hungry", "castle progress", "was hunter", "was farmer", "was breeder", "was miner", "was builder" }
+
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end
     local x = {
@@ -570,7 +573,7 @@ end
 bot.tool{
     name = "brain",
     description = "The bots' brain: a small neural network (17 inputs about the bot and the team, 10 hidden, 5 outputs) of its own (every 5 days the best-scoring bot's is copied, slightly mutated, to all the others) picks each bot's trade every Minecraft day (hunter, farmer, breeder, miner, builder; groups of three), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
-    params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number" },
+    params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number", network = "string" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in
         if args.export then return { samples = state.samples or 0, w = flatten(state.net), arch = ARCH } end
@@ -597,6 +600,25 @@ bot.tool{
             local r = vote(list)
             save(state)
             return r
+        end
+        -- One bot's network as it is now, and what it makes of the bot right now (for the panels)
+        if type(args.network) == "string" and args.network ~= "" then
+            local st = call("status", { bot = args.network })
+            if type(st) ~= "table" or not st.name then error("no bot " .. args.network) end
+            local net = net_of(st.name)
+            local list, hungry = statuses(), 0
+            for _, o in ipairs(list) do if (o.food or 20) <= 8 then hungry = hungry + 1 end end
+            local x = features(st, state.trades[st.name] or 5, { hungry = hungry / math.max(1, #list), castle = 0 })
+            local p, hidden, value = forward(net, x)
+            local inputs, outputs = {}, {}
+            for i = 1, IN do inputs[i] = { name = INPUT_NAMES[i], value = x[i] } end
+            for o = 1, OUT do outputs[o] = { name = TRADES[o], percent = math.floor(p[o] * 1000 + 0.5) / 10, bias = net.b2[o] } end
+            local f = (state.fitness or {})[st.name]
+            return { bot = st.name, trade = TRADES[state.trades[st.name] or 5], generation = state.generation or 0,
+                fitness = f and f[2] > 0 and f[1] / f[2] or nil, days_in_generation = f and f[2] or 0,
+                champion = state.last_generation and state.last_generation.winner or nil,
+                inputs = inputs, hidden = hidden, hidden_bias = net.b1, outputs = outputs, value = value,
+                w1 = net.w1, w2 = net.w2, v = net.v, vb = net.vb }
         end
         local bots = {}
         local hungry = 0

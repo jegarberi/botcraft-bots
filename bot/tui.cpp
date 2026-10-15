@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -124,6 +125,76 @@ namespace
         return words;
     }
 
+    /// @brief One bot's neural network (the brain tool's answer to network=bot) as lines of text: each input
+    /// with its value, each hidden unit's activity and strongest inputs, each trade's want and strongest hidden units
+    std::vector<std::string> NetworkLines(const std::string& answer)
+    {
+        Value n;
+        try
+        {
+            n = ProtocolCraft::Json::Parse(answer.substr(answer.find(": ") + 2));
+        }
+        catch (const std::exception&)
+        {
+            return { answer };
+        }
+        if (!n.is_object() || !n.contains("w1"))
+        {
+            return { answer };
+        }
+        const auto number = [](const Value& v) { return v.is_number() ? v.get_number<double>() : 0.0; };
+        char text[512];
+        std::vector<std::string> lines;
+        std::snprintf(text, sizeof(text), "%s's neural network  trade %s  generation %s  fitness %s (%s days)  last winner %s  critic value %.2f   (n closes)",
+            Field(n, "bot").c_str(), Field(n, "trade").c_str(), Field(n, "generation").c_str(), Field(n, "fitness").empty() ? "-" : Field(n, "fitness").c_str(),
+            Field(n, "days_in_generation").c_str(), Field(n, "champion").empty() ? "-" : Field(n, "champion").c_str(), number(n["value"]));
+        lines.push_back(text);
+        std::string row = "inputs: ";
+        std::vector<std::string> inputs;
+        for (const Value& i : n["inputs"].get_array())
+        {
+            inputs.push_back(Field(i, "name"));
+            std::snprintf(text, sizeof(text), "%s %.2f", Field(i, "name").c_str(), number(i["value"]));
+            row += std::string(row.size() > 8 ? ", " : "") + text;
+        }
+        lines.push_back(row);
+        // The three strongest weights into a unit, "+name" or "-name"
+        const auto strongest = [&](const Value& weights, const std::function<std::string(size_t)>& from)
+            {
+                std::vector<std::pair<double, size_t>> order;
+                for (size_t i = 0; i < weights.get_array().size(); ++i)
+                {
+                    order.push_back({ number(weights[i]), i });
+                }
+                std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return std::abs(a.first) > std::abs(b.first); });
+                std::string out;
+                for (size_t k = 0; k < order.size() && k < 3; ++k)
+                {
+                    std::snprintf(text, sizeof(text), "%s%+.2f %s", out.empty() ? "" : ", ", order[k].first, from(order[k].second).c_str());
+                    out += text;
+                }
+                return out;
+            };
+        const auto& hidden = n["hidden"].get_array();
+        for (size_t h = 0; h < hidden.size(); ++h)
+        {
+            std::snprintf(text, sizeof(text), "hidden %2zu %+.2f  %-36s <- %s", h + 1, number(hidden[h]),
+                std::string(static_cast<size_t>(std::abs(number(hidden[h])) * 36), number(hidden[h]) >= 0 ? '+' : '-').c_str(),
+                strongest(n["w1"][h], [&](size_t i) { return i < inputs.size() ? inputs[i] : "?"; }).c_str());
+            lines.push_back(text);
+        }
+        const auto& outputs = n["outputs"].get_array();
+        for (size_t o = 0; o < outputs.size(); ++o)
+        {
+            const double percent = number(outputs[o]["percent"]);
+            std::snprintf(text, sizeof(text), "%-9s %5.1f%% %-30s <- %s", Field(outputs[o], "name").c_str(), percent,
+                std::string(static_cast<size_t>(percent * 0.3), '#').c_str(),
+                strongest(n["w2"][o], [](size_t h) { return "hidden " + std::to_string(h + 1); }).c_str());
+            lines.push_back(text);
+        }
+        return lines;
+    }
+
     int Number(const std::vector<std::string>& words, const size_t i, const int otherwise)
     {
         try
@@ -161,6 +232,10 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
     message = "starting...";
     std::vector<std::pair<std::string, Value>> statuses;
     std::atomic<bool> done = false;
+    // The neural network view (n): whose, and its lines, fetched with the statuses
+    static std::string network_bot;
+    static std::vector<std::string> network_lines;
+    network_bot.clear();
 
     // The statuses, every 2 seconds, off the drawing thread: a busy bot must not freeze the keys
     std::thread poller([&]()
@@ -177,6 +252,25 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     statuses = fresh;
+                }
+                std::string whose;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    whose = network_bot;
+                }
+                if (!whose.empty())
+                {
+                    Value args = ProtocolCraft::Json::Object();
+                    args["network"] = whose;
+                    std::vector<std::string> fetched = NetworkLines(call_program("brain", args));
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (network_bot == whose)
+                    {
+                        network_lines = fetched;
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
                     if (message == "starting...")
                     {
                         message = "";
@@ -236,10 +330,19 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
     {
         std::vector<std::pair<std::string, Value>> bots;
         std::string shown;
+        std::vector<std::string> network;
         {
             std::lock_guard<std::mutex> lock(mutex);
             bots = statuses;
             shown = message;
+            picked = bots.empty() ? 0 : std::min(picked, bots.size() - 1);
+            // The network view follows the picked bot
+            if (!network_bot.empty() && !bots.empty() && network_bot != bots[picked].first)
+            {
+                network_bot = bots[picked].first;
+                network_lines = { "fetching " + network_bot + "'s neural network..." };
+            }
+            network = network_bot.empty() ? std::vector<std::string>() : network_lines;
         }
         picked = bots.empty() ? 0 : std::min(picked, bots.size() - 1);
         const int h = getmaxy(stdscr);
@@ -255,11 +358,11 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                 }
             };
         line(0, "botcraft  " + std::to_string(bots.size()) + " bots   up/down pick  a autopilot  e gear  G gather  m make  s store  f farm  "
-            "l find  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q quit (bots store and leave)", A_REVERSE);
+            "l find  n neural network  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q quit (bots store and leave)", A_REVERSE);
         char row[512];
         std::snprintf(row, sizeof(row), "%-12s %-22s %6s %4s %-15s %s", "bot", "state", "health", "food", "position", "doing");
         line(1, row, A_BOLD);
-        const int rows = std::max(3, h - 12);
+        const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
         for (size_t i = first; i < bots.size() && i < first + rows; ++i)
         {
@@ -270,7 +373,15 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                 Field(b, "food").c_str(), Where(b).c_str(), flags.c_str(), Field(b, "last_note").c_str());
             line(2 + static_cast<int>(i - first), row, i == picked ? A_REVERSE : 0);
         }
-        if (!bots.empty())
+        if (!network.empty())
+        {
+            int y = 2 + rows + 1;
+            for (const std::string& text : network)
+            {
+                line(y++, text);
+            }
+        }
+        else if (!bots.empty())
         {
             const Value& b = bots[picked].second;
             int y = 2 + rows + 1;
@@ -374,6 +485,12 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
             {
                 run("", "disconnect_all", args);
             }
+        }
+        else if (key == 'n')
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            network_bot = network_bot.empty() && !bot.empty() ? bot : "";
+            network_lines = { network_bot.empty() ? "" : "fetching " + network_bot + "'s neural network..." };
         }
         else if (key == 'x')
         {

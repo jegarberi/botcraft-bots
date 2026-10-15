@@ -70,6 +70,8 @@ local p1, p2 = st.bots.Bot1.wants_percent, st.bots.Bot2.wants_percent
 local differ = false
 for k, v in pairs(p1) do if v ~= p2[k] then differ = true end end
 assert(differ or st.last_generation.winner == "Bot1" or st.last_generation.winner == "Bot2", "the bots' networks differ")
+local view = tool.run({ network = "Bot3" })
+assert(#view.inputs == 17 and #view.hidden == 10 and #view.outputs == 5 and #view.w1 == 10 and #view.w2 == 5, "one bot's network for the panels")
 -- Rollback by hand to the network of an earlier morning
 assert(tool.run({ rollback = 1 }):match("back to the network of day"))
 os.remove("../brain_state.lua")
