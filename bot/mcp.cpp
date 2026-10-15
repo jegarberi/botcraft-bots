@@ -5895,6 +5895,22 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
                 .leaf("store in chests", [](McpBot& c)
                     {
+                        // A builder full of what it dug (levelling is mostly dirt and stone) throws the junk away
+                        // and builds on: walking to a chest per kind of item took the builders all hour, and
+                        // the castle never moved
+                        bool builder = false;
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            builder = c.team.building;
+                        }
+                        if (builder)
+                        {
+                            MakeRoom(c);
+                            if (!InventoryFull(c))
+                            {
+                                return Status::Success;
+                            }
+                        }
                         c.SetState("storing");
                         std::atomic<int> stored = 0;
                         std::string error;
@@ -6136,6 +6152,16 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("store")
                 .leaf("chests on and something to store?", [](McpBot& c)
                     {
+                        // (not a builder: what it gathered is for the build)
+                        bool builder = false;
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            builder = c.team.building;
+                        }
+                        if (builder)
+                        {
+                            c.needs_store = false;
+                        }
                         return auto_store && c.needs_store ? Status::Success : Status::Failure;
                     })
                 .leaf("store in chests", [](McpBot& c)
