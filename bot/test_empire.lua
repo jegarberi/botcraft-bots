@@ -56,6 +56,24 @@ local ok, err = pcall(function()
         for b in pairs(carry) do carry[b] = carry[b] + 1 end
         tick()
     end
+    -- The village: a house for every bot first, no trade meanwhile, then every bot in a trade again
+    local before, splits = #builds, #assigned
+    tool.run({ village = true })
+    t = t + 60; tick()
+    local homes = {}
+    for i = before + 1, #builds do if builds[i].name:match("'s house$") then homes[builds[i].bot] = true end end
+    local h = 0
+    for _ in pairs(homes) do h = h + 1 end
+    assert(h >= 14, "a house order for every bot (the empire's builder may finish first), got " .. h)
+    local n_ = 0
+    for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
+    assert(#assigned == splits or n_ < 15, "no trade while building its house")
+    for _ = 1, 10 do t = t + 60; tick() end
+    local v = tool.run({}).village
+    for b in pairs(carry) do assert(v[b] and v[b]:match("^house at"), b .. " has its house: " .. tostring(v[b])) end
+    n_ = 0
+    for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
+    assert(n_ == 15, "every bot in a trade again, got " .. n_)
     local s = tool.run({ stop = true })
     assert(s.age == "Imperial Age", "went up the ages, got " .. s.age)
     assert(brain_on, "the brain works again")
@@ -65,7 +83,7 @@ local ok, err = pcall(function()
     local names_ = {}
     for _, b in ipairs(builds) do
         names_[b.name] = true
-        assert(b.bot ~= "Bot4" and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
+        assert((b.bot ~= "Bot4" or b.name:match("'s house$")) and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
         for _, e in ipairs(b.blocks) do if e[4] ~= "air" and e[4] ~= "cobblestone" then assert(e[2] >= 71, "built on the ground") end end
     end
     local soldier = false

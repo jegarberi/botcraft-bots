@@ -9,12 +9,15 @@
 --   buildings  houses (one per 5 bots), lumber camp, mill, mining camp, barracks, blacksmith, market, monastery,
 --              university and a wonder, in blocks, put up by one builder at a time in a town east of the castle;
 --              each age needs two buildings of the age before
+--   village    empire { village = true }: every bot builds a house of its own in the town first (all at once), then
+--              the leader gives it a trade; a bot that joins later does the same. The shared houses are left out then
 --   attacks    from the Castle Age, every 10 minutes the soldiers go out together after hostile mobs
 -- It decides the groups (the groups plugin carries them out, each trade's network still picks what a bot does), so the
 -- brain rests while it plays and works again when it stops.
 --   empire {}                   age, resources, what the next age costs, the split, what happened
 --   empire { start = true }     play (taken up again after a restart)
 --   ./run.sh --empire           plays from the start (BOTCRAFT_EMPIRE=1 in the environment)
+--   empire { village = true }   a house for every bot, then its trade (starts playing if it was not)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
 local TRADES = { "cooks", "farmers", "breeders", "miners", "builders", "soldiers", "crafters", "explorers" }
@@ -363,7 +366,7 @@ local function next_building(n)
     for _, b in ipairs(BUILDINGS) do
         local have = state.built[b.name] or 0
         local want = b.house and houses_needed(n) or 1
-        if have < want and state.age >= b.age then return b end
+        if have < want and state.age >= b.age and not (b.house and state.village) then return b end
     end
 end
 
@@ -373,6 +376,9 @@ local function built_of(age)
     for _, b in ipairs(BUILDINGS) do if b.age == age and not b.house then c = c + (state.built[b.name] or 0) end end
     return c
 end
+
+-- A bot of the village still building its house: no trade, no other building for it until then
+local function homeless(n) local h = state.village and state.village[n] return h and not h.done end
 
 local function hand(w)
     call("team_member", { bot = w.bot, objective = "build", plan = "blocks", members = { w.bot }, leader = w.bot, count = 1,
@@ -392,7 +398,36 @@ local function worker(names, leader)
         local list = (state.groups or {})[t] or {}
         for i = #list, 1, -1 do
             local n = list[i]
-            if here[n] and n ~= leader and n ~= picker and n ~= explorer then return n end
+            if here[n] and n ~= leader and n ~= picker and n ~= explorer and not homeless(n) then return n end
+        end
+    end
+end
+
+-- The village: a house for each bot (a lot of the town, the empire's House), handed as its own solo build order,
+-- watched like the building under way; once it stands the bot is split into a trade
+local function homes(names, now)
+    if not state.village then return end
+    for _, n in ipairs(names) do
+        local h = state.village[n]
+        if not h then
+            local at = lot(call("leader", {}))
+            h = { name = n .. "'s house", bot = n, at = at, blocks = BUILDINGS[1].make(at) }
+            state.village[n] = h
+        end
+        local st = looks[n]
+        if h.done or (state.work and state.work.bot == n) then
+            -- built, or putting up the empire's building first
+        elseif not h.handed then
+            hand(h)
+            note(n .. " builds its house at " .. h.at.x .. " " .. h.at.z)
+        elseif type(st) == "table" then
+            if st.building then h.started = true end
+            if h.started and not st.building and (st.build_left or 0) == 0 then
+                h.done, h.blocks, last_split = true, nil, 0       -- the blocks only weigh on the saved file now
+                announce(n .. " built its house at " .. h.at.x .. " " .. h.at.z)
+            elseif now - h.handed >= 600 and not st.building then
+                hand(h)     -- the order was lost: again
+            end
         end
     end
 end
@@ -440,6 +475,7 @@ local function play(now)
     for _, b in ipairs(call("bots", {}) or {}) do names[#names + 1] = b.name end
     if #names == 0 then return end
     gather(names)
+    homes(names, now)
     construct(names, now)
     local next_age = AGES[state.age + 1]
     if next_age and affords(next_age.cost) and built_of(state.age) >= 2 then
@@ -462,9 +498,12 @@ local function play(now)
     if now - last_split >= REBALANCE then
         last_split = now
         local traders = {}
-        for _, n in ipairs(names) do if not (state.work and state.work.bot == n) then traders[#traders + 1] = n end end
-        local g, leader = split(traders)
-        if not same(g, state.groups) then
+        for _, n in ipairs(names) do
+            if not (state.work and state.work.bot == n) and not homeless(n) then traders[#traders + 1] = n end
+        end
+        local g, leader
+        if #traders > 0 then g, leader = split(traders) end
+        if g and not same(g, state.groups) then
             state.groups = g
             call("groups", { assign = g })
             local counts = {}
@@ -511,9 +550,15 @@ end)
 
 bot.tool{
     name = "empire",
-    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the crafters and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
-    params = { start = "boolean", stop = "boolean" },
+    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the crafters and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first and then take a trade (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
+    params = { start = "boolean", stop = "boolean", village = "boolean" },
     run = function(args)
+        if args.village then
+            state.village = state.village or {}
+            last_split = 0
+            if not state.enabled then start() end
+            save()
+        end
         if args.start and not state.enabled then
             start()
         elseif args.stop and state.enabled then
@@ -530,6 +575,9 @@ bot.tool{
                 " (" .. built_of(state.age) .. " built)" } or "none: Imperial is the last",
             buildings = state.built, building = state.work and (state.work.bot .. ": " .. state.work.name .. " at " ..
                 state.work.at.x .. " " .. state.work.at.z) or "none", town = state.town,
-            techs = techs, groups = state.groups, events = state.log }
+            techs = techs, groups = state.groups, events = state.log, village = state.village and (function()
+                local v = {}
+                for n, h in pairs(state.village) do v[n] = (h.done and "house at " or "building its house at ") .. h.at.x .. " " .. h.at.z end
+                return v end)() }
     end,
 }
