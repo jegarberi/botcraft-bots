@@ -700,10 +700,15 @@ static Position Pos(const Value& a)
 }
 
 /// @brief The bot's inventory slots, empty until the server has sent them (right after joining)
+/// @brief The player's slots: armor, storage, hotbar and off hand. Not the 2x2 crafting grid nor its output:
+/// what shows there is not the bot's (the output is a preview), and counted it had a bot "holding" 4 planks it
+/// kept failing to craft with
 static std::map<short, ProtocolCraft::Slot> PlayerSlots(BehaviourClient& c)
 {
     const std::shared_ptr<Window> inventory = c.GetInventoryManager()->GetPlayerInventory();
-    return inventory ? inventory->GetSlots() : std::map<short, ProtocolCraft::Slot>();
+    std::map<short, ProtocolCraft::Slot> slots = inventory ? inventory->GetSlots() : std::map<short, ProtocolCraft::Slot>();
+    slots.erase(slots.begin(), slots.lower_bound(Window::INVENTORY_ARMOR_START));
+    return slots;
 }
 
 /// @brief While one of these lives, the bot is doing something that keeps it on the spot on purpose (cutting a
@@ -2783,11 +2788,100 @@ static void ClearOffhand(BehaviourClient& c)
     {
         MoveStack(c, Window::PLAYER_INVENTORY_INDEX, Window::INVENTORY_OFFHAND_INDEX, free_slot);
     }
+    // And what a craft that failed halfway left in the 2x2 grid: back into the inventory, where it counts
+    const std::shared_ptr<Window> inventory = c.GetInventoryManager()->GetPlayerInventory();
+    for (short grid = Window::INVENTORY_CRAFTING_INPUT_START; inventory && grid < Window::INVENTORY_ARMOR_START; ++grid)
+    {
+        if (inventory->GetSlot(grid).IsEmptySlot())
+        {
+            continue;
+        }
+        short to = -1;
+        for (const auto& [index, slot] : PlayerSlots(c))
+        {
+            if (index >= Window::INVENTORY_STORAGE_START && index < Window::INVENTORY_OFFHAND_INDEX && slot.IsEmptySlot())
+            {
+                to = index;
+                break;
+            }
+        }
+        MoveStack(c, Window::PLAYER_INVENTORY_INDEX, grid, to);
+    }
+}
+
+/// @brief Fewer than 3 free slots: junk thrown away until there are (dirt, gravel, stone kinds nobody uses,
+/// rotten flesh..., and cobblestone beyond 3 stacks). A bot full to the brim, its chests out of reach, had
+/// every plank and table it crafted thrown out, and never made its tools again
+static void MakeRoom(BehaviourClient& c)
+{
+    static const std::set<std::string> junk = { "minecraft:dirt", "minecraft:gravel", "minecraft:diorite", "minecraft:andesite",
+        "minecraft:granite", "minecraft:tuff", "minecraft:rotten_flesh", "minecraft:poisonous_potato", "minecraft:spider_eye",
+        "minecraft:snowball", "minecraft:netherrack", "minecraft:cobbled_deepslate", "minecraft:calcite", "minecraft:dripstone_block",
+        "minecraft:pointed_dripstone", "minecraft:moss_carpet", "minecraft:short_grass", "minecraft:wheat_seeds" };
+    const auto free_slots = [&]()
+        {
+            int n = 0;
+            for (const auto& [index, slot] : PlayerSlots(c))
+            {
+                n += index >= Window::INVENTORY_STORAGE_START && index < Window::INVENTORY_OFFHAND_INDEX && slot.IsEmptySlot();
+            }
+            return n;
+        };
+    if (free_slots() >= 3)
+    {
+        return;
+    }
+    // Thrown toward open air, then the bot steps the other way: in a tunnel the junk bounced back off the wall
+    // and was picked up again at once
+    const std::shared_ptr<World> world = c.GetWorld();
+    const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+    Position away(1, 0, 0);
+    int best_air = -1;
+    for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+    {
+        int air = 0;
+        for (int k = 1; k <= 4; ++k)
+        {
+            const Blockstate* b = world->GetBlock(feet + d * k + Position(0, 1, 0));
+            if (b == nullptr || !b->IsAir())
+            {
+                break;
+            }
+            ++air;
+        }
+        if (air > best_air)
+        {
+            best_air = air;
+            away = d;
+        }
+    }
+    LookAt(c, Vector3<double>(feet.x + 0.5 + away.x * 4, feet.y + 2.0, feet.z + 0.5 + away.z * 4));
+    const Position step_back = feet - away * 3;
+    int cobblestone_kept = 0;
+    for (const auto& [index, slot] : PlayerSlots(c))
+    {
+        if (index < Window::INVENTORY_STORAGE_START || index >= Window::INVENTORY_OFFHAND_INDEX || slot.IsEmptySlot())
+        {
+            continue;
+        }
+        const std::string item = AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName();
+        const bool spare_cobblestone = item == "minecraft:cobblestone" && ++cobblestone_kept > 3;
+        if (junk.count(item) != 0 || spare_cobblestone)
+        {
+            DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, slot.GetItemCount());
+            if (free_slots() >= 3)
+            {
+                break;
+            }
+        }
+    }
+    GoTo(c, step_back, 1);
 }
 
 static Status CraftAt(BehaviourClient& c, const Grid& grid, std::string& error)
 {
     ClearOffhand(c);
+    MakeRoom(c);
     int min_x = 3, max_x = -1, min_y = 3, max_y = -1;
     for (int y = 0; y < 3; ++y)
     {
@@ -5793,6 +5887,8 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             return Status::Success;
                         }
                         c.store_retry_at = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+                        // Still full: room for what it picks up and crafts meanwhile, the junk goes
+                        MakeRoom(c);
                         c.SetNote("could not store" + (error.empty() ? std::string() : ": " + error) + "; trying again in 5 minutes");
                         return Status::Failure;
                     })
