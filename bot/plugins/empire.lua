@@ -11,6 +11,7 @@
 -- brain rests while it plays and works again when it stops.
 --   empire {}                   age, resources, what the next age costs, the split, what happened
 --   empire { start = true }     play (taken up again after a restart)
+--   ./run.sh --empire           plays from the start (BOTCRAFT_EMPIRE=1 in the environment)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
 local TRADES = { "cooks", "farmers", "breeders", "miners", "builders", "soldiers", "crafters", "explorers" }
@@ -265,7 +266,28 @@ local function play(now)
     save()
 end
 
+local function start()
+    local brain = call("brain", {})
+    state.brain_was = not (type(brain) == "table" and brain.enabled == false)
+    call("brain", { stop = true })
+    -- From the groups there are (names with what they did last: "Bot6: cook meat: ..."), so few bots move
+    local cur = call("groups", { show = true })
+    if type(cur) == "table" then
+        state.groups = {}
+        for _, t in ipairs(TRADES) do
+            state.groups[t] = {}
+            for _, n in ipairs(cur[t] or {}) do state.groups[t][#state.groups[t] + 1] = n:match("^[^:]+") end
+        end
+    end
+    state.enabled, last_split, loaded_at = true, 0, 0
+    note("started in the " .. AGES[state.age].name)
+    save()
+end
+
+-- ./run.sh --empire (BOTCRAFT_EMPIRE=1): plays from the start, once the bots are in
+local auto = os.getenv("BOTCRAFT_EMPIRE") == "1"
 bot.every(60, function()
+    if auto and not state.enabled and os.time() - loaded_at >= 150 then start() end
     if not state.enabled or os.time() - loaded_at < 150 then return end
     play(os.time())
 end)
@@ -276,21 +298,7 @@ bot.tool{
     params = { start = "boolean", stop = "boolean" },
     run = function(args)
         if args.start and not state.enabled then
-            local brain = call("brain", {})
-            state.brain_was = not (type(brain) == "table" and brain.enabled == false)
-            call("brain", { stop = true })
-            -- From the groups there are (names with what they did last: "Bot6: cook meat: ..."), so few bots move
-            local cur = call("groups", { show = true })
-            if type(cur) == "table" then
-                state.groups = {}
-                for _, t in ipairs(TRADES) do
-                    state.groups[t] = {}
-                    for _, n in ipairs(cur[t] or {}) do state.groups[t][#state.groups[t] + 1] = n:match("^[^:]+") end
-                end
-            end
-            state.enabled, last_split, loaded_at = true, 0, 0
-            note("started in the " .. AGES[state.age].name)
-            save()
+            start()
         elseif args.stop and state.enabled then
             state.enabled = false
             if state.brain_was then call("brain", { start = true }) end
