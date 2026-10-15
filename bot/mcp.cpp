@@ -2624,14 +2624,26 @@ static bool IsChest(const std::shared_ptr<World>& world, const Position& p)
     return block != nullptr && block->GetName() == "minecraft:chest";
 }
 
-/// @brief Place a block item (chest, crafting table, furnace) on a free spot next to the bot
+/// @brief Place a block item (chest, crafting table, furnace) on a free spot next to the bot.
+/// A chest always goes down as a double chest, two side by side (the bot needs two)
 static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& placed)
 {
     const std::shared_ptr<World> world = c.GetWorld();
-    // Free spot: air with a solid floor and air above (or a chest lid can't open), not where the bot stands,
-    // and not touching a chest (two chests would merge into a double chest and mix two resources)
+    // Free spot: air with a solid floor (not leaves: they rot away) and air above (or a chest lid can't open), not
+    // where the bot stands, and not touching a chest (two chests would merge into a double chest and mix two resources)
     const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
     const auto is_air = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsAir(); };
+    const auto free = [&](const Position& p)
+        {
+            const Blockstate* floor = world->GetBlock(p + Position(0, -1, 0));
+            return is_air(p) && floor != nullptr && floor->IsSolid() && !EndsWith(floor->GetName(), "_leaves") && is_air(p + Position(0, 1, 0)) &&
+                !(p.x == feet.x && p.z == feet.z) && !IsChest(world, p + Position(1, 0, 0)) && !IsChest(world, p + Position(-1, 0, 0)) &&
+                !IsChest(world, p + Position(0, 0, 1)) && !IsChest(world, p + Position(0, 0, -1));
+        };
+    // A chest faces the bot that places it, and two side by side facing the same way join: the second one beside
+    // the first across the bot's line of sight, both seen from the same side
+    const bool pair = item == "minecraft:chest";
+    const auto side = [&](const Position& p) { const int dx = p.x - feet.x, dz = p.z - feet.z; return std::abs(dx) == std::abs(dz) ? 0 : std::abs(dx) > std::abs(dz) ? (dx > 0 ? 1 : 2) : (dz > 0 ? 3 : 4); };
     int refused = 0;
     McpBot* const bot = dynamic_cast<McpBot*>(&c);
     if (bot != nullptr && std::chrono::steady_clock::now() < bot->refused_until &&
@@ -2641,16 +2653,34 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
     }
     for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.IsAir(); }, 4, 729))
     {
-        const Blockstate* floor = world->GetBlock(p + Position(0, -1, 0));
-        if (floor == nullptr || !floor->IsSolid() || !is_air(p + Position(0, 1, 0)) || (p.x == feet.x && p.z == feet.z) ||
-            IsChest(world, p + Position(1, 0, 0)) || IsChest(world, p + Position(-1, 0, 0)) ||
-            IsChest(world, p + Position(0, 0, 1)) || IsChest(world, p + Position(0, 0, -1)))
+        if (!free(p))
         {
             continue;
+        }
+        std::optional<Position> second;
+        if (pair)
+        {
+            const Position across = side(p) <= 2 ? Position(0, 0, 1) : Position(1, 0, 0);
+            for (const Position& q : { p + across, p - across })
+            {
+                if (!second && side(p) != 0 && side(q) == side(p) && free(q))
+                {
+                    second = q;
+                }
+            }
+            if (!second)
+            {
+                continue;
+            }
         }
         if (PlaceBlock(c, item, p, std::nullopt, true) == Status::Success)
         {
             placed = p;
+            // ponytail: the second chest failing leaves a single one, still a chest to store in
+            if (second && CountItem(c, item) > 0)
+            {
+                PlaceBlock(c, item, *second, std::nullopt, true);
+            }
             return true;
         }
         // Three spots side by side refused by the server: the area is protected (around the world spawn,
@@ -2669,42 +2699,6 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
     return false;
 }
 
-/// @brief The chest of this item: the known one if it still exists, otherwise a new one placed next to the bot
-static bool ChestFor(BehaviourClient& c, const std::string& item, Position& chest, std::string& error)
-{
-    const std::shared_ptr<World> world = c.GetWorld();
-    {
-        std::lock_guard<std::mutex> lock(chests_mutex);
-        // Other bots run in their own process and add chests too
-        LoadChests();
-        const auto known = chests.find(item);
-        if (known != chests.end() && IsChest(world, known->second))
-        {
-            chest = known->second;
-            return true;
-        }
-    }
-    if (CountItem(c, "minecraft:chest") == 0)
-    {
-        std::string craft_error;
-        CraftOne(c, "minecraft:chest", craft_error);
-    }
-    if (CountItem(c, "minecraft:chest") == 0)
-    {
-        error = "no chest item in the inventory to create storage for " + item + " (craft some: 8 planks in a ring)";
-        return false;
-    }
-    if (!PlaceNearby(c, "minecraft:chest", chest))
-    {
-        error = "no free spot within 4 blocks to place a chest for " + item;
-        return false;
-    }
-    std::lock_guard<std::mutex> lock(chests_mutex);
-    chests[item] = chest;
-    SaveChests();
-    return true;
-}
-
 /// @brief First empty slot of an open container window in [begin, end), -1 if none.
 /// In a container window the container's own slots come first, then the player's 27 storage and 9 hotbar slots
 static short EmptySlot(const std::shared_ptr<Window>& window, const short begin, const short end)
@@ -2717,6 +2711,92 @@ static short EmptySlot(const std::shared_ptr<Window>& window, const short begin,
         }
     }
     return -1;
+}
+
+/// @brief A chest within 16 blocks with a free slot, so that no new one is placed while one has room: the nearest
+/// few looked into (not the vault's: those keep to their category), the ones found full passed over for ten minutes
+static bool RoomyChest(BehaviourClient& c, Position& chest)
+{
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    int looked = 0;
+    for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:chest"; }, 16, 8))
+    {
+        {
+            std::lock_guard<std::mutex> lock(chests_mutex);
+            const auto full = full_chests.find(p);
+            const bool vault = std::any_of(chests.begin(), chests.end(), [&](const auto& k) { return k.second == p && k.first.rfind("category:", 0) == 0; });
+            if (vault || (full != full_chests.end() && now - full->second < std::chrono::minutes(10)))
+            {
+                continue;
+            }
+        }
+        if (++looked > 3)
+        {
+            break;
+        }
+        bool room = false;
+        if (GoTo(c, p, 4, 0, 1) == Status::Success && OpenContainer(c, p) == Status::Success)
+        {
+            const short id = c.GetInventoryManager()->GetFirstOpenedWindowId();
+            const std::shared_ptr<Window> window = c.GetInventoryManager()->GetWindow(id);
+            room = EmptySlot(window, 0, window->GetFirstPlayerInventorySlot()) >= 0;
+            CloseContainer(c, id);
+        }
+        if (room)
+        {
+            chest = p;
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(chests_mutex);
+        full_chests[p] = now;
+    }
+    return false;
+}
+
+/// @brief The chest of this item: the known one if it still exists and had room the last time, otherwise one
+/// nearby with room, otherwise a new double chest placed next to the bot
+static bool ChestFor(BehaviourClient& c, const std::string& item, Position& chest, std::string& error)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    {
+        std::lock_guard<std::mutex> lock(chests_mutex);
+        // Other bots run in their own process and add chests too
+        LoadChests();
+        const auto known = chests.find(item);
+        const auto full = known == chests.end() ? full_chests.end() : full_chests.find(known->second);
+        if (known != chests.end() && IsChest(world, known->second) &&
+            (full == full_chests.end() || std::chrono::steady_clock::now() - full->second >= std::chrono::minutes(10)))
+        {
+            chest = known->second;
+            return true;
+        }
+    }
+    if (RoomyChest(c, chest))
+    {
+        std::lock_guard<std::mutex> lock(chests_mutex);
+        chests[item] = chest;
+        SaveChests();
+        return true;
+    }
+    std::string craft_error;
+    for (int i = CountItem(c, "minecraft:chest"); i < 2; ++i)
+    {
+        CraftOne(c, "minecraft:chest", craft_error);
+    }
+    if (CountItem(c, "minecraft:chest") < 2)
+    {
+        error = "not two chest items in the inventory to create storage for " + item + " (craft some: 8 planks in a ring)";
+        return false;
+    }
+    if (!PlaceNearby(c, "minecraft:chest", chest))
+    {
+        error = "no free spot within 4 blocks to place a chest for " + item;
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(chests_mutex);
+    chests[item] = chest;
+    SaveChests();
+    return true;
 }
 
 /// @brief Move a whole stack to an empty slot of the open container: pick it up, put it down.
@@ -2768,22 +2848,15 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
         bool open = found && GoTo(c, chest, 4, 0, 1) == Status::Success && OpenContainer(c, chest) == Status::Success;
         if (found && !open && item != "minecraft:chest")
         {
-            // Its chest is out of reach (far away, behind the castle site): a new one here, crafted if need be,
-            // that is the item's chest from now on, for the bots working around here
-            std::string craft_error;
-            if (CountItem(c, "minecraft:chest") == 0)
+            // Its chest is out of reach (far away, behind the castle site): one here with room or a new double
+            // chest, that is the item's chest from now on, for the bots working around here
             {
-                CraftOne(c, "minecraft:chest", craft_error);
+                std::lock_guard<std::mutex> lock(chests_mutex);
+                full_chests[chest] = std::chrono::steady_clock::now();
+                chests.erase(item);
             }
-            Position here;
-            if (CountItem(c, "minecraft:chest") > 0 && PlaceNearby(c, "minecraft:chest", here))
+            if (ChestFor(c, item, chest, error))
             {
-                {
-                    std::lock_guard<std::mutex> lock(chests_mutex);
-                    chests[item] = here;
-                    SaveChests();
-                }
-                chest = here;
                 open = GoTo(c, chest, 4, 0, 1) == Status::Success && OpenContainer(c, chest) == Status::Success;
             }
         }
@@ -2808,7 +2881,25 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
             {
                 continue;
             }
-            // The whole stack, into the chest's next free slot. Full chest: the rest stays on the bot for now
+            // First onto the chest's stacks of the same item, each filled up to a full stack (a click on a stack of
+            // the same item tops it up, the rest comes back to the bot's slot)
+            const int stack = AssetsManager::getInstance().GetItem(slot.GetItemId())->GetStackSize();
+            for (short to = 0; to < first && stack > 1 && !window->GetSlot(index).IsEmptySlot(); ++to)
+            {
+                const ProtocolCraft::Slot there = window->GetSlot(to);
+                const int had = window->GetSlot(index).GetItemCount();
+                if (!there.IsEmptySlot() && there.GetItemId() == slot.GetItemId() && there.GetItemCount() < stack && MoveStack(c, container_id, index, to))
+                {
+                    const int now = window->GetSlot(index).IsEmptySlot() ? 0 : window->GetSlot(index).GetItemCount();
+                    stored += had - now;
+                    Count(c, "stored", had - now);
+                }
+            }
+            if (window->GetSlot(index).IsEmptySlot())
+            {
+                continue;
+            }
+            // The rest, into the chest's next free slot. Full chest: the rest stays on the bot for now
             // (the next floor of the vault takes it at the next round)
             const short free_slot = EmptySlot(window, 0, first);
             if (free_slot < 0)
@@ -2816,10 +2907,11 @@ static Status StoreTask(BehaviourClient& c, const bool everything, std::atomic<i
                 ChestIsFull(chest, item);
                 break;
             }
+            const int rest = window->GetSlot(index).GetItemCount();
             if (MoveStack(c, container_id, index, free_slot))
             {
-                stored += slot.GetItemCount();
-                Count(c, "stored", slot.GetItemCount());
+                stored += rest;
+                Count(c, "stored", rest);
             }
         }
         CloseContainer(c, container_id);
@@ -4411,6 +4503,18 @@ static Status BuildStep(McpBot& c)
         }
         // Something stands where a block has to go: removing it is clearing too
         const bool clearing = !empty;
+        // A chest, furnace, crafting table, barrel or bed goes on a floor, never in the air: not before the block
+        // under it is there
+        if (!clearing && (EndsWith(wanted_block, ":chest") || EndsWith(wanted_block, ":barrel") || EndsWith(wanted_block, "furnace") ||
+            EndsWith(wanted_block, ":smoker") || EndsWith(wanted_block, ":crafting_table") || EndsWith(wanted_block, "_bed")))
+        {
+            const Blockstate* under = world->GetBlock(p + Position(0, -1, 0));
+            if (under == nullptr || !under->IsSolid())
+            {
+                ++resting_spots;
+                continue;
+            }
+        }
         const std::tuple<int, int, double> rank = { clearing ? 0 : 1, clearing ? -p.y : p.y, focus.SqrDist(Vector3<double>(p.x + 0.5, p.y + 0.5, p.z + 0.5)) };
         if (next == nullptr || rank < best)
         {

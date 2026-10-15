@@ -68,7 +68,20 @@ local ok, err = pcall(function()
     local n_ = 0
     for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
     assert(#assigned == splits or n_ < 15, "no trade while building its house")
+    local furnished = {}
+    for i = before + 1, #builds do
+        for _, e in ipairs(builds[i].blocks) do furnished[e[4]:match("^[%a_]+")] = true end
+        if builds[i].name == "Bot1's house" then
+            local sign = false
+            for _, e in ipairs(builds[i].blocks) do sign = sign or e[4] == "oak_sign|Bot1's|house" end
+            assert(sign, "a sign with its name")
+        end
+    end
+    for _, k in ipairs({ "white_bed", "chest", "furnace", "oak_stairs", "oak_fence" }) do assert(furnished[k], "a house has a " .. k) end
     for _ = 1, 10 do t = t + 60; tick() end
+    local roads = 0
+    for i = before + 1, #builds do if builds[i].name:match("'s road$") then roads = roads + 1 end end
+    assert(roads >= 14, "a road for every house, got " .. roads)
     local v = tool.run({}).village
     for b in pairs(carry) do assert(v[b] and v[b]:match("^house at"), b .. " has its house: " .. tostring(v[b])) end
     n_ = 0
@@ -83,7 +96,7 @@ local ok, err = pcall(function()
     local names_ = {}
     for _, b in ipairs(builds) do
         names_[b.name] = true
-        assert((b.bot ~= "Bot4" or b.name:match("'s house$")) and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
+        assert((b.bot ~= "Bot4" or b.name:match("'s %a+$")) and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
         for _, e in ipairs(b.blocks) do if e[4] ~= "air" and e[4] ~= "cobblestone" then assert(e[2] >= 71, "built on the ground") end end
     end
     local soldier = false
