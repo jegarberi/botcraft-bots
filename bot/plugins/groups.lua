@@ -1,24 +1,25 @@
 -- The bots in groups (two to a trade with 15 bots), each with a trade:
---   cooks      hunt, cook meat, bake bread, feed the hungriest
---   farmers    a crop farm each: harvest, replant; crops go to the breeders (the berry picker is a farmer)
---   breeders   breed cows, sheep, pigs and chickens, shear sheep
+--   bakers     bread, pumpkin pies and cakes from the farmers' crops, eggs and milk; feed the hungriest
+--   farmers    a crop farm each, eggs, pumpkins, milk (the berry picker is a farmer)
+--   butchers   breed cows, sheep, pigs and chickens, slaughter some for meat and leather, shear sheep
 --   miners     a team after ores, digging wide lit mines with stairs
 --   builders   the castle team
 --   soldiers   hunt hostile mobs, guard the leader, gear up
---   crafters   make tools, torches and iron, and hand them out
+--   blacksmiths  smelt iron, make tools, buckets, torches and armor, and hand them out
+-- The trades hand each other what they make (the roles plugin's exchange).
 --   explorers  go far for what the team has not found yet
 -- What a bot does within its trade is drawn by that trade's own neural network (the roles plugin), one bot's
 -- turn every 15 seconds.
 --   groups {}                         groups everyone, once (and says who is what)
 --   groups { show = true }            who is what
 --   groups { stop = true }            everyone back to the castle
---   groups { assign = { cooks = {...}, ... } }   exactly these groups (the brain plugin decides them)
+--   groups { assign = { bakers = {...}, ... } }   exactly these groups (the brain plugin decides them)
 -- The groups are kept in a file and taken up again after a restart.
 local FILE = "../groups_job.lua"
 local ORES = "coal_ore,iron_ore,copper_ore,gold_ore,redstone_ore,lapis_ore,diamond_ore"
-local TRADES = { "cooks", "farmers", "breeders", "miners", "builders", "soldiers", "crafters", "explorers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
 
-local groups = nil          -- { cooks = {...}, farmers = {...}, ... } (TRADES)
+local groups = nil          -- { bakers = {...}, farmers = {...}, ... } (TRADES)
 local notes = {}            -- name -> what it did last
 local busy = false
 
@@ -48,7 +49,10 @@ local function restore()
     f:close()
     local ok, g = pcall(chunk or function() end)
     if not ok or type(g) ~= "table" then return nil end
-    g.cooks, g.hunters = g.cooks or g.hunters, nil       -- saved before the cooks were the hunters
+    -- Saved under the trades' old names (hunters, then cooks; breeders; crafters)
+    g.bakers, g.cooks, g.hunters = g.bakers or g.cooks or g.hunters, nil, nil
+    g.butchers, g.breeders = g.butchers or g.breeders, nil
+    g.blacksmiths, g.crafters = g.blacksmiths or g.crafters, nil
     for _, t in ipairs(TRADES) do g[t] = g[t] or {} end
     return g
 end
@@ -60,7 +64,7 @@ end
 
 local function apply(g)
     notes = {}                  -- what they did in their old trades says nothing now
-    call("feeders", { stop = true })       -- the cooks do the feeding now, by their own network
+    call("feeders", { stop = true })       -- the bakers do the feeding now, by their own network
     for _, t in ipairs(TRADES) do
         if t ~= "miners" and t ~= "builders" then for _, n in ipairs(g[t]) do solo(n) end end
     end
@@ -104,11 +108,11 @@ end)
 
 bot.tool{
     name = "groups",
-    description = "Put the bots in groups, each with a trade: cooks (hunt, cook, bake, feed the hungry), farmers (crop farms; crops to the breeders), breeders (breed animals, shear sheep), miners (a team after ores), builders (the castle), soldiers (hunt hostiles, guard the leader), crafters (make and hand out tools, torches, iron), explorers (go far for new things). Within its trade each bot's next action is drawn by the trade's own neural network (see the roles tool). With no argument, makes the groups; show=true says who is what; stop=true sends everyone back to the castle team.",
+    description = "Put the bots in groups, each with a trade: bakers (bread, pies, cakes; feed the hungry), farmers (crop farms, eggs, pumpkins, milk), butchers (breed animals, slaughter for meat and leather, shear sheep), miners (a team after ores), builders (the castle), soldiers (hunt hostiles, guard the leader), blacksmiths (smelt iron, make tools, buckets, torches and armor and hand them out; the trades hand each other what they make), explorers (go far for new things). Within its trade each bot's next action is drawn by the trade's own neural network (see the roles tool). With no argument, makes the groups; show=true says who is what; stop=true sends everyone back to the castle team.",
     params = { show = "boolean", stop = "boolean", assign = "object" },
     run = function(args)
         local function empty() local g = {} for _, t in ipairs(TRADES) do g[t] = {} end return g end
-        -- Given from outside (the brain plugin): { cooks = {...}, farmers = {...}, ... }
+        -- Given from outside (the brain plugin): { bakers = {...}, farmers = {...}, ... }
         if type(args.assign) == "table" then
             local g = empty()
             for k in pairs(g) do

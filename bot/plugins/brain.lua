@@ -6,7 +6,7 @@
 --   in   20 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
 --        carries, how many bots are hungry, how the castle advanced, the trade it had (one-hot), a bias
 --   ->   10 hidden units (tanh)
---   out  8 trades: cook, farmer, breeder, miner, builder, soldier, crafter, explorer (softmax: how much it
+--   out  8 trades: baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer (softmax: how much it
 --        wants each); within its trade, the trade's own network picks what it does (the roles plugin)
 -- Every day: each bot draws a trade from its wants (that is the exploring), groups stay of two (the
 -- most decided bots get their choice first), and the groups plugin puts them to work.
@@ -24,9 +24,9 @@
 --   brain { vote = true }     vote now
 --   brain { stop = true } / brain { start = true }
 local FILE = "../brain_state.lua"
--- The trades (cooks were the hunters: they hunt, cook and feed; each trade has its own network for its
--- actions, see the roles plugin)
-local TRADES = { "cooks", "farmers", "breeders", "miners", "builders", "soldiers", "crafters", "explorers" }
+-- The trades (in the places of the cooks, breeders and crafters before them: the networks' outputs keep their
+-- meaning; each trade has its own network for its actions, see the roles plugin)
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
 local IN, HID, OUT = 20, 10, 8
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
@@ -210,7 +210,7 @@ local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
 local INPUT_NAMES = { "bias", "health", "food level", "has pickaxe", "has axe", "has sword", "has hoe", "food carried", "wood carried",
-    "stone carried", "team hungry", "castle progress", "was cook", "was farmer", "was breeder", "was miner", "was builder", "was soldier", "was crafter", "was explorer" }
+    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer" }
 
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end
@@ -595,7 +595,7 @@ end
 
 bot.tool{
     name = "brain",
-    description = "The bots' brain: a small neural network (20 inputs about the bot and the team, 10 hidden, 8 outputs) of its own (every 5 days the best-scoring bot's is copied, slightly mutated, to all the others) picks each bot's trade every Minecraft day (cook, farmer, breeder, miner, builder, soldier, crafter, explorer; groups of two; each trade's own network then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
+    description = "The bots' brain: a small neural network (20 inputs about the bot and the team, 10 hidden, 8 outputs) of its own (every 5 days the best-scoring bot's is copied, slightly mutated, to all the others) picks each bot's trade every Minecraft day (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer; groups of two; each trade's own network then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
     params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number", network = "string" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in

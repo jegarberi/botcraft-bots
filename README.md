@@ -35,7 +35,7 @@ remembers seeing, and its decision tree with the branch it is on.
 ## Layout
 
 - `bot/mcp.cpp` the bots, their decision tree and the MCP tools; `bot/tui.cpp` the terminal panel (`bin/bot_tui`, over unix sockets)
-- `bot/plugins/` Lua plugins: `castle` (the castle, roads, road builder, explorer), `groups` (hunters, farmers, breeders,
+- `bot/plugins/` Lua plugins: `castle` (the castle, roads, road builder, explorer), `groups` (bakers, farmers, butchers, blacksmiths,
   miners, builders), `players` (orders from players in the chat), `berries`, `example`, `empire` (optional, off until
   `empire {start=true}`: an Age of Empires II style computer player that pays for ages and techs with what the bots
   gather, splits them over the trades by age and need instead of the brain, and sends the soldiers out in waves)

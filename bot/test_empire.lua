@@ -21,8 +21,8 @@ bot = { call = function(name, a)
     if name == "brain" then if a.stop then brain_on = false elseif a.start then brain_on = true end return { enabled = brain_on } end
     if name == "groups" then
         if a.assign then assigned[#assigned + 1] = a.assign return a.assign end
-        return { builders = { "Bot4: building", "Bot1" }, farmers = { "Bot15", "Bot2" }, cooks = { "Bot12", "Bot6: cook meat: none" },
-            breeders = { "Bot9", "Bot11" }, miners = { "Bot8" }, soldiers = { "Bot5", "Bot3" }, crafters = { "Bot13", "Bot7" },
+        return { builders = { "Bot4: building", "Bot1" }, farmers = { "Bot15", "Bot2" }, bakers = { "Bot12", "Bot6: cook meat: none" },
+            butchers = { "Bot9", "Bot11" }, miners = { "Bot8" }, soldiers = { "Bot5", "Bot3" }, blacksmiths = { "Bot13", "Bot7" },
             explorers = { "Bot10", "Bot14" } }
     end
     if name == "chat" then chat[#chat + 1] = a.message end
@@ -49,7 +49,7 @@ local ok, err = pcall(function()
     assert(n == 15, "every bot in one trade, got " .. n)
     assert(where.Bot4 == "builders" and where.Bot15 == "farmers", "leader a builder, picker a farmer")
     assert(#g.farmers == 4 and #g.soldiers == 0, "Dark Age, food short first: more farmers, no soldiers, got " .. #g.farmers .. " " .. #g.soldiers)
-    assert(where.Bot12 == "cooks" and where.Bot8 == "miners", "few bots moved")
+    assert(where.Bot12 == "bakers" and where.Bot8 == "miners", "few bots moved")
     assert(chat[1]:match("^%[empire%] Bot") and chat[1]:match("->"), "the leader tells the moves")
     for _ = 1, 400 do
         t = t + 60

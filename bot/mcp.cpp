@@ -2267,6 +2267,31 @@ static Status ShearTask(BehaviourClient& c, const int count, const double radius
     return sheared > 0 ? Status::Success : Status::Failure;
 }
 
+/// @brief Milk cows: an empty bucket used on each cow in turn, a milk bucket back for each. The cow is unharmed
+/// @param milked How many buckets were filled
+static Status MilkTask(BehaviourClient& c, const int count, const double radius, std::atomic<int>& milked)
+{
+    std::set<int> tried;
+    while (milked < count && CountItem(c, "minecraft:bucket") > 0)
+    {
+        const std::vector<Ent> cows = FindEntities(c, "cow", radius);
+        const auto next = std::find_if(cows.begin(), cows.end(), [&](const Ent& e) { return tried.count(e.id) == 0; });
+        if (next == cows.end())
+        {
+            break;
+        }
+        tried.insert(next->id);
+        const int before = CountItem(c, "minecraft:milk_bucket");
+        if (SetItemInHand(c, "minecraft:bucket") == Status::Failure || InteractEntity(c, next->id, Hand::Main, true) == Status::Failure)
+        {
+            continue;
+        }
+        Wait(c, 300);
+        milked += CountItem(c, "minecraft:milk_bucket") > before;
+    }
+    return milked > 0 ? Status::Success : Status::Failure;
+}
+
 /// @brief What an animal follows when a player holds it
 static std::string LureFood(const std::string& type)
 {
@@ -6522,6 +6547,7 @@ static const char* tools_json = R"JSON([
 {"name":"collect","description":"Collect resources: repeatedly find the nearest block with this exact id, mine it and pick up the drop, until count is reached. Equip a suitable tool first. For a log the whole tree is cut (every connected log within reach, so the result can exceed count), and a sapling of that kind is replanted if the bot has one.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":32}},"required":["block"]}},
 {"name":"kill","description":"Hunt and attack entities until count are dead. type: an entity name like zombie or cow, or a group: hostile, animal. Equip a weapon first. Penned animals (a fence, gate, wall or iron bars within 8 blocks) are never attacked.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":24}},"required":["type"]}},
 {"name":"make","description":"Have the bot make an item until it holds count of it, by whatever it takes: craft it, smelt it, make what the recipe lacks, mine or cut the raw materials, build a furnace or a crafting table if needed. Works for anything with a recipe or a smelting source. Glass: make glass (sand is dug, a furnace built, coal mined for fuel); glass panes: make glass_pane (6 glass give 16). Also stone, stone_bricks, bricks, charcoal, iron_ingot, bucket, torch, chest... Returns at once: the autopilot does the work, status shows the progress. count 0 drops it.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"count":{"type":"number","default":1}},"required":["item"]}},
+{"name":"milk","description":"Milk cows: an empty bucket on up to count cows within radius, a milk bucket from each; the cows are unharmed. Makes a bucket from 3 iron ingots if the bot has none.","inputSchema":{"type":"object","properties":{"count":{"type":"number","default":1},"radius":{"type":"number","default":24}}}},
 {"name":"shear","description":"Shear sheep for wool without killing them: up to count sheep within radius, 1 to 3 wool each, picked up. Needs shears; makes them from 2 iron ingots if the bot has none. The sheep grow their wool back by grazing, so a pen of sheep is a wool farm.","inputSchema":{"type":"object","properties":{"count":{"type":"number","default":4},"radius":{"type":"number","default":32}}}},
 {"name":"dye","description":"Dye wool. color: white, orange, magenta, light_blue, yellow, lime, pink, gray, light_gray, cyan, purple, blue, brown, green, red or black. By default crafts count dyed wool from wool the bot carries (one dye each). sheep=true dyes count sheep instead: each then gives wool of that colour every time it is shorn. The dye comes from the inventory, or is made from what the bot carries (red from a poppy, yellow from a dandelion, white from bone meal...).","inputSchema":{"type":"object","properties":{"color":{"type":"string"},"count":{"type":"number","default":1},"sheep":{"type":"boolean","default":false}},"required":["color"]}},
 {"name":"lure","description":"Lead animals to a place, for a pen or a farm: with their food in hand (cow, sheep, goat: wheat; pig, rabbit: carrot; chicken: wheat_seeds; or food=...), the bot goes up to the nearest ones of this type within 48 blocks and walks to x y z in short hops, waiting for them and going back for them when they lose interest. Returns how many arrived. Then close the pen and use breed.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"food":{"type":"string"}},"required":["type","x","y","z"]}},
@@ -8343,6 +8369,31 @@ static Value CallTool(const std::string& name, const Value& a)
         o["sheep_sheared"] = sheared->load();
         o["wool_gained"] = wool->load();
         o["note"] = *sheared > 0 ? "the sheep live and grow their wool back by grazing" : "no sheep with wool on them within range";
+        return o;
+    }
+    if (name == "milk")
+    {
+        const int count = std::clamp(static_cast<int>(Num(a, "count", 1)), 1, 16);
+        const double radius = Num(a, "radius", 24);
+        const auto milked = std::make_shared<std::atomic<int>>(0);
+        const auto error = std::make_shared<std::string>();
+        Run(bot, 300, name, [=](McpBot& c)
+            {
+                std::string craft_error;
+                if (CountItem(c, "minecraft:bucket") == 0 && CraftOne(c, "minecraft:bucket", craft_error) == 0)
+                {
+                    *error = "needs an empty bucket, and could not make one (3 iron ingots): " + craft_error;
+                    return Status::Failure;
+                }
+                return MilkTask(c, count, radius, *milked);
+            });
+        if (!error->empty())
+        {
+            throw std::runtime_error(*error);
+        }
+        Value o;
+        o["milked"] = milked->load();
+        o["note"] = *milked > 0 ? "milk buckets for the bakers' cakes" : "no cow within range";
         return o;
     }
     if (name == "dye")

@@ -3,9 +3,13 @@
 os.remove("../roles_state.lua"); os.remove("../brain_state.lua")
 local tools, last_ore = {}, nil
 local stats = { collected = 0 }
+local gives = {}
 bot = { call = function(name, a)
+    if name == "give" then gives[#gives + 1] = a end
     if name == "status" then
-        return { name = a.bot or "Bot1", health = 20, food = 18, day_time = 1000, inventory = { cobblestone = 10, iron_ingot = 2 },
+        local inv = { cobblestone = 10, iron_ingot = 2 }
+        if a.bot == "Farm1" then inv = { wheat = 40, egg = 6 } end
+        return { name = a.bot or "Bot1", health = 20, food = 18, day_time = 1000, inventory = inv,
             stats = stats, deaths = 0, times_stuck = 0, memory = { iron_ore = 3 }, position = { x = 0, y = 64, z = 0 } }
     end
     if name == "team_member" then last_ore = a.block end
@@ -27,12 +31,28 @@ local after = want("mine iron")
 assert(after > before + 15, string.format("learnt to mine iron: %.1f%% -> %.1f%%", before, after))
 assert(last_ore and last_ore ~= "", "the miner's order went out")
 local view = roles.run({ network = "miners", bot = "Bot1" })
-assert(#view.inputs == 14 and #view.outputs == 5 and view.last_action, "the network for the panels")
+assert(#view.inputs == 15 and #view.outputs == 6 and view.last_action, "the network for the panels")
 local all = roles.run({})
-assert(all.cooks and all.explorers and all.soldiers["hunt hostiles"], "every trade has its network")
+assert(all.bakers and all.explorers and all.soldiers["hunt hostiles"], "every trade has its network")
 -- Each trade acts without error
-for _, role in ipairs({ "cooks", "farmers", "breeders", "builders", "soldiers", "crafters", "explorers" }) do
-    for _ = 1, 10 do assert(roles.run({ act = "Bot2", role = role, members = { "Bot2" }, groups = { miners = { "Bot1" }, breeders = { "Bot3" } } }).action) end
+local groups = { miners = { "Bot1" }, butchers = { "Bot3" }, farmers = { "Farm1" }, bakers = { "Bot2" } }
+for _, role in ipairs({ "bakers", "farmers", "butchers", "builders", "soldiers", "blacksmiths", "explorers" }) do
+    for _ = 1, 10 do
+        local r = roles.run({ act = "Bot2", role = role, members = { "Bot2" }, groups = groups })
+        assert(r.action and not tostring(r.note):match("^failed"), role .. " " .. tostring(r.action) .. ": " .. tostring(r.note))
+    end
 end
+-- The exchange: a baker lacking eggs and wheat asks the farmer, who needs none of them itself
+gives = {}
+for _ = 1, 80 do roles.run({ act = "Bot2", role = "bakers", members = { "Bot2" }, groups = groups }) end
+local got = false
+for _, g in ipairs(gives) do got = got or (g.bot == "Farm1" and g.to == "Bot2" and (g.item == "minecraft:egg" and g.count == 2 or g.item == "minecraft:wheat" and g.count == 9)) end
+assert(got, "the farmer handed the baker what it lacked")
+-- And the farmer hands its surplus eggs to the baker on its own turn
+gives = {}
+for _ = 1, 80 do roles.run({ act = "Farm1", role = "farmers", members = { "Farm1" }, groups = groups }) end
+got = false
+for _, g in ipairs(gives) do got = got or (g.bot == "Farm1" and g.to == "Bot2" and (g.item == "minecraft:egg" or g.item == "minecraft:wheat")) end
+assert(got, "the farmer gave its surplus to the baker")
 os.remove("../roles_state.lua"); os.remove("../brain_state.lua")
 print(string.format("roles plugin OK: mining iron %.1f%% -> %.1f%%", before, after))

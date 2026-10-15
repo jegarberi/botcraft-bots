@@ -3,7 +3,7 @@
 --              spent on ages and techs
 --   ages       Dark -> Feudal -> Castle -> Imperial: each one paid for, announced in the chat, and with its own
 --              split of the bots ("villagers") over the trades, shifted toward the resource the next age lacks most
---   techs      paid for once their age is reached: better tools and armor, made by the crafters and soldiers
+--   techs      paid for once their age is reached: better tools and armor, made by the blacksmiths and soldiers
 --   the leader decides every bot's trade (the first bot leads if no one does): the age's split, filled with the bots
 --              whose tools and things fit each trade best, the moves told in the chat
 --   buildings  houses (one per 5 bots), lumber camp, mill, mining camp, barracks, blacksmith, market, monastery,
@@ -21,26 +21,26 @@
 --   empire { village = true }   a house for every bot, then its trade (starts playing if it was not)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
-local TRADES = { "cooks", "farmers", "breeders", "miners", "builders", "soldiers", "crafters", "explorers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
 local RESOURCES = { "food", "wood", "stone", "ore" }
 -- Each age: its cost (to reach it) and how many bots of every 15 work in each trade
 local AGES = {
     { name = "Dark Age", cost = {},
-      mix = { farmers = 3, cooks = 2, breeders = 2, builders = 4, miners = 2, crafters = 1, explorers = 1, soldiers = 0 } },
+      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 4, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 0 } },
     { name = "Feudal Age", cost = { food = 128, wood = 128 },
-      mix = { farmers = 3, cooks = 2, breeders = 2, builders = 3, miners = 3, crafters = 1, explorers = 0, soldiers = 1 } },
+      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 1 } },
     { name = "Castle Age", cost = { food = 192, stone = 256, ore = 64 },
-      mix = { farmers = 2, cooks = 2, breeders = 2, builders = 3, miners = 3, crafters = 1, explorers = 0, soldiers = 2 } },
+      mix = { farmers = 2, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 2 } },
     { name = "Imperial Age", cost = { food = 256, stone = 256, ore = 192 },
-      mix = { farmers = 2, cooks = 2, breeders = 1, builders = 3, miners = 2, crafters = 1, explorers = 1, soldiers = 3 } },
+      mix = { farmers = 2, bakers = 2, butchers = 1, builders = 3, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 3 } },
 }
 -- The trades that bring in each resource: the one the next age lacks most gets 2 more bots' weight in each
-local NEED = { food = { "farmers", "cooks" }, wood = { "builders", "explorers" }, stone = { "builders", "miners" }, ore = { "miners" } }
+local NEED = { food = { "farmers", "bakers" }, wood = { "builders", "explorers" }, stone = { "builders", "miners" }, ore = { "miners" } }
 -- who: the trade that makes it; item and count: what each of them is told to make
 local TECHS = {
-    { name = "Stone Tools", age = 2, cost = { wood = 32, stone = 48 }, who = "crafters", item = "stone_pickaxe", count = 4 },
-    { name = "Bloomery", age = 2, cost = { wood = 48, ore = 16 }, who = "crafters", item = "iron_ingot", count = 16 },
-    { name = "Iron Tools", age = 3, cost = { ore = 48 }, who = "crafters", item = "iron_pickaxe", count = 3 },
+    { name = "Stone Tools", age = 2, cost = { wood = 32, stone = 48 }, who = "blacksmiths", item = "stone_pickaxe", count = 4 },
+    { name = "Bloomery", age = 2, cost = { wood = 48, ore = 16 }, who = "blacksmiths", item = "iron_ingot", count = 16 },
+    { name = "Iron Tools", age = 3, cost = { ore = 48 }, who = "blacksmiths", item = "iron_pickaxe", count = 3 },
     { name = "Scale Mail", age = 3, cost = { food = 64, ore = 32 }, who = "soldiers", item = "iron_chestplate", count = 1 },
     { name = "Blast Furnace", age = 4, cost = { food = 64, ore = 64 }, who = "soldiers", item = "iron_sword", count = 1 },
     { name = "Plate Mail", age = 4, cost = { ore = 96 }, who = "soldiers", item = "iron_leggings", count = 1 },
@@ -90,6 +90,10 @@ do
         local ok, s = pcall(load(f:read("a"), FILE, "t", {}) or function() end)
         f:close()
         if ok and type(s) == "table" then for k, v in pairs(s) do state[k] = v end end
+        -- Groups saved under the trades' old names
+        for old, new in pairs({ cooks = "bakers", breeders = "butchers", crafters = "blacksmiths" }) do
+            if state.groups and state.groups[old] then state.groups[new], state.groups[old] = state.groups[old], nil end
+        end
     end
 end
 
@@ -161,9 +165,9 @@ end
 -- What makes a bot fit for a trade: the tools and things it carries (ends of item names)
 local FIT = {
     soldiers = { "_sword", "_chestplate", "_helmet", "shield" }, miners = { "_pickaxe", "torch", "raw_iron", "coal" },
-    farmers = { "_hoe", "wheat_seeds", "wheat", "potato" }, breeders = { "carrot", "shears", "wool" },
-    cooks = { "beef", "porkchop", "mutton", "chicken", "bread" }, builders = { "cobblestone", "_planks", "_log" },
-    crafters = { "iron_ingot", "stick", "crafting_table", "furnace" }, explorers = { "boat", "map" },
+    farmers = { "_hoe", "wheat_seeds", "egg", "milk_bucket", "pumpkin" }, butchers = { "beef", "porkchop", "mutton", "leather", "shears", "wool" },
+    bakers = { "wheat", "bread", "pumpkin_pie", "cake" }, builders = { "cobblestone", "_planks", "_log" },
+    blacksmiths = { "iron_ingot", "stick", "crafting_table", "furnace" }, explorers = { "boat", "map" },
 }
 local function fit(st, trade)
     local score = 0
@@ -395,7 +399,7 @@ local function worker(names, leader)
     picker = type(picker) == "table" and picker.bot
     local explorer = call("castle", { action = "explore" })
     explorer = type(explorer) == "table" and explorer.bot
-    for _, t in ipairs({ "builders", "explorers", "crafters", "miners" }) do
+    for _, t in ipairs({ "builders", "explorers", "blacksmiths", "miners" }) do
         local list = (state.groups or {})[t] or {}
         for i = #list, 1, -1 do
             local n = list[i]
@@ -585,7 +589,7 @@ end)
 
 bot.tool{
     name = "empire",
-    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the crafters and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name), then a road joining it to the others, and then take a trade (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
+    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name), then a road joining it to the others, and then take a trade (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
     params = { start = "boolean", stop = "boolean", village = "boolean" },
     run = function(args)
         if args.village then
