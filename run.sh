@@ -10,6 +10,7 @@
 #                                 bots store their items and the program stop. The flags go in any order
 #   ./run.sh --headless           in one terminal and ./run.sh --tui (or bot/bin/bot_tui) in another works too
 #   ./run.sh --empire ...         the Age of Empires style AI plays from the start (plugins/empire.lua)
+#   ./run.sh --village ...        the same, in village mode: a house for every bot first, then its trade
 #   ./run.sh --bots 3 --delay 10  any bot_mcp options replace the defaults (see ./run.sh --help)
 # Build output goes to stderr, so this script can also be used as the MCP server command.
 set -euo pipefail
@@ -27,11 +28,11 @@ cmake --build build >&2
 # Recipes and item tags come from the game's own data, inside the client jar Botcraft downloaded
 [ -d data/data/minecraft/recipe ] || unzip -o -q ../Botcraft/Assets/26.3/client.jar 'data/minecraft/recipe/*' 'data/minecraft/tags/item/*' -d data >&2
 
-# --empire: the Age of Empires style AI plays from the start (plugins/empire.lua)
-if [[ " $* " == *" --empire "* ]]; then
-    export BOTCRAFT_EMPIRE=1
+# --empire: the Age of Empires style AI plays from the start (plugins/empire.lua); --village: in village mode
+if [[ " $* " == *" --empire "* || " $* " == *" --village "* ]]; then
+    [[ " $* " == *" --village "* ]] && export BOTCRAFT_EMPIRE=village || export BOTCRAFT_EMPIRE=1
     args=()
-    for a in "$@"; do [ "$a" = --empire ] || args+=("$a"); done
+    for a in "$@"; do [ "$a" = --empire ] || [ "$a" = --village ] || args+=("$a"); done
     set -- ${args[@]+"${args[@]}"}
 fi
 mode=${1:-}

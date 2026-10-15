@@ -19,6 +19,7 @@
 --   empire {}                   age, resources, what the next age costs, the split, what happened
 --   empire { start = true }     play (taken up again after a restart)
 --   ./run.sh --empire           plays from the start (BOTCRAFT_EMPIRE=1 in the environment)
+--   ./run.sh --village          the same, in village mode (BOTCRAFT_EMPIRE=village)
 --   empire { village = true }   a house for every bot, then its trade (starts playing if it was not)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
@@ -634,10 +635,11 @@ local function start()
     save()
 end
 
--- ./run.sh --empire (BOTCRAFT_EMPIRE=1): plays from the start, once the bots are in
-local auto = os.getenv("BOTCRAFT_EMPIRE") == "1"
+-- ./run.sh --empire (BOTCRAFT_EMPIRE=1): plays from the start, once the bots are in; --village (=village) in village mode
+local auto = os.getenv("BOTCRAFT_EMPIRE")
 bot.every(60, function()
-    if auto and not state.enabled and os.time() - loaded_at >= 150 then start() end
+    if (auto == "1" or auto == "village") and not state.enabled and os.time() - loaded_at >= 150 then start() end
+    if auto == "village" and state.enabled and not state.village then state.village, last_split = {}, 0 end
     if not state.enabled or os.time() - loaded_at < 150 then return end
     play(os.time())
 end)
