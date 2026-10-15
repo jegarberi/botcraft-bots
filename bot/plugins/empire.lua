@@ -6,6 +6,9 @@
 --   techs      paid for once their age is reached: better tools and armor, made by the crafters and soldiers
 --   the leader decides every bot's trade (the first bot leads if no one does): the age's split, filled with the bots
 --              whose tools and things fit each trade best, the moves told in the chat
+--   buildings  houses (one per 5 bots), lumber camp, mill, mining camp, barracks, blacksmith, market, monastery,
+--              university and a wonder, in blocks, put up by one builder at a time in a town east of the castle;
+--              each age needs two buildings of the age before
 --   attacks    from the Castle Age, every 10 minutes the soldiers go out together after hostile mobs
 -- It decides the groups (the groups plugin carries them out, each trade's network still picks what a bot does), so the
 -- brain rests while it plays and works again when it stops.
@@ -58,7 +61,8 @@ local function call(tool, args)
     return ok and r or nil, (not ok) and tostring(r) or nil
 end
 
-local state = { enabled = false, age = 1, stock = { food = 0, wood = 0, stone = 0, ore = 0 }, techs = {}, groups = nil, log = {} }
+local state = { enabled = false, age = 1, stock = { food = 0, wood = 0, stone = 0, ore = 0 }, techs = {}, groups = nil, log = {},
+    built = {}, work = nil, town = nil, lots = 0 }
 local seen = {}             -- bot -> resource -> what it carried at the last look
 local looks = {}            -- bot -> its status at the last look (what the leader judges it by)
 local last_split, last_attack, loaded_at = 0, 0, os.time()
@@ -167,7 +171,8 @@ local function fit(st, trade)
 end
 
 -- The leader decides every bot's trade: the targets of the age, filled with the bots that fit each best (staying
--- in its trade counts for 1: a move costs the work under way). It is a builder itself, the berry picker a farmer.
+-- in its trade counts for 1: a move costs the work under way). It is a builder itself, the berry picker a farmer, the explorer
+-- (castle { action = "explore" }) an explorer.
 -- No leader yet: the first bot leads.
 local function split(names)
     local want = targets(#names)
@@ -179,6 +184,8 @@ local function split(names)
     local keep = { [leader] = "builders" }
     local picker = call("berries", {})
     if type(picker) == "table" and picker.bot and picker.bot ~= leader then keep[picker.bot] = "farmers" end
+    local explorer = call("castle", { action = "explore" })      -- the road builder of castle { action = "explore" }
+    if type(explorer) == "table" and explorer.bot and explorer.bot ~= leader then keep[explorer.bot] = "explorers" end
     local was = {}
     for t, list in pairs(state.groups or {}) do for _, n in ipairs(list) do was[n] = t end end
     local g, placed, pairs_ = {}, {}, {}
@@ -220,14 +227,222 @@ local function same(a, b)
     return true
 end
 
+-- ---------------------------------------------------------------- buildings
+-- Age of Empires buildings, in Minecraft blocks: each one paid for, then put up by a builder taken off the trades
+-- (never the leader), block by block (a solo build order: the castle goes on meanwhile), in a town east of the
+-- castle's moat. As in the game, each age needs two buildings of the age before it (houses aside), and there is a
+-- house for every 5 bots.
+-- A hut: foundation, the space cleared, corner posts, walls (none when open) with a doorway on the south side,
+-- a flat roof and, inset by one, a second layer over it. o = { x, y, z } its north-west corner at floor level
+local function hut(o, w, d, h, wall, post, roof, open)
+    local b = {}
+    local function put(x, y, z, item) b[#b + 1] = { o.x + x, o.y + y, o.z + z, item } end
+    for x = 0, w - 1 do
+        for z = 0, d - 1 do
+            put(x, -1, z, "cobblestone")
+            for y = 0, h + 2 do put(x, y, z, "air") end
+            local edge_x, edge_z = x == 0 or x == w - 1, z == 0 or z == d - 1
+            for y = 0, h - 1 do
+                if edge_x and edge_z then put(x, y, z, post)
+                elseif (edge_x or edge_z) and not open and not (z == d - 1 and x == w // 2 and y < 2) then put(x, y, z, wall) end
+            end
+            put(x, h, z, roof)
+            if x > 0 and x < w - 1 and z > 0 and z < d - 1 then put(x, h + 1, z, roof) end
+        end
+    end
+    -- Later blocks replace earlier ones at the same spot: the air cleared first, the building after
+    local seen, out = {}, {}
+    for i = #b, 1, -1 do
+        local k = b[i][1] .. " " .. b[i][2] .. " " .. b[i][3]
+        if not seen[k] then seen[k] = true; table.insert(out, 1, b[i]) end
+    end
+    return out, put
+end
+
+local function with(blocks, o, list)
+    for _, e in ipairs(list) do blocks[#blocks + 1] = { o.x + e[1], o.y + e[2], o.z + e[3], e[4] } end
+    return blocks
+end
+
+local BUILDINGS = {
+    { name = "House", age = 1, cost = { wood = 16 }, house = true,
+      make = function(o) return hut(o, 5, 5, 3, "oak_planks", "oak_log", "spruce_planks") end },
+    { name = "Lumber Camp", age = 1, cost = { wood = 32 },
+      make = function(o) return with(hut(o, 7, 5, 3, nil, "oak_log", "spruce_planks", true), o,
+          { { 2, 0, 2, "oak_log" }, { 3, 0, 2, "oak_log" }, { 4, 0, 2, "oak_log" }, { 3, 1, 2, "oak_log" }, { 1, 0, 1, "chest" } }) end },
+    { name = "Mill", age = 1, cost = { wood = 32 },
+      -- with sails: a cross of fences on the north face
+      make = function(o)
+          local s = { { 2, 0, 2, "crafting_table" } }
+          for i = 1, 3 do
+              s[#s + 1] = { 2, 3 + i, -1, "oak_fence" }; s[#s + 1] = { 2, 3 - i, -1, "oak_fence" }
+              s[#s + 1] = { 2 + i, 3, -1, "oak_fence" }; s[#s + 1] = { 2 - i, 3, -1, "oak_fence" }
+          end
+          s[#s + 1] = { 2, 3, -1, "oak_log" }
+          return with(hut(o, 5, 5, 4, "cobblestone", "oak_log", "oak_planks"), o, s) end },
+    { name = "Mining Camp", age = 1, cost = { wood = 32 },
+      make = function(o) return with(hut(o, 7, 5, 3, nil, "cobblestone", "cobblestone", true), o,
+          { { 2, 0, 2, "cobblestone" }, { 3, 0, 2, "cobblestone" }, { 3, 1, 2, "cobblestone" }, { 1, 0, 1, "chest" } }) end },
+    { name = "Barracks", age = 2, cost = { wood = 64, stone = 32 },
+      make = function(o) return with(hut(o, 9, 7, 4, "cobblestone", "stone_bricks", "oak_planks"), o,
+          { { 2, 0, 1, "oak_fence" }, { 2, 1, 1, "carved_pumpkin" }, { 6, 0, 1, "oak_fence" }, { 6, 1, 1, "carved_pumpkin" } }) end },
+    { name = "Blacksmith", age = 2, cost = { wood = 48, stone = 32 },
+      -- a forge and a chimney
+      make = function(o) return with(hut(o, 7, 7, 3, "cobblestone", "cobblestone", "stone_bricks"), o,
+          { { 1, 0, 1, "furnace" }, { 2, 0, 1, "furnace" }, { 5, 0, 1, "crafting_table" },
+            { 1, 4, 1, "cobblestone" }, { 1, 5, 1, "cobblestone" }, { 1, 6, 1, "cobblestone" } }) end },
+    { name = "Market", age = 2, cost = { wood = 64 },
+      make = function(o) return with(hut(o, 9, 9, 3, nil, "oak_log", "oak_planks", true), o,
+          { { 2, 0, 2, "barrel" }, { 6, 0, 2, "barrel" }, { 2, 0, 6, "chest" }, { 6, 0, 6, "barrel" }, { 4, 0, 4, "oak_fence" }, { 4, 1, 4, "torch" } }) end },
+    { name = "Monastery", age = 3, cost = { stone = 96, wood = 32 },
+      -- a bell tower over its north-east corner
+      make = function(o)
+          local b, put = hut(o, 9, 9, 5, "stone_bricks", "stone_bricks", "oak_planks")
+          for y = 5, 10 do for x = 6, 8 do for z = 0, 2 do
+              if y == 10 or x ~= 7 or z ~= 1 then put(x, y, z, "stone_bricks") end
+          end end end
+          put(7, 9, 1, "lantern")
+          return b end },
+    { name = "University", age = 3, cost = { wood = 64, stone = 64 },
+      -- two floors, the upper one of wood
+      make = function(o)
+          local b = hut(o, 9, 9, 4, "stone_bricks", "stone_bricks", "stone_bricks")
+          return with(b, o, (function()
+              local up = {}
+              for x = 1, 7 do for z = 1, 7 do for y = 5, 7 do
+                  if x == 1 or x == 7 or z == 1 or z == 7 or y == 7 then up[#up + 1] = { x, y, z, y == 7 and "spruce_planks" or "oak_planks" } end
+              end end end
+              return up end)()) end },
+    { name = "Wonder", age = 4, cost = { food = 128, wood = 128, stone = 256, ore = 128 },
+      -- a stepped pyramid with a light on top
+      make = function(o)
+          local b = {}
+          for t = 0, 5 do
+              for x = t, 12 - t do for z = t, 12 - t do b[#b + 1] = { o.x + x, o.y + t, o.z + z, "stone_bricks" } end end
+          end
+          b[#b + 1] = { o.x + 6, o.y + 6, o.z + 6, "lantern" }
+          return b end },
+}
+
+-- Where the next building goes: rows of three, 18 blocks apart, east of the castle (or of the leader)
+local function ground(x, z, from)
+    for y = from + 24, from - 24, -1 do
+        local r = call("get_block", { x = x, y = y, z = z })
+        local name = type(r) == "table" and tostring(r.block or "") or ""
+        if name:match("dirt") or name:match("grass_block") or name:match("stone") or name:match("sand") or name:match("gravel")
+            or name:match("clay") or name:match("podzol") or name:match("mud") or name:match("snow_block") or name:match("terracotta") then
+            return y + 1
+        end
+    end
+    return from
+end
+
+local function lot(leader)
+    if not state.town then
+        local f = io.open("../castle_site.txt", "r")
+        local cx, cy, cz
+        if f then cx, cy, cz = f:read("a"):match("(-?%d+) (-?%d+) (-?%d+)"); f:close() end
+        if cx then
+            state.town = { x = tonumber(cx) + 144, y = tonumber(cy), z = tonumber(cz) - 30 }
+        else
+            local st = call("status", { bot = leader })
+            local p = type(st) == "table" and st.position or { x = 0, y = 64, z = 0 }
+            state.town = { x = math.floor(p.x) + 30, y = math.floor(p.y), z = math.floor(p.z) }
+        end
+    end
+    local slot = state.lots or 0
+    state.lots = slot + 1
+    local x, z = state.town.x + (slot % 3) * 18, state.town.z + (slot // 3) * 18
+    return { x = x, y = ground(x + 4, z + 4, state.town.y), z = z }
+end
+
+local function houses_needed(n) return math.ceil(n / 5) end
+
+-- The next building to put up: in order, houses as the bots need them, anything of an age reached
+local function next_building(n)
+    for _, b in ipairs(BUILDINGS) do
+        local have = state.built[b.name] or 0
+        local want = b.house and houses_needed(n) or 1
+        if have < want and state.age >= b.age then return b end
+    end
+end
+
+-- How many buildings (houses aside) of an age stand
+local function built_of(age)
+    local c = 0
+    for _, b in ipairs(BUILDINGS) do if b.age == age and not b.house then c = c + (state.built[b.name] or 0) end end
+    return c
+end
+
+local function hand(w)
+    call("team_member", { bot = w.bot, objective = "build", plan = "blocks", members = { w.bot }, leader = w.bot, count = 1,
+        solo = true, name = w.name, blocks = w.blocks })
+    w.handed, w.started = os.time(), false
+end
+
+-- A builder (never the leader nor the berry picker) for the building under way, the one it had if still here
+local function worker(names, leader)
+    local here = {}
+    for _, n in ipairs(names) do here[n] = true end
+    local picker = call("berries", {})
+    picker = type(picker) == "table" and picker.bot
+    local explorer = call("castle", { action = "explore" })
+    explorer = type(explorer) == "table" and explorer.bot
+    for _, t in ipairs({ "builders", "explorers", "crafters", "miners" }) do
+        local list = (state.groups or {})[t] or {}
+        for i = #list, 1, -1 do
+            local n = list[i]
+            if here[n] and n ~= leader and n ~= picker and n ~= explorer then return n end
+        end
+    end
+end
+
+-- The rule for buildings: the one under way watched, the next one paid for and handed out
+local function construct(names, now)
+    local w = state.work
+    if w then
+        local here = false
+        for _, n in ipairs(names) do here = here or n == w.bot end
+        local st = looks[w.bot]
+        if here and type(st) == "table" then
+            if st.building then w.started = true end
+            if w.started and not st.building and (st.build_left or 0) == 0 then
+                state.built[w.name] = (state.built[w.name] or 0) + 1
+                announce(w.bot .. " built " .. (w.name == "Wonder" and "a Wonder: we win!" or ("a " .. w.name)) ..
+                    " at " .. w.at.x .. " " .. w.at.z)
+                state.work, last_split = nil, 0
+                return
+            end
+            if now - w.handed >= 600 and not st.building then hand(w) end     -- the order was lost: again
+        else
+            local leader = call("leader", {})
+            w.bot = worker(names, leader)
+            if w.bot then hand(w) end
+        end
+        return
+    end
+    local b = next_building(#names)
+    if not b or not affords(b.cost) then return end
+    local leader = call("leader", {})
+    local who = worker(names, leader)
+    if not who then return end
+    pay(b.cost)
+    local at = lot(leader)
+    state.work = { name = b.name, bot = who, at = at, blocks = b.make(at) }
+    hand(state.work)
+    last_split = 0
+    announce(who .. " builds a " .. b.name .. " at " .. at.x .. " " .. at.z)
+end
+
 -- One look a minute: the rules, in order, like an AI script's
 local function play(now)
     local names = {}
     for _, b in ipairs(call("bots", {}) or {}) do names[#names + 1] = b.name end
     if #names == 0 then return end
     gather(names)
+    construct(names, now)
     local next_age = AGES[state.age + 1]
-    if next_age and affords(next_age.cost) then
+    if next_age and affords(next_age.cost) and built_of(state.age) >= 2 then
         pay(next_age.cost)
         state.age = state.age + 1
         announce("we reached the " .. next_age.name .. "!")
@@ -246,7 +461,9 @@ local function play(now)
     end
     if now - last_split >= REBALANCE then
         last_split = now
-        local g, leader = split(names)
+        local traders = {}
+        for _, n in ipairs(names) do if not (state.work and state.work.bot == n) then traders[#traders + 1] = n end end
+        local g, leader = split(traders)
         if not same(g, state.groups) then
             state.groups = g
             call("groups", { assign = g })
@@ -294,7 +511,7 @@ end)
 
 bot.tool{
     name = "empire",
-    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the crafters and soldiers), splits the bots over the trades by the age and what the next age lacks (the groups tool carries it out; the brain rests meanwhile), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
+    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the crafters and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
     params = { start = "boolean", stop = "boolean" },
     run = function(args)
         if args.start and not state.enabled then
@@ -309,7 +526,10 @@ bot.tool{
         local techs = {}
         for _, t in ipairs(TECHS) do techs[#techs + 1] = t.name .. (state.techs[t.name] and " (done)" or "") end
         return { playing = state.enabled, age = AGES[state.age].name, resources = state.stock,
-            next_age = next_age and { name = next_age.name, cost = next_age.cost } or "none: Imperial is the last",
+            next_age = next_age and { name = next_age.name, cost = next_age.cost, needs = "2 buildings of the " .. AGES[state.age].name ..
+                " (" .. built_of(state.age) .. " built)" } or "none: Imperial is the last",
+            buildings = state.built, building = state.work and (state.work.bot .. ": " .. state.work.name .. " at " ..
+                state.work.at.x .. " " .. state.work.at.z) or "none", town = state.town,
             techs = techs, groups = state.groups, events = state.log }
     end,
 }

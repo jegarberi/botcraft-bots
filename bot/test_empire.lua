@@ -5,13 +5,16 @@ assert(not io.open("../empire_job.lua"), "../empire_job.lua exists: run from a c
 local names, carry, assigned, chat, made, attacks = {}, {}, {}, {}, {}, 0
 for i = 1, 15 do names[i] = { name = "Bot" .. i }; carry["Bot" .. i] = 0 end
 local brain_on, tool, tick = true, nil, nil
+local building, builds = {}, {}
 bot = { call = function(name, a)
     if name == "bots" then return names end
     if name == "status" then
         local c = carry[a.bot]
         local inv = { bread = c, oak_log = c, cobblestone = c, raw_iron = c }
         if a.bot == "Bot10" then inv.iron_sword = 1; inv.iron_chestplate = 1 end
-        return { inventory = inv, health = 20 }
+        local b = (building[a.bot] or 0) > 0
+        if b then building[a.bot] = building[a.bot] - 1 end
+        return { inventory = inv, health = 20, building = b, build_left = b and 10 or 0, position = { x = 0, y = 64, z = 0 } }
     end
     if name == "leader" then return "Bot4" end
     if name == "berries" then return { bot = "Bot15" } end
@@ -25,6 +28,8 @@ bot = { call = function(name, a)
     if name == "chat" then chat[#chat + 1] = a.message end
     if name == "make" then made[#made + 1] = a.item end
     if name == "team_member" and a.objective == "attack" then attacks = attacks + 1 end
+    if name == "team_member" and a.objective == "build" then building[a.bot] = 2; builds[#builds + 1] = a end
+    if name == "get_block" then return { block = a.y > 70 and "minecraft:air" or "minecraft:grass_block" } end
     return {}
 end, tool = function(t) tool = t end, every = function(_, f) tick = f end, on_chat = function() end, log = print }
 local ok, err = pcall(function()
@@ -46,14 +51,7 @@ local ok, err = pcall(function()
     assert(#g.farmers == 4 and #g.soldiers == 0, "Dark Age, food short first: more farmers, no soldiers, got " .. #g.farmers .. " " .. #g.soldiers)
     assert(where.Bot12 == "cooks" and where.Bot8 == "miners", "few bots moved")
     assert(chat[1]:match("^%[empire%] Bot") and chat[1]:match("->"), "the leader tells the moves")
-    t = t + 6000
-    for b in pairs(carry) do carry[b] = 300 end
-    tick(); tick()
-    local last = assigned[#assigned]
-    local soldier = false
-    for _, b in ipairs(last.soldiers) do soldier = soldier or b == "Bot10" end
-    assert(#last.soldiers > 0 and soldier, "the leader picks the armed bot as a soldier")
-    for _ = 1, 200 do
+    for _ = 1, 400 do
         t = t + 60
         for b in pairs(carry) do carry[b] = carry[b] + 1 end
         tick()
@@ -63,6 +61,17 @@ local ok, err = pcall(function()
     assert(brain_on, "the brain works again")
     assert(#chat >= 3 + 6 and #chat > 0, "ages and techs announced")
     assert(#made > 0 and attacks > 0, "techs made and soldiers sent")
+    assert(s.buildings.House == 3 and s.buildings.Wonder == 1, "3 houses for 15 bots and a wonder")
+    local names_ = {}
+    for _, b in ipairs(builds) do
+        names_[b.name] = true
+        assert(b.bot ~= "Bot4" and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
+        for _, e in ipairs(b.blocks) do if e[4] ~= "air" and e[4] ~= "cobblestone" then assert(e[2] >= 71, "built on the ground") end end
+    end
+    local soldier = false
+    for _, b in ipairs(s.groups.soldiers) do soldier = soldier or b == "Bot10" end
+    assert(soldier, "the leader picks the armed bot as a soldier")
+    assert(names_.Mill and names_.Barracks and names_.Monastery, "buildings of every age")
     os.time = clock
     print("empire OK: " .. s.age .. ", " .. #chat .. " announcements, " .. #assigned .. " splits, " .. attacks .. " attack orders")
 end)
