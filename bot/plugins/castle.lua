@@ -17,6 +17,8 @@
 --   castle { action = "ranch" }            once the pens are built: lead animals into them and breed them
 --   castle { action = "water" }            for a moat already dug: the team makes buckets, a well, and fills it
 --   castle { action = "roads" }            once the castle stands: roads from its outer gate to the team's mines
+--   castle { action = "explore", bot }     an explorer: finds structures itself (/locate) and lays a road to each,
+--                                          with signposts at both ends and a waypoint sign every 128 blocks
 --   castle { action = "stop" }             forget the job (bots finish the stage they are on)
 --
 -- x z is the centre, y the level of the floor to stand on (the walls start at y, the ground is y - 1).
@@ -910,6 +912,35 @@ end
 -- mines and to each place it was given, one after the other, 32 blocks at a time (the ground has to be in its
 -- sight to be planned), with a signpost at each end saying where the road leads. Mines opened later get theirs
 local roadman = restore(ROADS_FILE)     -- the road builder, as it was before a restart (nil: none)
+local function keep(r)
+    save(ROADS_FILE, r and { bot = r.bot, origin = r.origin, places = r.places, done = r.done, laid = r.laid, patience = 300, item = r.item,
+        sign = r.sign, explore = r.explore, reach = r.reach })
+end
+-- What an explorer looks for (structure ids or #tags for /locate), when not told
+local STRUCTURES = "#minecraft:village,pillager_outpost,ruined_portal,desert_pyramid,jungle_pyramid,igloo,swamp_hut,mineshaft,trail_ruins,trial_chambers"
+
+-- An explorer with no road left to lay: the nearest structure of each kind, seen from where it stands (the end
+-- of its last road), within reach of the origin and not known yet. True when it found one
+local function explore(r)
+    local found = false
+    for name in r.explore:gmatch("[%w_:#]+") do
+        local ok, at = pcall(bot.call, "locate", { bot = r.bot, kind = "structure", name = name })
+        if ok and type(at) == "table" and at.x and math.max(math.abs(at.x - r.origin.x), math.abs(at.z - r.origin.z)) <= r.reach then
+            local known = false
+            for _, p in ipairs(r.places) do
+                if math.abs(p.x - at.x) < 48 and math.abs(p.z - at.z) < 48 then known = true end
+            end
+            if not known then
+                local label = name:gsub("^#?minecraft:", ""):gsub("_", " ")
+                r.places[#r.places + 1] = { name = label:sub(1, 1):upper() .. label:sub(2), what = "found by " .. r.bot, x = at.x, z = at.z }
+                pcall(bot.call, "chat", { message = "[explore] " .. label .. " at " .. at.x .. " " .. at.z .. ": laying a road to it" })
+                found = true
+            end
+        end
+    end
+    keep(r)
+    return found
+end
 local function road_tick()
     local r = roadman
     if not r then return end
@@ -938,6 +969,22 @@ local function road_tick()
                 break
             end
         end
+        if not r.cur and r.explore then
+            if explore(r) then return end
+            -- Nothing new from here (/locate gives the nearest: the one it stands at): 256 blocks on, a different
+            -- way each time and never beyond reach of the origin, and a look from there. A torch to put there takes it
+            r.heading = (r.heading or 0) % 8 + 1
+            local a = r.heading * math.pi / 4
+            local tx, tz = st.position.x + 256 * math.cos(a), st.position.z + 256 * math.sin(a)
+            local out = math.max(math.abs(tx - r.origin.x), math.abs(tz - r.origin.z)) / r.reach
+            if out > 1 then tx, tz = r.origin.x + (tx - r.origin.x) / out, r.origin.z + (tz - r.origin.z) / out end
+            tx, tz = math.floor(tx + 0.5), math.floor(tz + 0.5)
+            r.best, r.best_at, r.busy, r.patience = nil, now, true, 180
+            r.note = "exploring toward " .. tx .. " " .. tz .. " (" .. #r.places .. " places found)"
+            pcall(bot.call, "team_member", { bot = r.bot, objective = "build", plan = "blocks", members = { r.bot }, leader = r.bot, count = 1,
+                solo = true, name = "explore", blocks = { { tx, math.floor(st.position.y) + 1, tz, "torch" } } })
+            return
+        end
         if not r.cur then r.note = "all roads laid" return end
     end
     local c = r.cur
@@ -945,8 +992,8 @@ local function road_tick()
     local len = math.sqrt(dx * dx + dz * dz)
     if len < 2 then
         r.done[c.x .. " " .. c.z] = true
-        save(ROADS_FILE, { bot = r.bot, origin = r.origin, places = r.places, done = r.done, laid = r.laid + 1, patience = 300, item = r.item, sign = r.sign })
         r.laid = r.laid + 1
+        keep(r)
         r.cur = nil
         return
     end
@@ -978,6 +1025,12 @@ local function road_tick()
     end
     if #blocks > 0 and step == len then
         post(c.x - 2, c.z, r.origin.name, "at " .. r.origin.x .. " " .. r.origin.z, far .. " blocks", "")
+    end
+    -- A waypoint sign every 128 blocks, 3 to the side of the road: where it leads and how far is left
+    local from_start = function(x, z) return math.sqrt((x - r.origin.x) ^ 2 + (z - r.origin.z) ^ 2) end
+    if #blocks > 0 and step < len and math.floor(from_start(ex, ez) / 128) > math.floor(from_start(c.px, c.pz) / 128) then
+        post(math.floor(ex - dz / len * 3 + 0.5), math.floor(ez + dx / len * 3 + 0.5), "-> " .. c.name, c.what,
+            math.floor(len - step + 0.5) .. " blocks", "<- " .. r.origin.name)
     end
     viewer = nil
     local order = { bot = r.bot, objective = "build", plan = "blocks", members = { r.bot }, leader = r.bot, count = 1, solo = true, name = "road" }
@@ -1074,7 +1127,7 @@ end
 
 local castle_tool = {
     name = "castle",
-    description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
+    description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), explore (the same road builder as an explorer: it finds the structures itself with /locate, from the origin and then from the end of each road it lays, so it reaches further and further: structures = what to look for, default villages, pillager outposts, ruined portals, desert and jungle temples, igloos, swamp huts, mineshafts, trail ruins, trial chambers; radius = how far from the origin, default 1500; each find is announced in the chat and gets a road with a signpost at both ends and a waypoint sign every 128 blocks saying where it leads and how far is left; stop=true gives the bot back), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
     params = { action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string" },
     run = function(args)
         local action = args.action or "status"
@@ -1107,7 +1160,7 @@ local castle_tool = {
             if not job then return "no castle job" end
             hand_over()
             return { stage = job.stages[job.index].name }
-        elseif action == "roadbot" then
+        elseif action == "roadbot" or action == "explore" then
             -- One bot taken out of the team to do nothing but roads
             if args.stop then
                 if roadman then pcall(bot.call, "team_member", { bot = roadman.bot, objective = "disband", members = {}, leader = "", count = 1, solo = false }) end
@@ -1136,7 +1189,15 @@ local castle_tool = {
             end
             roadman = { bot = who, origin = origin, places = places, done = {}, laid = 0, patience = 300,
                 item = args.item or "cobblestone", sign = args.sign or "spruce_sign" }
-            save(ROADS_FILE, { bot = who, origin = origin, places = places, done = {}, laid = 0, patience = 300, item = roadman.item, sign = roadman.sign })
+            if action == "explore" then
+                roadman.explore = args.structures or STRUCTURES
+                roadman.reach = math.floor(args.radius or 1500)
+            end
+            keep(roadman)
+            if action == "explore" then
+                return { bot = who, from = origin, looks_for = roadman.explore, within = roadman.reach,
+                    note = "this bot now explores: it finds these structures (/locate, from the end of each road it lays) and lays a road to each, with signposts at both ends and a waypoint sign every 128 blocks; the team's mines get roads too" }
+            end
             return { bot = who, from = origin, places = places, not_found = not_found,
                 note = "this bot now only builds roads: to these places and to every mine of the team (mines tool), with a signpost at each end" }
         elseif action == "roads" then

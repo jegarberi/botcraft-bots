@@ -35,7 +35,7 @@ remembers seeing, and its decision tree with the branch it is on.
 ## Layout
 
 - `bot/mcp.cpp` the bots, their decision tree and the MCP tools; `bot/tui.cpp` the terminal panel (`bin/bot_tui`, over unix sockets)
-- `bot/plugins/` Lua plugins: `castle` (the castle, roads, road builder), `groups` (hunters, farmers, breeders,
+- `bot/plugins/` Lua plugins: `castle` (the castle, roads, road builder, explorer), `groups` (hunters, farmers, breeders,
   miners, builders), `players` (orders from players in the chat), `berries`, `example`
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
