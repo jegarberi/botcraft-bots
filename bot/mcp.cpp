@@ -1964,7 +1964,8 @@ static int FellTree(BehaviourClient& c, const Position& first)
     int height = 0;
     if (!left.empty() && felled > 0 && GoTo(c, base) == Status::Success)
     {
-        while (!left.empty() && height < 24)
+        // (giant jungle trees reach 30 blocks)
+        while (!left.empty() && height < 32)
         {
             const size_t before = left.size();
             left.erase(std::remove_if(left.begin(), left.end(), [&](const Position& log)
@@ -2000,6 +2001,16 @@ static int FellTree(BehaviourClient& c, const Position& first)
                 break;
             }
             Utilities::YieldForCondition([&]() { return c.GetLocalPlayer()->GetOnGround(); }, c, 1500);
+        }
+    }
+    // What the pillar in the trunk could not reach (the branches of acacias and big oaks): each once more from
+    // the ground, walking up to it, now that the trunk is out of the way. The whole tree, no floating logs
+    for (const Position& log : left)
+    {
+        const Blockstate* still = world->GetBlock(log);
+        if (still != nullptr && still->GetName() == kind && SafeDig(c, log, true) == Status::Success)
+        {
+            ++felled;
         }
     }
     if (felled > 0)
