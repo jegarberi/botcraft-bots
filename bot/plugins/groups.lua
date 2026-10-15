@@ -71,6 +71,8 @@ local function apply(g)
     for _, n in ipairs(g.builders) do
         call("team_member", { bot = n, objective = "disband", members = {}, leader = "", count = 1, solo = false })
     end
+    -- That cleared the builders' orders: the castle hands its current stage out again, to them too
+    call("castle", { action = "rehand" })
 end
 
 -- Farmers: their farm (made once, where they stand, if there is no farmland about), harvested and replanted;

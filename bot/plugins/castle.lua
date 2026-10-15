@@ -1091,6 +1091,11 @@ local castle_tool = {
             return { started = true, buckets_to_pour = #m, note = "each bot makes a bucket from 3 iron ingots, fills it at the well and empties it in the ditch" }
         elseif action == "ranch" then
             return ranch(args)
+        elseif action == "rehand" then
+            -- The current stage handed over again (after bots changed groups: their orders were cleared)
+            if not job then return "no castle job" end
+            hand_over()
+            return { stage = job.stages[job.index].name }
         elseif action == "roadbot" then
             -- One bot taken out of the team to do nothing but roads
             if args.stop then
