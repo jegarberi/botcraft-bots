@@ -3309,8 +3309,10 @@ static bool EnsureTable(McpBot& c, const std::string& stage)
     {
         return true;
     }
-    // A known one not too far beats making another
-    if (GoToRemembered(c, "crafting_table"))
+    // A known one, only for a bot that can't make one: a table is one log, a walk to one remembered 200 blocks
+    // away (not even loaded) failed and failed until the bot gave up on its tools
+    const bool can_make = CountItem(c, "minecraft:crafting_table") > 0 || !ItemLike(c, "_planks", 4).empty() || !ItemLike(c, "_log").empty();
+    if (!can_make && GoToRemembered(c, "crafting_table"))
     {
         return false;
     }
