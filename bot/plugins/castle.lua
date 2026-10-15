@@ -513,6 +513,17 @@ local function level(cx, y, cz, fill, reach)
             end
         end
     end
+    -- From the centre outward: the keep and the inner walls stand on ground levelled first, and the edges
+    -- (a valley to fill, a hill to cut) come last. Row by row from the west, the first stages were all a
+    -- valley 50 blocks deep the bots could not get into, every one of them given up after 5 minutes
+    for i, b in ipairs(list) do b.order = i end
+    table.sort(list, function(a, b)
+        local ra = math.max(math.abs(a[1] - cx), math.abs(a[3] - cz))
+        local rb = math.max(math.abs(b[1] - cx), math.abs(b[3] - cz))
+        if ra ~= rb then return ra < rb end
+        return a.order < b.order
+    end)
+    for _, b in ipairs(list) do b.order = nil end
     return list, unseen
 end
 
