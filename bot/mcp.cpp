@@ -3346,16 +3346,17 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
             }
             return;
         }
-        if (!remembered_kind.empty() && GoToRemembered(c, remembered_kind))
-        {
-            return;
-        }
-        // No trees in a cave: up to the surface first, a staircase dug toward the sky
+        // No trees in a cave: up to the surface first, a staircase dug toward the sky (before the remembered
+        // trees: from underground, walking to one up on the surface failed search after search)
         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
         if (tool_kind == "axe" && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
         {
             c.SetNote(stage + ": underground, no trees: digging up to the surface");
             TunnelToward(c, feet + Position(6, 12, 0), 24, true);
+            return;
+        }
+        if (!remembered_kind.empty() && GoToRemembered(c, remembered_kind))
+        {
             return;
         }
         if (!Explore(c, what))
