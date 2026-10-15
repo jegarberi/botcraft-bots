@@ -3510,6 +3510,36 @@ static Status GetFoodStep(McpBot& c)
             return Status::Success;
         }
     }
+    // Crop fields seen before (a village's): their wheat makes bread (next round), carrots and potatoes are
+    // eaten as they are. Harvested and replanted. A field with nothing ripe now waits 10 minutes
+    for (const char* kind : { "carrots", "potatoes", "wheat" })
+    {
+        const std::vector<std::pair<std::string, Position>> seen = Recall(c, kind, 1);
+        if (seen.empty() || c.unreachable.count(seen[0].second) != 0)
+        {
+            continue;
+        }
+        const Position field = seen[0].second;
+        const double d = std::sqrt(c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(field.x, field.y, field.z)));
+        if (d > 400.0)
+        {
+            continue;
+        }
+        c.SetNote(std::string("no food: to the ") + kind + " seen at " + std::to_string(field.x) + " " + std::to_string(field.z));
+        if (d > 24.0 && TravelTask(c, field.x, field.z) == Status::Failure)
+        {
+            c.unreachable[field] = std::chrono::steady_clock::now();
+            return Status::Success;
+        }
+        std::atomic<int> harvested = 0, replanted = 0;
+        FarmTask(c, 16, true, harvested, replanted);
+        if (harvested == 0)
+        {
+            c.unreachable[field] = std::chrono::steady_clock::now();
+        }
+        c.SetNote(std::string("no food: harvested ") + std::to_string(harvested.load()) + " at the " + kind + " field");
+        return Status::Success;
+    }
     // Animals seen in the last half hour, not too far: there before exploring blindly
     for (const char* animal : { "cow", "pig", "sheep" })
     {
