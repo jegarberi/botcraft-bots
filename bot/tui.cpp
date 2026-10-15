@@ -8,8 +8,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <clocale>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -87,6 +89,47 @@ namespace
         {
             return Value("no answer from " + bot);
         }
+    }
+
+    /// @brief How many bytes of text fit in cols terminal columns (emojis take two), never cutting a character
+    size_t Fit(const std::string& text, const int cols)
+    {
+        std::mbstate_t state{};
+        size_t at = 0;
+        int used = 0;
+        while (at < text.size())
+        {
+            wchar_t c;
+            const size_t n = std::mbrtowc(&c, text.data() + at, text.size() - at, &state);
+            if (n == 0 || n > text.size() - at)
+            {
+                break;
+            }
+            const int width = std::max(wcwidth(c), 0);
+            if (used + width > cols)
+            {
+                break;
+            }
+            used += width;
+            at += n;
+        }
+        return at;
+    }
+
+    /// @brief text cut or padded with spaces to exactly cols columns
+    std::string Column(const std::string& text, const int cols)
+    {
+        std::string out = text.substr(0, Fit(text, cols));
+        int used = 0;
+        std::mbstate_t state{};
+        for (size_t at = 0; at < out.size();)
+        {
+            wchar_t c;
+            const size_t n = std::mbrtowc(&c, out.data() + at, out.size() - at, &state);
+            used += std::max(wcwidth(c), 0);
+            at += n;
+        }
+        return out + std::string(std::max(cols - used, 0), ' ');
     }
 
     std::string Text(const Value& v)
@@ -171,7 +214,7 @@ namespace
         std::snprintf(text, sizeof(text), "%s's trade network  trade %s  generation %s  fitness %s (%s days)  last winner %s  critic value %.2f   (n: its trade's network)",
             Field(n, "bot").c_str(), Field(n, "trade").c_str(), Field(n, "generation").c_str(), Field(n, "fitness").empty() ? "-" : Field(n, "fitness").c_str(),
             Field(n, "days_in_generation").c_str(), Field(n, "champion").empty() ? "-" : Field(n, "champion").c_str(), number(n["value"]));
-        lines.push_back(text);
+        lines.push_back(std::string("🧠 ") + text);
         std::string row = "inputs: ";
         std::vector<std::string> inputs;
         for (const Value& i : n["inputs"].get_array())
@@ -257,6 +300,8 @@ int main()
             return tool + (ok ? ": " : " failed: ") + Text(result);
         };
     const std::atomic<bool> stop = false;
+    // UTF-8 for the emojis
+    std::setlocale(LC_ALL, "");
     initscr();
     cbreak();
     noecho();
@@ -267,7 +312,7 @@ int main()
     // Static: a tool call still under way when the panel closes writes its answer here
     static std::mutex mutex;
     static std::string message;
-    message = "starting...";
+    message = "⏳ starting...";
     std::vector<std::pair<std::string, Value>> statuses;
     std::atomic<bool> done = false;
     // The neural network view (n): whose, and its lines, fetched with the statuses
@@ -312,7 +357,7 @@ int main()
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (message == "starting...")
+                    if (message == "⏳ starting...")
                     {
                         message = "";
                     }
@@ -328,7 +373,7 @@ int main()
         {
             {
                 std::lock_guard<std::mutex> lock(mutex);
-                message = tool + "...";
+                message = "⏳ " + tool + "...";
             }
             std::thread([bot, tool, arguments, call_program]()
                 {
@@ -336,12 +381,13 @@ int main()
                     if (bot.empty())
                     {
                         text = call_program(tool, arguments);
+                        text = (text.find(" failed: ") == tool.size() ? "❌ " : "✅ ") + text;
                     }
                     else
                     {
                         bool ok;
                         const Value result = AskBot(bot, tool, arguments, 600, ok);
-                        text = tool + (ok ? ": " : " failed: ") + Text(result);
+                        text = std::string(ok ? "✅ " : "❌ ") + tool + (ok ? ": " : " failed: ") + Text(result);
                     }
                     std::lock_guard<std::mutex> lock(mutex);
                     message = text;
@@ -381,7 +427,7 @@ int main()
             if (!network_bot.empty() && !bots.empty() && network_bot != bots[picked].first)
             {
                 network_bot = bots[picked].first;
-                network_lines = { "fetching " + network_bot + "'s neural network..." };
+                network_lines = { "🧠 fetching " + network_bot + "'s neural network..." };
             }
             network = network_bot.empty() ? std::vector<std::string>() : network_lines;
         }
@@ -394,25 +440,22 @@ int main()
                 if (y < h - 1)
                 {
                     wattron(stdscr, attributes);
-                    mvwaddnstr(stdscr, y, 0, text.c_str(), w - 1);
+                    mvwaddstr(stdscr, y, 0, text.substr(0, Fit(text, w - 1)).c_str());
                     wattroff(stdscr, attributes);
                 }
             };
-        line(0, "botcraft  " + std::to_string(bots.size()) + " bots   up/down pick  a autopilot  e gear  G gather  m make  s store  f farm  "
-            "l find  n neural network  d disconnect  D all store and disconnect  c connect  t team  x disband  : tool  q leave the panel  Q stop the program (bots store and leave)", A_REVERSE);
-        char row[512];
-        std::snprintf(row, sizeof(row), "%-12s %-22s %6s %4s %-15s %s", "bot", "state", "health", "food", "position", "doing");
-        line(1, row, A_BOLD);
+        line(0, Column("🤖 botcraft  " + std::to_string(bots.size()) + " bots   ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
+            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  c 🔌 connect  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
+        line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
         const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
         for (size_t i = first; i < bots.size() && i < first + rows; ++i)
         {
             const Value& b = bots[i].second;
-            const std::string flags = std::string(Flag(b, "autopilot") ? "A" : "-") + (Flag(b, "gear") ? "G" : "-");
-            std::snprintf(row, sizeof(row), "%-12.12s %-22.22s %6.6s %4.4s %-15.15s %s %s", bots[i].first.c_str(),
-                (b.is_object() && b.contains("state") ? Field(b, "state") : std::string("no answer")).c_str(), Field(b, "health").c_str(),
-                Field(b, "food").c_str(), Where(b).c_str(), flags.c_str(), Field(b, "last_note").c_str());
-            line(2 + static_cast<int>(i - first), row, i == picked ? A_REVERSE : 0);
+            const std::string flags = std::string(Flag(b, "autopilot") ? "🚀" : "  ") + (Flag(b, "gear") ? "🔧" : "  ");
+            const bool answered = b.is_object() && b.contains("state");
+            line(2 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) +
+                Column(Field(b, "health"), 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
         }
         if (!network.empty())
         {
@@ -455,16 +498,18 @@ int main()
                 }
             }
             for (const std::string& text : {
-                bots[picked].first + " holds " + Field(b, "held_item") + "; worn: " + (worn.empty() ? "nothing" : worn),
-                "inventory: " + inventory,
-                "goal: " + Field(b, "gather") + " " + Field(b, "gather_left") + "   making: " + Field(b, "making") + "   team leader: " + Field(b, "team_leader") +
-                    "   deaths: " + Field(b, "deaths") + "   stuck: " + Field(b, "times_stuck"),
-                "flow: " + flow })
+                "✋ " + bots[picked].first + " holds " + Field(b, "held_item") + "   👕 worn: " + (worn.empty() ? "nothing" : worn),
+                "🎒 inventory: " + inventory,
+                "🎯 goal: " + Field(b, "gather") + " " + Field(b, "gather_left") + "   🔨 making: " + Field(b, "making") + "   👑 team leader: " + Field(b, "team_leader") +
+                    "   💀 deaths: " + Field(b, "deaths") + "   🧱 stuck: " + Field(b, "times_stuck"),
+                "🔀 flow: " + flow })
             {
                 // Long lines on two rows at most
-                for (size_t start = 0; start < text.size() && start < 2 * static_cast<size_t>(w - 1); start += w - 1)
+                const size_t cut = Fit(text, w - 1);
+                line(y++, text);
+                if (cut < text.size())
                 {
-                    line(y++, text.substr(start, w - 1));
+                    line(y++, text.substr(cut));
                 }
             }
         }
@@ -554,7 +599,7 @@ int main()
             {
                 network_bot.clear();
             }
-            network_lines = { network_bot.empty() ? "" : "fetching " + network_bot + "'s neural network..." };
+            network_lines = { network_bot.empty() ? "" : "🧠 fetching " + network_bot + "'s neural network..." };
         }
         else if (key == 'x')
         {
@@ -564,7 +609,7 @@ int main()
         else if (bot.empty())
         {
             std::lock_guard<std::mutex> lock(mutex);
-            message = "no bot connected: c to connect one";
+            message = "🔌 no bot connected: c to connect one";
         }
         else if (key == 'a')
         {
@@ -633,7 +678,7 @@ int main()
                 catch (const std::exception& e)
                 {
                     std::lock_guard<std::mutex> lock(mutex);
-                    message = std::string("bad arguments: ") + e.what();
+                    message = std::string("❌ bad arguments: ") + e.what();
                 }
             }
         }
