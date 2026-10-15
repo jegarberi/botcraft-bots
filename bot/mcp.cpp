@@ -3232,6 +3232,14 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
         {
             return;
         }
+        // No trees in a cave: up to the surface first, a staircase dug toward the sky
+        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+        if (tool_kind == "axe" && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
+        {
+            c.SetNote(stage + ": underground, no trees: digging up to the surface");
+            TunnelToward(c, feet + Position(6, 12, 0), 24, true);
+            return;
+        }
         if (!Explore(c, what))
         {
             SkipStage(c, stage, "no " + what + " found after exploring");
@@ -3397,7 +3405,10 @@ static Status MakeToolStep(McpBot& c, const std::string& kind)
     }
     else
     {
-        MakeTool(c, std::find_if(std::begin(tool_costs), std::end(tool_costs), [&](const ToolCost& t) { return kind == t.kind; }), false, stage);
+        // With the cobblestone for it, the stone tool straight away: better, and only 2 sticks of wood (a bot
+        // with hundreds of cobblestone kept failing at the wooden one for lack of planks)
+        const ToolCost* cost = std::find_if(std::begin(tool_costs), std::end(tool_costs), [&](const ToolCost& t) { return kind == t.kind; });
+        MakeTool(c, cost, cost != std::end(tool_costs) && CountItem(c, "minecraft:cobblestone") >= cost->material, stage);
     }
     return Status::Success;
 }
