@@ -132,11 +132,18 @@ local function breeder(name)
     notes[name] = #done > 0 and ("bred " .. table.concat(done, ", ")) or "waiting for food from the farmers (wheat, carrots, seeds)"
 end
 
-bot.every(90, function()
+-- One farmer or breeder a turn, every 15 seconds: the plugins share one lock, and all of them in a row (walks,
+-- breeding) held it for minutes, the castle's stages, the brain's days and netlink's sending waiting meanwhile
+local turn = 0
+bot.every(15, function()
     if not groups or busy then return end
+    local workers = {}
+    for _, n in ipairs(groups.farmers) do workers[#workers + 1] = { n, farmer } end
+    for _, n in ipairs(groups.breeders) do workers[#workers + 1] = { n, breeder } end
+    if #workers == 0 then return end
     busy = true
-    for _, n in ipairs(groups.farmers) do pcall(farmer, n) end
-    for _, n in ipairs(groups.breeders) do pcall(breeder, n) end
+    turn = turn % #workers + 1
+    pcall(workers[turn][2], workers[turn][1])
     busy = false
 end)
 
