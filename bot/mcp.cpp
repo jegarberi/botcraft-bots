@@ -1841,6 +1841,12 @@ static int FellTree(BehaviourClient& c, const Position& first)
         {
             ++felled;
         }
+        else if (felled == 0)
+        {
+            // Not even the first log: the tree is out of reach, its other logs are not tried one by one (two
+            // path searches each, every one of them failing)
+            return 0;
+        }
         else
         {
             left.push_back(log);
@@ -3333,6 +3339,17 @@ static void Check(McpBot& c, const Status result)
 static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& match, const std::string& what, const std::string& tool_kind, const std::string& stage, const std::string& remembered_kind = "")
 {
     const bool ore = EndsWith(remembered_kind, "_ore");
+    // Wood from underground (no sky above, below sea level: not just under a roof): up to the surface first,
+    // whatever trees show through the rock (going for them from a cave failed path after path)
+    {
+        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+        if (tool_kind == "axe" && feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
+        {
+            c.SetNote(stage + ": underground, needs wood: digging up to the surface");
+            TunnelToward(c, feet + Position(6, 12, 0), 24, true);
+            return;
+        }
+    }
     // Counted as the collecting below counts it: what lies in a construction site is not there to take
     // (found here and refused there, the bot searched the same blocks twice a tick, forever, without moving)
     // (nor what it gave up on lately: see CollectTask)
@@ -3349,7 +3366,7 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
         // No trees in a cave: up to the surface first, a staircase dug toward the sky (before the remembered
         // trees: from underground, walking to one up on the surface failed search after search)
         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
-        if (tool_kind == "axe" && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
+        if (tool_kind == "axe" && feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
         {
             c.SetNote(stage + ": underground, no trees: digging up to the surface");
             TunnelToward(c, feet + Position(6, 12, 0), 24, true);
