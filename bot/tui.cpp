@@ -127,12 +127,18 @@ namespace
 
     /// @brief One bot's neural network (the brain tool's answer to network=bot) as lines of text: each input
     /// with its value, each hidden unit's activity and strongest inputs, each trade's want and strongest hidden units
-    std::vector<std::string> NetworkLines(const std::string& answer)
+    /// role: its trade's network (role_network in the answer) instead of its own trade-picking one
+    std::vector<std::string> NetworkLines(const std::string& answer, const bool role)
     {
         Value n;
         try
         {
             n = ProtocolCraft::Json::Parse(answer.substr(answer.find(": ") + 2));
+            if (role && n.is_object() && n.contains("role_network"))
+            {
+                const Value inner = n["role_network"];
+                n = inner;
+            }
         }
         catch (const std::exception&)
         {
@@ -145,7 +151,13 @@ namespace
         const auto number = [](const Value& v) { return v.is_number() ? v.get_number<double>() : 0.0; };
         char text[512];
         std::vector<std::string> lines;
-        std::snprintf(text, sizeof(text), "%s's neural network  trade %s  generation %s  fitness %s (%s days)  last winner %s  critic value %.2f   (n closes)",
+        if (role)
+        {
+            std::snprintf(text, sizeof(text), "the %s' network (what %s does next, shared by the trade)  last action %s  critic value %.2f   (n closes)",
+                Field(n, "role").c_str(), Field(n, "bot").c_str(), Field(n, "last_action").empty() ? "-" : Field(n, "last_action").c_str(), number(n["value"]));
+        }
+        else
+        std::snprintf(text, sizeof(text), "%s's trade network  trade %s  generation %s  fitness %s (%s days)  last winner %s  critic value %.2f   (n: its trade's network)",
             Field(n, "bot").c_str(), Field(n, "trade").c_str(), Field(n, "generation").c_str(), Field(n, "fitness").empty() ? "-" : Field(n, "fitness").c_str(),
             Field(n, "days_in_generation").c_str(), Field(n, "champion").empty() ? "-" : Field(n, "champion").c_str(), number(n["value"]));
         lines.push_back(text);
@@ -187,7 +199,7 @@ namespace
         for (size_t o = 0; o < outputs.size(); ++o)
         {
             const double percent = number(outputs[o]["percent"]);
-            std::snprintf(text, sizeof(text), "%-9s %5.1f%% %-30s <- %s", Field(outputs[o], "name").c_str(), percent,
+            std::snprintf(text, sizeof(text), "%-26s %5.1f%% %-30s <- %s", Field(outputs[o], "name").c_str(), percent,
                 std::string(static_cast<size_t>(percent * 0.3), '#').c_str(),
                 strongest(n["w2"][o], [](size_t h) { return "hidden " + std::to_string(h + 1); }).c_str());
             lines.push_back(text);
@@ -234,6 +246,7 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
     std::atomic<bool> done = false;
     // The neural network view (n): whose, and its lines, fetched with the statuses
     static std::string network_bot;
+    static bool network_role = false;
     static std::vector<std::string> network_lines;
     network_bot.clear();
 
@@ -254,17 +267,19 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
                     statuses = fresh;
                 }
                 std::string whose;
+                bool role = false;
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     whose = network_bot;
+                    role = network_role;
                 }
                 if (!whose.empty())
                 {
                     Value args = ProtocolCraft::Json::Object();
                     args["network"] = whose;
-                    std::vector<std::string> fetched = NetworkLines(call_program("brain", args));
+                    std::vector<std::string> fetched = NetworkLines(call_program("brain", args), role);
                     std::lock_guard<std::mutex> lock(mutex);
-                    if (network_bot == whose)
+                    if (network_bot == whose && network_role == role)
                     {
                         network_lines = fetched;
                     }
@@ -489,7 +504,20 @@ void RunTui(const std::function<std::vector<std::string>()>& names, const std::f
         else if (key == 'n')
         {
             std::lock_guard<std::mutex> lock(mutex);
-            network_bot = network_bot.empty() && !bot.empty() ? bot : "";
+            // Off -> the bot's trade network -> its trade's action network -> off
+            if (network_bot.empty())
+            {
+                network_bot = bot;
+                network_role = false;
+            }
+            else if (!network_role)
+            {
+                network_role = true;
+            }
+            else
+            {
+                network_bot.clear();
+            }
             network_lines = { network_bot.empty() ? "" : "fetching " + network_bot + "'s neural network..." };
         }
         else if (key == 'x')
