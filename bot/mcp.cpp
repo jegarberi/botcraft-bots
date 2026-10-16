@@ -21,6 +21,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <future>
 #include <thread>
 #include <tuple>
 #include <vector>
@@ -10382,9 +10383,15 @@ static void HandleHttpRequest(const int fd)
                 state["bots"].push_back(dropped);
             }
         }
+        // All at once: one by one, 40 bots took two minutes
+        std::vector<std::future<Value>> answers;
         for (const std::shared_ptr<Child>& child : remote)
         {
-            state["bots"].push_back(ChildStatus(*child));
+            answers.push_back(std::async(std::launch::async, [child]() { return ChildStatus(*child); }));
+        }
+        for (std::future<Value>& answer : answers)
+        {
+            state["bots"].push_back(answer.get());
         }
         {
             std::lock_guard<std::mutex> lock(bots_mutex);
