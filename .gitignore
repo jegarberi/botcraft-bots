@@ -30,3 +30,4 @@ __pycache__/
 /bot/brain_state.lua
 /bot/netlink_id.txt
 /bot/netlink_key.txt
+/bot/roles_state.lua
