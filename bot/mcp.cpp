@@ -7179,7 +7179,8 @@ static Value ForwardLocked(Child& child, const std::string& name, const Value& a
     request["params"]["arguments"].get_object().erase("bot");
     char* line = nullptr;
     size_t capacity = 0;
-    if (fprintf(child.to, "%s\n", request.Dump().c_str()) < 0 || fflush(child.to) != 0 || getline(&line, &capacity, child.from) < 0)
+    // Closed by a goodbye while this caller (a /state poll) still held a copy of the child: those FILEs are freed
+    if (child.to == nullptr || fprintf(child.to, "%s\n", request.Dump().c_str()) < 0 || fflush(child.to) != 0 || getline(&line, &capacity, child.from) < 0)
     {
         free(line);
         throw std::runtime_error("the process of bot " + child.name + " is gone (kicked or crashed): disconnect it, then connect it again");
@@ -7676,6 +7677,7 @@ static Value DisconnectChild(const std::shared_ptr<Child>& child)
         // End of input: the child process exits
         fclose(child->to);
         fclose(child->from);
+        child->to = child->from = nullptr;
     }
     else
     {
@@ -10910,6 +10912,7 @@ int main(int argc, char* argv[])
                             std::lock_guard<std::mutex> lock(child->mutex);
                             fclose(child->to);
                             fclose(child->from);
+                            child->to = child->from = nullptr;
                         }
                         LOG_WARNING("The process of " << child->name << " ended, starting it again in 60 seconds");
                         std::lock_guard<std::mutex> lock(bots_mutex);
