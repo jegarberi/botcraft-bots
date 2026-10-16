@@ -339,15 +339,20 @@ local BUILDINGS = {
 -- the first free one in reading order
 -- (Down to 80 below: the town's height came from where the leader stood, once 50 up on a hill.) Also whether it
 -- found the ground: not in a chunk no bot sees
+local function block_at(x, y, z)
+    local r = call("get_block", { x = x, y = y, z = z })
+    return type(r) == "table" and tostring(r.block or "") or ""
+end
+
+-- (not cobblestone: the bots' floors and roads, a house's half-built floor up in the air among them)
+local function is_ground(name)
+    return name:match("dirt") or name:match("grass_block") or (name:match("stone") and not name:match("cobblestone")) or name:match("sand") or name:match("gravel")
+        or name:match("clay") or name:match("podzol") or name:match("mud") or name:match("snow_block") or name:match("terracotta")
+end
+
 local function ground(x, z, from)
     for y = from + 24, from - 80, -1 do
-        local r = call("get_block", { x = x, y = y, z = z })
-        local name = type(r) == "table" and tostring(r.block or "") or ""
-        -- (not cobblestone: the bots' floors and roads, a house's half-built floor up in the air among them)
-        if name:match("dirt") or name:match("grass_block") or (name:match("stone") and not name:match("cobblestone")) or name:match("sand") or name:match("gravel")
-            or name:match("clay") or name:match("podzol") or name:match("mud") or name:match("snow_block") or name:match("terracotta") then
-            return y + 1, true
-        end
+        if is_ground(block_at(x, y, z)) then return y + 1, true end
     end
     return from, false
 end
@@ -446,6 +451,17 @@ end
 -- (Chests and furnaces are given no facing: they face the bot that places them, from inside)
 local function home(o, owner)
     local b = hut(o, 7, 7, 3, "oak_planks", "oak_log", "spruce_planks")
+    -- The ground levelled under it first: o.y is the ground's height at its middle, which stays as it was (the house
+    -- rests on it); under the floor, wherever the ground is lower, dirt down to it. Above, hut clears the air
+    for x = 0, 6 do
+        for z = 0, 6 do
+            for y = o.y - 2, o.y - 12, -1 do
+                local name = block_at(o.x + x, y, o.z + z)
+                if name == "" or is_ground(name) then break end     -- the ground (or a chunk no bot sees)
+                table.insert(b, 1, { o.x + x, y, o.z + z, "dirt" })
+            end
+        end
+    end
     return with(b, o, {
         { 1, 0, 1, "white_bed[facing=north,part=head]" }, { 1, 0, 2, "white_bed[facing=north,part=foot]" },
         { 3, 0, 1, "furnace" }, { 4, 0, 1, "chest" }, { 5, 0, 1, "chest" },
