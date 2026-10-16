@@ -1,6 +1,7 @@
 -- Offline check of the brain: lua5.4 test_brain.lua plugins/brain.lua
 -- 15 bots in a world where miners earn the most: the network must come to want mining, and on day 10
 -- the bots elect a leader and say it in the chat
+math.randomseed(42)
 os.remove("../brain_state.lua")
 local tool, ticks = nil, {}
 local clock, now_time = 1000, 0
@@ -50,7 +51,7 @@ assert(io.open("../brain_state.lua"), "the brain is kept for a restart")
 
 -- Merging another program's network: checked, merged once, given to the bot doing worst as a challenger
 local mine = tool.run({ export = true })
-assert(mine.arch and #mine.w == 21 * 10 + 10 + 10 * 9 + 9 + 10 + 1, "the network goes out with its critic and its architecture")
+assert(mine.arch and #mine.w == 23 * 10 + 10 + 10 * 11 + 11 + 10 + 1 + 2 * (10 * 10 + 10), "the network goes out with its critic and its architecture")
 local w = {}
 for i, v in ipairs(mine.w) do w[i] = v + 0.5 end
 local function rejected(m) local ok, err = pcall(tool.run, { merge = m }) return not ok and tostring(err) end
@@ -65,13 +66,15 @@ assert(rejected({ w = w, samples = 1000000, origin = "abcdef", arch = mine.arch 
 local st2 = tool.run({})
 assert(st2.challenger and st2.challenger.origin == "abcdef", "the merged network is a challenger")
 -- Evolution: generations ran, each bot has its own network, and they differ (mutated copies of the winner)
-assert(st.generation == 12 and st.last_generation and st.last_generation.winner, "a generation every 5 days")
-local p1, p2 = st.bots.Bot1.wants_percent, st.bots.Bot2.wants_percent
+assert(st.generation == 12 and st.last_generation and st.last_generation.winner and #st.last_generation.winners == 2, "two parents every 5 days")
+local n1, n2 = tool.run({ network = "Bot1" }), tool.run({ network = "Bot2" })
 local differ = false
-for k, v in pairs(p1) do if v ~= p2[k] then differ = true end end
-assert(differ or st.last_generation.winner == "Bot1" or st.last_generation.winner == "Bot2", "the bots' networks differ")
+for h, row in ipairs(n1.w1) do
+    for i, w in ipairs(row) do if w ~= n2.w1[h][i] then differ = true end end
+end
+assert(differ, "evolved networks differ even when rounded probabilities agree")
 local view = tool.run({ network = "Bot3" })
-assert(#view.inputs == 21 and #view.hidden == 10 and #view.outputs == 9 and #view.w1 == 10 and #view.w2 == 9, "one bot's network for the panels")
+assert(#view.inputs == 23 and #view.hidden == 10 and #view.outputs == 11 and #view.w1 == 10 and #view.w2 == 11 and #view.activations == 3 and #view.layers == 2, "one bot's network for the panels")
 -- Rollback by hand to the network of an earlier morning
 assert(tool.run({ rollback = 1 }):match("back to the network of day"))
 os.remove("../brain_state.lua")

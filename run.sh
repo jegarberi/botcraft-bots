@@ -24,7 +24,7 @@ fi
 cd bot
 
 [ -f build/build.ninja ] || cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release >&2
-cmake --build build >&2
+cmake --build build --parallel 8 >&2
 # Recipes and item tags come from the game's own data, inside the client jar Botcraft downloaded
 [ -d data/data/minecraft/recipe ] || unzip -o -q ../Botcraft/Assets/26.3/client.jar 'data/minecraft/recipe/*' 'data/minecraft/tags/item/*' -d data >&2
 

@@ -38,6 +38,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "construction_policy.hpp"
+#include "spawn_names.hpp"
 #include "botcraft/AI/BehaviourTree.hpp"
 #include "botcraft/AI/Tasks/AllTasks.hpp"
 #include "botcraft/AI/TemplatedBehaviourClient.hpp"
@@ -114,6 +116,7 @@ struct Team
     int hunt_left = 0;
     // Build objective: blocks to place, each with its block item (a filled box, a shelter...)
     bool building = false;
+    std::string build_name;
     // The item "minecraft:air" means the spot has to be cleared
     std::vector<std::pair<Botcraft::Position, std::string>> blueprint;
     // The spots where the plan wants a block (not the ones to clear)
@@ -125,7 +128,7 @@ struct Team
     // Which hand-over this is: a look at the previous plan must not be written down as a look at this one
     int plan_id = 0;
     // Spots this bot could not do, with how many times it tried and when last. After a minute it tries
-    // again (a teammate was standing there, the bot was badly placed); after 3 tries it lets the spot be
+    // again (a teammate was standing there, the bot was badly placed), without discarding unfinished work
     std::map<Botcraft::Position, std::pair<int, std::chrono::steady_clock::time_point>> build_failed;
 
     // Team talk, over the game chat: "[team] <name>: <message>"
@@ -4060,10 +4063,19 @@ static bool HasWood(BehaviourClient& c)
     return !ItemLike(c, "_log").empty() || !ItemLike(c, "_planks").empty();
 }
 
+static bool TakeFromChest(McpBot& c, const std::string& item);
+
 /// @brief Decision tree action "get food": hunt the nearest farm animal, or explore to find some
 static Status GetFoodStep(McpBot& c)
 {
     c.SetState("getting food");
+    for (const char* food : { "minecraft:bread", "minecraft:cooked_beef", "minecraft:cooked_porkchop", "minecraft:baked_potato", "minecraft:carrot", "minecraft:sweet_berries" })
+    {
+        if (TakeFromChest(c, food))
+        {
+            return Status::Success;
+        }
+    }
     // Wheat in the pack is bread (3 a loaf), no hunt needed; a bot carried 64 wheat while starving
     if (CountItem(c, "minecraft:wheat") >= 3)
     {
@@ -4813,21 +4825,19 @@ static Status BuildStep(McpBot& c)
     const Position* out_of_sight = nullptr;
     std::tuple<int, int, double> best;
     int left = 0;
-    int resting_spots = 0;
     const std::chrono::steady_clock::time_point now_time = std::chrono::steady_clock::now();
     for (const auto& entry : team.blueprint)
     {
         const Position& p = entry.first;
         const auto failed = team.build_failed.find(p);
-        // After 8 tries a minute apart the bot lets a spot be; it still counts as left to do
-        const bool given_up = failed != team.build_failed.end() && failed->second.first >= 8;
-        const bool resting = failed != team.build_failed.end() && now_time - failed->second.second < std::chrono::seconds(60);
+        const bool resting = failed != team.build_failed.end() && !Construction::RetryReady(failed->second.first,
+            std::chrono::duration_cast<std::chrono::seconds>(now_time - failed->second.second).count());
         const Blockstate* block = world->GetBlock(p);
         if (block == nullptr)
         {
             // Too far to see: still to do, the bot has to get closer
             ++left;
-            if (!given_up)
+            if (!resting)
             {
                 out_of_sight = out_of_sight == nullptr ? &p : out_of_sight;
             }
@@ -4846,17 +4856,19 @@ static Status BuildStep(McpBot& c)
             (!WithWood(wanted_block, "*").empty() && WithWood(block->GetName(), "*") == WithWood(wanted_block, "*") && wanted.StateMatches(*block));
         if (clear ? empty : is_it)
         {
+            team.build_failed.erase(p);
             continue;
         }
         ++left;
-        if (given_up)
-        {
-            continue;
-        }
         if (resting)
         {
             // Still to do, but not right now
-            ++resting_spots;
+            continue;
+        }
+        const auto part = wanted.state.find("part");
+        if (empty && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
+        {
+            // The foot entry creates this half too; placing a second bed here would move it one block.
             continue;
         }
         // Something stands where a block has to go: removing it is clearing too
@@ -4869,7 +4881,6 @@ static Status BuildStep(McpBot& c)
             const Blockstate* under = world->GetBlock(p + Position(0, -1, 0));
             if (under == nullptr || !under->IsSolid())
             {
-                ++resting_spots;
                 continue;
             }
         }
@@ -4888,13 +4899,15 @@ static Status BuildStep(McpBot& c)
             return Status::Success;
         }
         c.team.build_left = left;
+        c.team.build_failed = team.build_failed;
         c.team.build_looked_at = std::chrono::steady_clock::now();
     }
     const auto give_up_on = [&](const Position& p)
         {
             std::lock_guard<std::mutex> lock(c.team_mutex);
+            if (c.team.plan_id != team.plan_id) { return; }
             auto& tries = c.team.build_failed[p];
-            ++tries.first;
+            tries.first = std::min(tries.first + 1, 8);
             tries.second = std::chrono::steady_clock::now();
         };
     // Where to land when teleporting to a spot: just above everything the plan has in that column
@@ -4922,17 +4935,19 @@ static Status BuildStep(McpBot& c)
         }
         return Status::Success;
     }
-    if (next == nullptr && resting_spots > 0)
+    if (next == nullptr && left > 0)
     {
         // Only spots that just failed are left: let the rest of the tree run, come back to them in a while
-        c.SetNote("building: " + std::to_string(resting_spots) + " spots to try again in a minute");
+        c.build_retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        c.SetNote("building: " + std::to_string(left) + " unfinished spots; retrying in a minute");
         return Status::Failure;
     }
     if (next == nullptr)
     {
         std::lock_guard<std::mutex> lock(c.team_mutex);
+        if (c.team.plan_id != team.plan_id) { return Status::Success; }
         c.team.building = false;
-        c.SetNote(team.build_failed.empty() ? "build finished" : "build finished, except " + std::to_string(team.build_failed.size()) + " spots this bot could not do");
+        c.SetNote("build finished");
         return Status::Success;
     }
     const Position& p = next->first;
@@ -4970,7 +4985,7 @@ static Status BuildStep(McpBot& c)
     {
         // Never what the bots live on
         const std::string& name = block->GetName();
-        if (EndsWith(name, ":chest") || EndsWith(name, ":barrel") || EndsWith(name, ":furnace") || EndsWith(name, ":crafting_table") || EndsWith(name, "_bed") ||
+        if (EndsWith(name, ":chest") || EndsWith(name, ":barrel") || EndsWith(name, ":furnace") || EndsWith(name, ":crafting_table") || (EndsWith(name, "_bed") && !EndsWith(item, "_bed")) ||
             block->GetHardness() < 0.0f || SafeDig(c, p, true) == Status::Failure)
         {
             give_up_on(p);
@@ -5016,7 +5031,7 @@ static Status BuildStep(McpBot& c)
         const auto way = ways.find(facing->second);
         if (way != ways.end())
         {
-            GoTo(c, Position(p.x - way->second.x * 2, p.y - 2, p.z - way->second.z * 2), 1, 0, 0);
+            GoTo(c, Position(p.x - way->second.x * 2, p.y, p.z - way->second.z * 2), 1, 0, 0);
             const Vector3<double> from = c.GetLocalPlayer()->GetPosition();
             const double along = (p.x + 0.5 - from.x) * way->second.x + (p.z + 0.5 - from.z) * way->second.z;
             const double across = std::abs((p.x + 0.5 - from.x) * way->second.z) + std::abs((p.z + 0.5 - from.z) * way->second.x);
@@ -5601,7 +5616,7 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
     bool in_team = false;
     {
         std::lock_guard<std::mutex> lock(c.team_mutex);
-        in_team = c.team.members.size() > 1;
+        in_team = c.team.building || c.team.members.size() > 1;
     }
     const auto asked = c.ask_retry_at.find(item);
     if (in_team && depth == 0 && !more && (asked == c.ask_retry_at.end() || std::chrono::steady_clock::now() >= asked->second))
@@ -5618,6 +5633,65 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
     }
     const std::string stage = "building";
     std::string error;
+    if (EndsWith(item, "_wool"))
+    {
+        std::atomic<int> obtained = 0;
+        if (CountItem(c, "minecraft:shears") > 0 && ShearTask(c, 3, 32.0, obtained) == Status::Success)
+        {
+            return Supply::Working;
+        }
+        if (!WildAnimals(c, "sheep", 32.0).empty())
+        {
+            KillTask(c, "sheep", 1, 32.0, obtained);
+        }
+        else
+        {
+            Explore(c, "sheep for building wool");
+        }
+        return Supply::Working;
+    }
+    if (item.find("minecraft:stripped_") == 0)
+    {
+        const auto trees = FindBlocks(c, [&](const Blockstate& b) { return EndsWith(b.GetName(), "_log") && b.GetName().find("stripped_") == std::string::npos; }, 32, 1,
+            [&](const Position& p) { return !InStoredSite(p) && !c.InSite(p); });
+        if (trees.empty())
+        {
+            Explore(c, "logs to strip for building");
+        }
+        else if (HeldTool(c, "axe").empty())
+        {
+            ToolStep(c, false, stage);
+        }
+        else if (ReachBlock(c, trees[0]) == Status::Success && SetItemInHand(c, HeldTool(c, "axe")) == Status::Success &&
+            InteractWithBlock(c, trees[0]) == Status::Success)
+        {
+            if (Utilities::YieldForCondition([&]() { const auto* b = c.GetWorld()->GetBlock(trees[0]); return b && b->GetName().find("minecraft:stripped_") == 0; }, c, 2000))
+            {
+                SafeDig(c, trees[0]);
+            }
+        }
+        return Supply::Working;
+    }
+    if (item == "minecraft:carved_pumpkin")
+    {
+        if (CountItem(c, "minecraft:shears") == 0)
+        {
+            if (CraftOne(c, "minecraft:shears", error) == 0) { return Obtain(c, "minecraft:iron_ingot", depth + 1, true); }
+            return Supply::Working;
+        }
+        const auto pumpkins = FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:pumpkin"; }, 32, 1,
+            [&](const Position& p) { return !InStoredSite(p) && !c.InSite(p); });
+        if (pumpkins.empty()) { Explore(c, "pumpkins for the shop"); }
+        else if (ReachBlock(c, pumpkins[0]) == Status::Success && SetItemInHand(c, "minecraft:shears") == Status::Success &&
+            InteractWithBlock(c, pumpkins[0]) == Status::Success)
+        {
+            if (Utilities::YieldForCondition([&]() { const auto* b = c.GetWorld()->GetBlock(pumpkins[0]); return b && b->GetName() == item; }, c, 2000))
+            {
+                SafeDig(c, pumpkins[0]);
+            }
+        }
+        return Supply::Working;
+    }
     // An item can have several recipes (sticks: from planks, or from bamboo). The one the bot holds the most
     // ingredients of; failing that, the one made of wood, which is everywhere
     auto recipe = recipes.end();
@@ -5788,7 +5862,8 @@ static void LightUp(BehaviourClient& c, const Position& where, const bool on_the
         const Blockstate* block = world->GetBlock(spot);
         const Blockstate* floor = world->GetBlock(spot + Position(0, -1, 0));
         // On a floor, and not in the bot's own spot
-        if (spot == feet || block == nullptr || !block->IsAir() || floor == nullptr || !floor->IsSolid())
+        McpBot* builder = dynamic_cast<McpBot*>(&c);
+        if (spot == feet || (builder && builder->InBlueprint(spot)) || block == nullptr || !block->IsAir() || floor == nullptr || !floor->IsSolid())
         {
             continue;
         }
@@ -6442,11 +6517,20 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         return KillTask(c, "hostile", 1, 10.0, killed);
                     })
             .end()
+            .sequence("urgent food")
+                .leaf("hungry with no food?", [](McpBot& c)
+                    {
+                        return c.GetLocalPlayer()->GetFood() < 8 && FindFood(c).empty() &&
+                            std::chrono::steady_clock::now() >= c.food_retry_at ? Status::Success : Status::Failure;
+                    })
+                .leaf("get food", GetFoodStep)
+            .end()
             .sequence("avenge")
                 .leaf("a player attacked one of the bots?", [](McpBot& c)
                     {
                         std::lock_guard<std::mutex> lock(c.team_mutex);
-                        return !c.avenge.empty() && std::chrono::steady_clock::now() < c.avenge_until ? Status::Success : Status::Failure;
+                        return Construction::CanPursuePlayer(c.team.building, c.GetLocalPlayer()->GetFood(), c.GetLocalPlayer()->GetHealth()) &&
+                            !c.avenge.empty() && std::chrono::steady_clock::now() < c.avenge_until ? Status::Success : Status::Failure;
                     })
                 .leaf("go after that player", [](McpBot& c)
                     {
@@ -7014,7 +7098,7 @@ static const char* tools_json = R"JSON([
 {"name":"read_chat","description":"Return chat/system messages received since the last call.","inputSchema":{"type":"object","properties":{}}},
 {"name":"inventory","description":"List the bot's inventory slots (item name and count).","inputSchema":{"type":"object","properties":{}}},
 {"name":"entities","description":"List nearby entities, nearest first. type: empty for all, an entity name like zombie or cow, or a group: hostile, animal, player.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"radius":{"type":"number","default":32}}}},
-{"name":"get_block","description":"Name and state of the block at a position.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
+{"name":"get_block","description":"Name and state of the block at a position. Optional y_min scans down to the first solid block, returning its y.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"y_min":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"find_blocks","description":"Find the nearest loaded blocks with an exact block id (e.g. oak_log, diamond_ore, crafting_table). Radius is capped at 32.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"radius":{"type":"number","default":32},"max":{"type":"number","default":10}},"required":["block"]}},
 {"name":"goto","description":"Pathfind and walk to a block position. tolerance = how many blocks away is close enough.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"tolerance":{"type":"number","default":0}},"required":["x","y","z"]}},
 {"name":"look_at","description":"Turn the bot's head toward a position.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
@@ -7022,7 +7106,7 @@ static const char* tools_json = R"JSON([
 {"name":"place_block","description":"Place a block item from the inventory at a position (walks there if needed).","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["item","x","y","z"]}},
 {"name":"interact_block","description":"Right-click the block at a position (button, lever, door, chest...). Walks there if needed.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"use_item","description":"Use an item while looking at a point (walks within reach first): how a bucket is filled (x y z of a still water block, y its surface) and emptied (x z of the spot, y the top of the block the water goes on). item: what to use, default what is in hand. For buttons, doors and chests use interact_block instead.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"item":{"type":"string"}},"required":["x","y","z"]}},
-{"name":"equip","description":"Put an inventory item in the bot's main hand.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
+{"name":"equip","description":"Put an inventory item in the bot's main hand, or wear it with slot=armor.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"slot":{"type":"string","enum":["hand","armor"]}},"required":["item"]}},
 {"name":"chests","description":"What the bots know is in the chests: every bot that opens a chest (to store, take or look for room) tells the others what it holds, and chests and barrels seen while scanning are reported as finds (recall kind chest). With item: the chests holding it, fullest first; without: every known chest, newest first, with its contents and who saw it last. The bots themselves go to a chest known to hold what they need.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"max":{"type":"number","default":20}}}},
 {"name":"home","description":"Give the bot a bed of its own (the one in its house): at night it goes back there to sleep, from wherever it is.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"eat","description":"Eat a food item from the inventory.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
@@ -7057,6 +7141,7 @@ static const char* tools_json = R"JSON([
 {"name":"vault","description":"The vault: one chest per category of item (food, weapons, armor, equipment, valuables, building, materials). With category and x y z, declares the chest of a category; with nothing, lists them. Once declared, bots within 96 blocks store by category there instead of in a chest per item, and look there first for what they need. The result says full when a bot found a category's chests full on every floor: the castle plugin then digs another floor underneath.","inputSchema":{"type":"object","properties":{"category":{"type":"string","description":"food, weapons, armor, equipment, valuables, materials or building; with #2, #3... for the same category on a lower floor"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"full":{"type":"boolean","description":"false clears the 'vault is full' mark, once a floor has been added"}}}},
 {"name":"store","description":"Put the inventory in chests, one chest per item type. A missing chest is placed next to the bot from a chest item of its inventory, and remembered. By default the hotbar and the chest items are kept; everything=true empties the whole inventory.","inputSchema":{"type":"object","properties":{"everything":{"type":"boolean","default":false}}}},
 {"name":"bots","description":"List the connected bots (name and state). Every other tool accepts an optional bot argument with one of these names and defaults to the first bot.","inputSchema":{"type":"object","properties":{}}},
+{"name":"spawn","description":"Queue 1 to 100 additional bots with unused BotN names, spaced by the configured join delay. Returns the queued names; bots shows progress.","inputSchema":{"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100}},"required":["count"]}},
 {"name":"connect","description":"Connect one more bot to the server under this player name.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}},
 {"name":"disconnect","description":"Make a bot store its whole inventory in chests, then disconnect it from the server.","inputSchema":{"type":"object","properties":{}}}
 ])JSON";
@@ -7153,6 +7238,7 @@ struct Rejoin
     Value restore;
 };
 static std::map<std::string, Rejoin> rejoining;
+static int spawn_delay_seconds = 5;
 constexpr std::chrono::seconds rejoin_delay(60);
 // Name of the leader of the current team, "" if the bots are not teamed up (main process only)
 static std::string team_leader;
@@ -7441,6 +7527,14 @@ static Value CallTool(const std::string& name, const Value& a);
 
 static void SpawnBot(const std::string& login)
 {
+    static std::mutex spawn_mutex;
+    std::lock_guard<std::mutex> spawning(spawn_mutex);
+    {
+        std::lock_guard<std::mutex> lock(bots_mutex);
+        const bool local_name = !bots.empty() && bots.front().bot->GetNetworkManager()->GetMyName() == login;
+        const bool child_name = std::any_of(children.begin(), children.end(), [&](const auto& child) { return child->name == login; });
+        if (local_name || child_name) { throw std::runtime_error(login + " is already connected"); }
+    }
     {
         // Only the first bot lives in this process
         std::lock_guard<std::mutex> lock(bots_mutex);
@@ -8703,6 +8797,33 @@ static Value CallTool(const std::string& name, const Value& a)
         o["full"] = chests.count("vault:full") != 0;
         return o;
     }
+    if (name == "spawn")
+    {
+        if (is_child || stopping) { throw std::runtime_error("spawn needs a running main program"); }
+        if (!a.is_object() || !a.contains("count") || !a["count"].is_integer() ||
+            a["count"].get_number<double>() < 1 || a["count"].get_number<double>() > 100)
+        {
+            throw std::runtime_error("count must be an integer from 1 to 100");
+        }
+        std::lock_guard<std::mutex> lock(bots_mutex);
+        std::set<std::string> used;
+        for (const auto& slot : bots) { used.insert(slot.bot->GetNetworkManager()->GetMyName()); }
+        for (const auto& child : children) { used.insert(child->name); }
+        for (const auto& [waiting, rejoin] : rejoining) { used.insert(waiting); }
+        const auto names = NewBotNames(a["count"].get_number<int>(), used);
+        const auto now = std::chrono::steady_clock::now();
+        Value result = Json::Array();
+        for (std::size_t i = 0; i < names.size(); ++i)
+        {
+            Rejoin queued;
+            queued.at = now + std::chrono::seconds(std::max(spawn_delay_seconds, 5) * static_cast<int>(i));
+            queued.restore["bot"] = names[i];
+            queued.restore["enabled"] = start_autopilot;
+            rejoining[names[i]] = queued;
+            result.push_back(names[i]);
+        }
+        return result;
+    }
     if (name == "connect")
     {
         {
@@ -8716,9 +8837,22 @@ static Value CallTool(const std::string& name, const Value& a)
             {
                 throw std::runtime_error(wanted + " is already connected");
             }
-            rejoining.erase(wanted);
+            if (rejoining.count(wanted) != 0) { throw std::runtime_error(wanted + " is already queued to join"); }
+            Rejoin reserved;
+            reserved.at = std::chrono::steady_clock::time_point::max();
+            rejoining[wanted] = reserved;
         }
-        SpawnBot(Str(a, "name"));
+        try { SpawnBot(Str(a, "name")); }
+        catch (...)
+        {
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            rejoining.erase(Str(a, "name"));
+            throw;
+        }
+        {
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            rejoining.erase(Str(a, "name"));
+        }
         return "connected " + Str(a, "name");
     }
     bool is_lua_tool = false;
@@ -8797,6 +8931,8 @@ static Value CallTool(const std::string& name, const Value& a)
             o["team_reports"] = bot.team.reports;
             // Build objective: is one under way, and how many spots are left
             o["building"] = bot.team.building;
+            o["build_name"] = bot.team.build_name;
+            o["build_failed"] = static_cast<int>(bot.team.build_failed.size());
             // Spots of the plan not standing yet, as of the bot's last look (see build_idle), its own failures included
             o["build_left"] = bot.team.blueprint.empty() ? 0 : bot.team.build_left;
             // The whole plan stands as far as this bot can see, with no spot it had to give up on
@@ -8906,7 +9042,15 @@ static Value CallTool(const std::string& name, const Value& a)
     }
     if (name == "get_block")
     {
-        const Blockstate* block = world->GetBlock(Pos(a));
+        Position p = Pos(a);
+        const int bottom = a.contains("y_min") ? static_cast<int>(Num(a, "y_min")) : p.y;
+        if (bottom > p.y || p.y - bottom > 384) { throw std::runtime_error("y_min must be within 384 blocks below y"); }
+        const Blockstate* block = world->GetBlock(p);
+        while (block != nullptr && p.y > bottom && (block->IsAir() || !block->IsSolid()))
+        {
+            --p.y;
+            block = world->GetBlock(p);
+        }
         if (block == nullptr)
         {
             throw std::runtime_error("position is not loaded");
@@ -8914,6 +9058,7 @@ static Value CallTool(const std::string& name, const Value& a)
         Value o;
         o["block"] = block->GetName();
         o["state"] = block->GetVariables();
+        o["y"] = p.y;
         return o;
     }
     if (name == "find_blocks")
@@ -8964,6 +9109,19 @@ static Value CallTool(const std::string& name, const Value& a)
     if (name == "equip")
     {
         const std::string item = Id(Str(a, "item"));
+        const std::string slot = a.contains("slot") ? Str(a, "slot") : "hand";
+        if (slot != "hand" && slot != "armor") { throw std::runtime_error("slot must be hand or armor"); }
+        if (slot == "armor")
+        {
+            short destination = -1;
+            for (const auto& piece : armor)
+            {
+                const std::string suffix = std::string(piece.item).substr(std::string(piece.item).find_last_of('_'));
+                if (EndsWith(item, suffix)) { destination = piece.slot; break; }
+            }
+            if (destination < 0) { throw std::runtime_error("item must be a helmet, chestplate, leggings or boots"); }
+            return Act(bot, 20, "equip armor", [=](McpBot& c) { return Wear(c, item, destination); });
+        }
         return Act(bot, 20, "equip", [=](McpBot& c) { return SetItemInHand(c, item); });
     }
     if (name == "home")
@@ -9636,6 +9794,7 @@ static Value CallTool(const std::string& name, const Value& a)
                 }
             }
             team.building = true;
+            team.build_name = a.contains("name") ? Str(a, "name") : plan;
             team.build_left = static_cast<int>(team.blueprint.size());
             // The site keeps a building team together, not the leader (who may be off getting wood)
             team.follow_distance = 1.0e9;
@@ -9647,6 +9806,11 @@ static Value CallTool(const std::string& name, const Value& a)
             static std::atomic<int> plans = 0;
             team.plan_id = ++plans;
             bot.team = team;
+        }
+        if (objective == "build" || objective == "disband")
+        {
+            bot.SetGoal("", 0);
+            bot.SetMake("", 0);
         }
         if (objective == "gather")
         {
@@ -10399,7 +10563,7 @@ static void HandleHttpRequest(const int fd)
             {
                 Value o;
                 o["name"] = waiting;
-                o["state"] = "kicked or crashed, rejoining in " + std::to_string(std::max<long long>(0,
+                o["state"] = "waiting to join in " + std::to_string(std::max<long long>(0,
                     std::chrono::duration_cast<std::chrono::seconds>(rejoin.at - std::chrono::steady_clock::now()).count())) + " s";
                 state["bots"].push_back(o);
             }
@@ -10641,34 +10805,21 @@ int main(int argc, char* argv[])
             Renderer::Settings::Headless(!show_gui);
             Renderer::Settings::SetResolution(854, 480);
         }
+        spawn_delay_seconds = delay;
+        {
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            for (int i = 2; i <= count; ++i)
+            {
+                const std::string name = login.empty() ? login : login + std::to_string(i);
+                Rejoin queued;
+                queued.at = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(delay, 5) * (i - 1));
+                queued.restore["bot"] = name;
+                queued.restore["enabled"] = start_autopilot;
+                rejoining[name] = queued;
+            }
+        }
         SpawnBot(count > 1 && !login.empty() ? login + "1" : login);
 
-        std::thread spawner([&]()
-            {
-                Logger::GetInstance().RegisterThread("spawner");
-                for (int i = 2; i <= count && !stop; ++i)
-                {
-                    nap(delay);
-                    if (stop)
-                    {
-                        break;
-                    }
-                    try
-                    {
-                        SpawnBot(login.empty() ? login : login + std::to_string(i));
-                    }
-                    catch (const std::exception& e)
-                    {
-                        LOG_ERROR("Could not spawn bot " << i << ", trying again in 60 seconds: " << e.what());
-                        Rejoin rejoin;
-                        rejoin.at = std::chrono::steady_clock::now() + rejoin_delay;
-                        rejoin.restore["bot"] = login + std::to_string(i);
-                        rejoin.restore["enabled"] = start_autopilot;
-                        std::lock_guard<std::mutex> lock(bots_mutex);
-                        rejoining[login + std::to_string(i)] = rejoin;
-                    }
-                }
-            });
         std::thread snapshots([&]()
             {
                 while (!snapshot_path.empty() && !stop)
@@ -10686,7 +10837,7 @@ int main(int argc, char* argv[])
         for (size_t i = 0; i < tools.size(); ++i)
         {
             const std::string& name = tools[i]["name"].get_string();
-            if (name != "bots" && name != "connect" && name != "vault" && name != "mines")
+            if (name != "bots" && name != "connect" && name != "spawn" && name != "vault" && name != "mines")
             {
                 tools[i]["inputSchema"]["properties"]["bot"]["type"] = "string";
                 tools[i]["inputSchema"]["properties"]["bot"]["description"] = "Name of the bot to use, see the bots tool. Defaults to the first bot.";
@@ -10933,11 +11084,10 @@ int main(int argc, char* argv[])
                         std::lock_guard<std::mutex> lock(bots_mutex);
                         for (const auto& [waiting, rejoin] : rejoining)
                         {
-                            if (rejoin.at <= now)
+                            if (rejoin.at <= now && (name.empty() || rejoin.at < rejoining.at(name).at))
                             {
                                 name = waiting;
                                 restore = rejoin.restore;
-                                break;
                             }
                         }
                     }
@@ -11045,7 +11195,6 @@ int main(int argc, char* argv[])
         // (waiting for them first, a stop with 50 bots never got as far as telling one to leave)
         stop = true;
         stopping = true;
-        spawner.join();
         snapshots.join();
         web.join();
         rejoin_thread.join();

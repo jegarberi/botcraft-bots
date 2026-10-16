@@ -5,6 +5,7 @@
 #include <protocolCraft/Utilities/Json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -207,7 +208,7 @@ namespace
         std::vector<std::string> lines;
         if (role)
         {
-            std::snprintf(text, sizeof(text), "the %s' network (what %s does next, shared by the trade)  last action %s  critic value %.2f   (n closes)",
+            std::snprintf(text, sizeof(text), "the %s policy (what %s does next, independently trained)  last action %s  critic value %.2f   (n closes)",
                 Field(n, "role").c_str(), Field(n, "bot").c_str(), Field(n, "last_action").empty() ? "-" : Field(n, "last_action").c_str(), number(n["value"]));
         }
         else
@@ -241,13 +242,18 @@ namespace
                 }
                 return out;
             };
-        const auto& hidden = n["hidden"].get_array();
-        for (size_t h = 0; h < hidden.size(); ++h)
+        const auto hidden_layers = n.contains("activations") ? n["activations"] : Value(ProtocolCraft::Json::Array());
+        for (size_t l = 0; l < hidden_layers.get_array().size(); ++l)
         {
-            std::snprintf(text, sizeof(text), "hidden %2zu %+.2f  %-36s <- %s", h + 1, number(hidden[h]),
-                std::string(static_cast<size_t>(std::abs(number(hidden[h])) * 36), number(hidden[h]) >= 0 ? '+' : '-').c_str(),
-                strongest(n["w1"][h], [&](size_t i) { return i < inputs.size() ? inputs[i] : "?"; }).c_str());
-            lines.push_back(text);
+            const auto& hidden = hidden_layers[l].get_array();
+            for (size_t h = 0; h < hidden.size(); ++h)
+            {
+                std::snprintf(text, sizeof(text), "layer %zu hidden %2zu %+.2f <- %s", l + 1, h + 1, number(hidden[h]),
+                    strongest(l == 0 ? n["w1"][h] : n["layers"][l - 1]["w"][h], [&](size_t i) {
+                        return l == 0 && i < inputs.size() ? inputs[i] : "hidden " + std::to_string(i + 1);
+                    }).c_str());
+                lines.push_back(text);
+            }
         }
         const auto& outputs = n["outputs"].get_array();
         for (size_t o = 0; o < outputs.size(); ++o)
@@ -466,7 +472,7 @@ int main()
                 }
             };
         line(0, Column("🤖 botcraft  " + std::to_string(bots.size()) + " bots   ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
-            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
+            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
         line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
         const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
@@ -576,6 +582,25 @@ int main()
                 run("", "connect", args);
             }
         }
+        else if (key == 'C')
+        {
+            const std::string text = ask("spawn how many additional bots (1-100): ");
+            if (!text.empty())
+            {
+                int count = 0;
+                const auto parsed = std::from_chars(text.data(), text.data() + text.size(), count);
+                if (parsed.ec == std::errc() && parsed.ptr == text.data() + text.size() && count >= 1 && count <= 100)
+                {
+                    args["count"] = count;
+                    run("", "spawn", args);
+                }
+                else
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    message = "count must be an integer from 1 to 100";
+                }
+            }
+        }
         else if (key == 't')
         {
             const std::vector<std::string> order = Words(ask("team: objective (gather/attack/build/follow) what count [x1 y1 z1 x2 y2 z2]: "));
@@ -638,7 +663,7 @@ int main()
         else if (bot.empty())
         {
             std::lock_guard<std::mutex> lock(mutex);
-            message = "🔌 no bot connected: c to connect one";
+            message = "🔌 no bot connected: c to connect one, C to spawn N bots";
         }
         else if (key == 'a')
         {

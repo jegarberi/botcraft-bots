@@ -1,6 +1,5 @@
--- Each trade's own neural network: within its trade (the brain plugin picks the trade), what a bot does next.
--- One network per trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers), shared by
--- the bots in it, so it learns from all of them. Same network code as the brain (the global NN it defines).
+-- Each bot has a separate action policy for each trade, using the brain plugin's global NN implementation.
+-- Every five game days, the two best policies per trade seed lightly mutated copies for the other bots.
 --   bakers       bread, pumpkin pies and cakes from the farmers' wheat, eggs, milk and pumpkins; feed the hungry
 --   farmers      wheat fields, eggs from the chickens, pumpkins, milk from the cows
 --   butchers     breed the animals, slaughter some: meat (cooked) and leather
@@ -9,9 +8,9 @@
 --   fishers      fish with a rod at open water, cook the catch (coal from the miners), feed the hungry
 -- The trades trade: each needs things the others make (NEEDS, PROVIDES). Its "trade" action asks a bot of the
 -- trade that makes what it lacks to hand it over, or else hands its own surplus to the bot that lacks it most.
---   in   15 numbers about the bot: health, hunger, food, wood, stone, iron, coal it carries, its tools, night,
+--   in   20 numbers about the bot: health, hunger, food, wood, stone, iron, coal it carries, its tools, night,
 --        hostile mobs and animals near, how much of what its trade needs it lacks
---   ->   8 hidden units (tanh)
+--   ->   three hidden layers of 8 units (tanh with residual connections)
 --   out  the trade's actions (softmax: drawn from, so it keeps trying the others)
 -- Each time the groups plugin gives a bot its turn, the bot's network draws an action and the bot does it;
 -- at its next turn, what it achieved since (its stats, weighted for the trade, minus deaths and getting
@@ -22,9 +21,9 @@
 local FILE = "../roles_state.lua"
 local HID = 8
 local INPUTS = { "bias", "health", "food level", "food carried", "wood carried", "stone carried", "iron carried", "coal carried",
-    "has pickaxe", "has sword", "has hoe", "night", "hostiles near", "animals near", "needs unmet" }
+    "has pickaxe", "has sword", "has hoe", "night", "hostiles near", "animals near", "needs unmet", "building", "build remaining", "build idle", "food variety", "gear quality" }
 local ORES = { coal = "coal_ore", iron = "iron_ore", copper_gold = "copper_ore,gold_ore", deep = "redstone_ore,lapis_ore,diamond_ore" }
-local FOOD = { bread = true, pumpkin_pie = true, cake = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
+local FOOD = NN.edible or { bread = true, pumpkin_pie = true, cake = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, golden_carrot = true, sweet_berries = true, cooked_cod = true, cooked_salmon = true }
 local RAW = { beef = "cooked_beef", porkchop = "cooked_porkchop", mutton = "cooked_mutton", chicken = "cooked_chicken", potato = "baked_potato",
     cod = "cooked_cod", salmon = "cooked_salmon" }
@@ -94,6 +93,9 @@ end
 -- ---------------------------------------------------------------- the exchange between trades
 -- What a bot of each trade wants to carry to do its work, and which trade makes each of those things
 local NEEDS = {
+    builders = { oak_log = 16, cobblestone = 32, chest = 2, bread = 4 },
+    lumberjacks = { stone_axe = 1, bread = 4 },
+    carpenters = { oak_log = 16, bread = 4 },
     bakers = { wheat = 9, egg = 2, milk_bucket = 3, pumpkin = 2 },
     farmers = { bucket = 1, bread = 4 },
     butchers = { wheat = 8, wheat_seeds = 8, carrot = 4, bread = 4 },
@@ -101,7 +103,7 @@ local NEEDS = {
     blacksmiths = { raw_iron = 9, coal = 8, leather = 4, bread = 4 },
     fishers = { coal = 4, bread = 2 },
 }
-local PROVIDES = { wheat = "farmers", egg = "farmers", milk_bucket = "farmers", pumpkin = "farmers", wheat_seeds = "farmers",
+local PROVIDES = { oak_log = "lumberjacks", spruce_log = "lumberjacks", birch_log = "lumberjacks", chest = "carpenters", oak_planks = "carpenters", oak_stairs = "carpenters", oak_fence = "carpenters", stone_axe = "blacksmiths", cobblestone = "miners", wheat = "farmers", egg = "farmers", milk_bucket = "farmers", pumpkin = "farmers", wheat_seeds = "farmers",
     carrot = "farmers", bread = "bakers", leather = "butchers", raw_iron = "miners", coal = "miners", iron_pickaxe = "blacksmiths",
     bucket = "blacksmiths", torch = "blacksmiths", cooked_cod = "fishers", cooked_salmon = "fishers" }
 local function count(st, item) return carried(st, function(i) return i == item end) end
@@ -200,7 +202,7 @@ local ROLES = {
         },
     },
     farmers = {
-        weights = { harvested = 1, given = 1, collected = 0.2, needs = 4 },
+        weights = { harvested = 1, given = 1, collected = 0.2, built = 2, bred = 5, needs = 4 },
         actions = {
             { name = "harvest", run = function(ctx)
                 local r = call("farm", { bot = ctx.bot, radius = 16 })
@@ -350,7 +352,139 @@ for _, a in ipairs({
     { name = "trade", run = exchange },
     { name = "store", run = store },
 }) do table.insert(ROLES.butchers.actions, a) end
-local ORDER = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
+-- Append actions so saved output indices keep their meaning.
+for _, role in ipairs({ "builders", "miners" }) do
+    table.insert(ROLES[role].actions, { name = "gather construction stone", goal = true,
+        run = function(ctx) return gather(ctx, "stone,cobblestone", 64) end })
+    table.insert(ROLES[role].actions, { name = "gather construction logs", goal = true,
+        run = function(ctx) return gather(ctx, "oak_log,spruce_log,birch_log", 32) end })
+end
+for _, role in ipairs({ "builders", "blacksmiths" }) do
+    table.insert(ROLES[role].actions, { name = "make storage chests", goal = true,
+        run = function(ctx) return make(ctx, "chest", 4) end })
+end
+table.insert(ROLES.bakers.actions, { name = "cook available food", run = function(ctx)
+    for _, raw in ipairs(sorted(RAW)) do
+        if count(ctx.st, raw) > 0 then
+            return make(ctx, RAW[raw], count(ctx.st, RAW[raw]) + count(ctx.st, raw))
+        end
+    end
+    return "no raw food to cook"
+end })
+table.insert(ROLES.blacksmiths.actions, { name = "make building axes", goal = true,
+    run = function(ctx) return make(ctx, "stone_axe", 2) end })
+table.insert(ROLES.blacksmiths.actions, { name = "hand out axes", run = function(ctx) return hand_out(ctx, { "_axe" }) end })
+
+ROLES.lumberjacks = { weights = { collected = 1, given = 2, stored = 0.05, built = 1, needs = 4 }, actions = {
+    { name = "fell trees", goal = true, run = function(ctx) return gather(ctx, "oak_log,spruce_log,birch_log,jungle_log,acacia_log,dark_oak_log", 64) end },
+    { name = "make an axe", run = function(ctx) return make(ctx, "stone_axe", 1) end },
+    { name = "trade", run = exchange }, { name = "store", run = store },
+} }
+ROLES.carpenters = { weights = { made = 1, built = 2, given = 2, needs = 4 }, actions = {
+    { name = "trade", run = exchange }, { name = "store", run = store },
+} }
+for _, item in ipairs({ "oak_planks", "chest", "barrel", "oak_stairs", "oak_fence", "oak_pressure_plate", "oak_door", "stick" }) do
+    table.insert(ROLES.carpenters.actions, { name = "craft " .. item,
+        run = function(ctx) return make(ctx, item, item == "oak_planks" and 64 or item == "stick" and 16 or 4) end })
+end
+
+local function residence(ctx)
+    local h = call("empire", { residence = ctx.bot })
+    return type(h) == "table" and h.ready and h.at or nil
+end
+local function decorate(ctx)
+    local o = residence(ctx)
+    if not o then return "house not ready" end
+    for _, part in ipairs({ { 1, 0, 4, "bookshelf" }, { 4, 0, 2, "white_carpet" }, { 2, 0, 3, "lantern" } }) do
+        local x, y, z = o.x + part[1], o.y + part[2], o.z + part[3]
+        local b = call("get_block", { bot = ctx.bot, x = x, y = y, z = z })
+        if not b or not b.block or b.block == "" then return "decoration site not visible" end
+        if b.block == "air" or b.block == "minecraft:air" then
+            if count(ctx.st, part[4]) == 0 then return make(ctx, part[4], 1) end
+            local _, err = call("place_block", { bot = ctx.bot, x = x, y = y, z = z, item = part[4] })
+            return err and ("could not decorate: " .. err) or ("decorated with " .. part[4])
+        end
+    end
+    return "house already decorated"
+end
+local function upgrade(ctx, kinds)
+    local costs = { pickaxe = 3, axe = 3, sword = 2, shovel = 1, hoe = 2, chestplate = 8, helmet = 5, leggings = 7, boots = 4 }
+    local slots = { chestplate = "chest", helmet = "head", leggings = "legs", boots = "feet" }
+    for _, kind in ipairs(kinds) do
+        local equipped = (ctx.st.equipment or {})[slots[kind]]
+        local best
+        for _, material in ipairs({ "netherite", "diamond", "iron" }) do
+            local item = material .. "_" .. kind
+            if count(ctx.st, item) > 0 or equipped == item then best = item; break end
+        end
+        if slots[kind] and best and equipped ~= best then
+            local _, err = call("equip", { bot = ctx.bot, item = best, slot = "armor" })
+            return err and tostring(err) or ("wearing " .. best)
+        end
+        local target = count(ctx.st, "diamond") >= costs[kind] and "diamond" or "iron"
+        if not best or (target == "diamond" and best == "iron_" .. kind) then return make(ctx, target .. "_" .. kind, 1) end
+    end
+    return "gear already upgraded"
+end
+for _, role in ipairs({ "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }) do
+    table.insert(ROLES[role].actions, { name = "decorate home", run = decorate })
+    table.insert(ROLES[role].actions, { name = "upgrade tools", run = function(ctx) return upgrade(ctx, { "pickaxe", "axe", "sword", "shovel", "hoe" }) end })
+    table.insert(ROLES[role].actions, { name = "upgrade armor", run = function(ctx)
+        call("autopilot", { bot = ctx.bot, enabled = true, gear = true })
+        return upgrade(ctx, { "chestplate", "helmet", "leggings", "boots" }) end })
+end
+for _, item in ipairs({ "baked_potato", "beetroot_soup", "mushroom_stew", "rabbit_stew", "cookie" }) do
+    table.insert(ROLES.bakers.actions, { name = "cook " .. item, run = function(ctx) return make(ctx, item, 4) end })
+end
+table.insert(ROLES.farmers.actions, { name = "gather planting seeds", goal = true,
+    run = function(ctx) return gather(ctx, "short_grass,tall_grass", 24) end })
+local function pen(ctx)
+    local o = residence(ctx)
+    return o and { x = o.x + 9, y = o.y, z = o.z + 1 } or nil
+end
+table.insert(ROLES.farmers.actions, { name = "build animal pen", run = function(ctx)
+    local o = pen(ctx)
+    if not o then return "needs a finished home lot" end
+    local blocks = {}
+    for x = 0, 5 do for z = 0, 5 do
+        blocks[#blocks + 1] = { o.x + x, o.y - 1, o.z + z, "cobblestone" }
+        local edge = x == 0 or x == 5 or z == 0 or z == 5
+        blocks[#blocks + 1] = { o.x + x, o.y, o.z + z, edge and (x == 2 and z == 5 and "oak_fence_gate[open=false]" or "oak_fence") or "air" }
+        for y = 1, 2 do blocks[#blocks + 1] = { o.x + x, o.y + y, o.z + z, "air" } end
+    end end
+    local _, err = call("team_member", { bot = ctx.bot, objective = "build", plan = "blocks", blocks = blocks,
+        members = { ctx.bot }, leader = ctx.bot, solo = true, name = ctx.bot .. "'s animal pen" })
+    return err and tostring(err) or "building an animal pen"
+end })
+local function gate(ctx, o, open)
+    local args = { bot = ctx.bot, x = o.x + 2, y = o.y, z = o.z + 5 }
+    local b = call("get_block", args)
+    if not b or not tostring(b.block):match("_fence_gate") then return false end
+    local state = b.state
+    if type(state) ~= "table" or state.open == nil then return false end
+    if tostring(state.open) ~= tostring(open) then
+        local r = call("interact_block", args)
+        if r == nil then return false end
+    end
+    return true
+end
+for _, animal in ipairs({ { "cow", "wheat" }, { "sheep", "wheat" }, { "pig", "carrot" }, { "chicken", "wheat_seeds" } }) do
+    table.insert(ROLES.farmers.actions, { name = "gather " .. animal[1], run = function(ctx)
+        local o = pen(ctx)
+        if not o or count(ctx.st, animal[2]) == 0 then return "needs a pen and " .. animal[2] end
+        if not gate(ctx, o, true) then return "pen gate is not ready" end
+        local _, err = call("lure", { bot = ctx.bot, type = animal[1], food = animal[2], x = o.x + 2, y = o.y, z = o.z + 2 })
+        local closed = gate(ctx, o, false)
+        return err and tostring(err) or (closed and "led animals into the pen" or "animals led; could not close the gate")
+    end })
+    table.insert(ROLES.farmers.actions, { name = "breed " .. animal[1], run = function(ctx)
+        if count(ctx.st, animal[2]) < 2 then return "needs " .. animal[2] end
+        local _, err = call("breed", { bot = ctx.bot, type = animal[1], food = animal[2], radius = 24 })
+        return err and tostring(err) or "bred " .. animal[1]
+    end })
+end
+
+local ORDER = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
 
 -- ---------------------------------------------------------------- state
 local function save(state)
@@ -368,19 +502,64 @@ local function restore()
 end
 
 local state = restore() or {}
-state.nets = state.nets or {}          -- trade -> its network
+state.nets = state.nets or {}          -- legacy trade policies, used to seed individual policies
+if not state.bot_nets then state.prev = {} end
+state.bot_nets = state.bot_nets or {}  -- bot -> trade -> its own independently trained policy
+state.fitness = state.fitness or {}    -- trade -> bot -> { reward sum, samples }
+state.day = state.day or 0
+state.last_day_at = state.last_day_at or os.time()
 state.scale = state.scale or {}        -- trade -> running size of its rewards, to keep them near 1
 state.prev = state.prev or {}          -- bot -> { role, x, action, snapshot } of its last turn
 state.counts = state.counts or {}      -- trade -> action -> times drawn
 state.rewards = state.rewards or {}    -- trade -> action -> running average reward
 for i, role in ipairs(ORDER) do
     local n = #ROLES[role].actions
-    -- A new trade, or its actions changed: a new network
-    if not state.nets[role] or #state.nets[role].w2 ~= n or #state.nets[role].w1[1] ~= #INPUTS then
-        state.nets[role] = NN.new(#INPUTS, HID, n, 1000 + i)
-        state.counts[role], state.rewards[role] = {}, {}
+    local net = state.nets[role]
+    state.nets[role] = net and NN.grow(net, #INPUTS, n) or NN.new(#INPUTS, HID, n, 1000 + i)
+    state.counts[role], state.rewards[role] = state.counts[role] or {}, state.rewards[role] or {}
+end
+
+for _, policies in pairs(state.bot_nets) do
+    for role, net in pairs(policies) do
+        if ROLES[role] then policies[role] = NN.grow(net, #INPUTS, #ROLES[role].actions) end
     end
 end
+
+local function net_of(name, role)
+    state.bot_nets[name] = state.bot_nets[name] or {}
+    local policies = state.bot_nets[name]
+    if not policies[role] then policies[role] = NN.mutated(state.nets[role]) end
+    return policies[role]
+end
+
+-- This clock also runs in empire mode, when the trade-selection brain is stopped.
+bot.every(30, function()
+    local st = call("status", {})
+    local time = type(st) == "table" and tonumber(st.day_time) or nil
+    local new_day = (time and state.last_time and time < state.last_time) or os.time() - state.last_day_at >= 1500
+    if time then state.last_time = time end
+    if not new_day then return end
+    state.day, state.last_day_at = state.day + 1, os.time()
+    if state.day % 5 == 0 then
+        state.last_generation = {}
+        for _, role in ipairs(ORDER) do
+            local nets = {}
+            for name, policies in pairs(state.bot_nets) do if policies[role] then nets[name] = policies[role] end end
+            local ranking, parents = NN.evolve(nets, state.fitness[role] or {})
+            if #parents > 0 then
+                state.nets[role] = NN.copy(nets[parents[1]])
+                for name, net in pairs(nets) do
+                    state.bot_nets[name][role] = net
+                    if state.prev[name] and state.prev[name].role == role then state.prev[name] = nil end
+                end
+                state.last_generation[role] = { winners = parents, ranking = ranking }
+            end
+        end
+        state.fitness = {}
+        state.generation = (state.generation or 0) + 1
+    end
+    save(state)
+end)
 
 local function features(st, ctx)
     local function near(kind, n)
@@ -400,14 +579,16 @@ local function features(st, ctx)
         has(st, "_pickaxe") and 1 or 0, has(st, "_sword") and 1 or 0, has(st, "_hoe") and 1 or 0,
         (time % 24000) >= 13000 and 1 or 0,
         near("hostile", 4), near("animal", 8), unmet(st, ctx.role),
+        st.building and 1 or 0, math.min(1, (st.build_left or 0) / 1000), math.min(1, (st.build_idle or 0) / 600),
+        math.min(1, NN.condition(st).variety / 8), NN.condition(st).quality / 45,
     }
 end
 
 -- What a bot's figures are now, to judge its next turn by
-local MADE = { torch = true, chest = true, iron_ingot = true, bread = true, pumpkin_pie = true, cake = true, bucket = true, leather = true,
+local MADE = { oak_planks = true, barrel = true, oak_stairs = true, oak_fence = true, oak_pressure_plate = true, oak_door = true, bookshelf = true, white_carpet = true, lantern = true, torch = true, chest = true, iron_ingot = true, bread = true, pumpkin_pie = true, cake = true, bucket = true, leather = true,
     shears = true, cooked_cod = true, cooked_salmon = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true }
 local function snapshot(st, role)
-    local s = { stats = {}, deaths = st.deaths or 0, stuck = st.times_stuck or 0, memory = 0, kinds = 0, made = 0, unmet = unmet(st, role) }
+    local s = { stats = {}, deaths = st.deaths or 0, stuck = st.times_stuck or 0, memory = 0, kinds = 0, made = 0, unmet = unmet(st, role), living = NN.condition(st) }
     for k, v in pairs(st.stats or {}) do s.stats[k] = tonumber(v) or 0 end
     for _, n in pairs(type(st.memory) == "table" and st.memory or {}) do s.memory, s.kinds = s.memory + (tonumber(n) or 0), s.kinds + 1 end
     s.made = carried(st, function(i) return MADE[i] or i:match("_pickaxe$") or i:match("_axe$") or i:match("_sword$") or i:match("_hoe$")
@@ -430,12 +611,13 @@ local function reward(role, before, now)
         end
     end
     local function grew(a, b) return a >= b and a - b or a end
-    return r - 20 * grew(now.deaths, before.deaths) - 2 * grew(now.stuck, before.stuck)
+    return r + NN.living_reward(before.living, now.living) - 40 * grew(now.deaths, before.deaths) - 2 * grew(now.stuck, before.stuck)
 end
 
 local function act(name, role, members, groups)
-    local spec, net = ROLES[role], state.nets[role]
+    local spec = ROLES[role]
     if not spec then error("no trade " .. tostring(role)) end
+    local net = net_of(name, role)
     local st = call("status", { bot = name })
     if type(st) ~= "table" or not st.name then return { note = "no answer from " .. name } end
     local now = snapshot(st, role)
@@ -443,13 +625,54 @@ local function act(name, role, members, groups)
     local prev, learnt = state.prev[name], nil
     if prev and prev.role == role and prev.x then
         local r = reward(role, prev.snap, now)
+        state.fitness[role] = state.fitness[role] or {}
+        local f = state.fitness[role][name] or { 0, 0 }
+        state.fitness[role][name] = { f[1] + r, f[2] + 1 }
         state.scale[role] = 0.9 * (state.scale[role] or 5) + 0.1 * math.max(1, math.abs(r))
         NN.learn(net, prev.x, prev.action, r / state.scale[role])
         local name_of = spec.actions[prev.action].name
         state.rewards[role][name_of] = 0.8 * (state.rewards[role][name_of] or r) + 0.2 * r
         learnt = r
     end
+    if st.building then
+        state.prev[name] = nil
+        save(state)
+        return { action = "continue construction", note = "keeping the active building order" }
+    end
     local ctx = { bot = name, st = st, members = members, groups = groups, role = role }
+    -- Feeding a starving team must not depend on a random policy draw.
+    if role == "bakers" then
+        local who, low = nil, 9
+        for _, other in ipairs(team(ctx)) do
+            if other.name ~= name and (other.food or 20) < low then who, low = other.name, other.food end
+        end
+        if who then
+            local note
+            if carried(st, function(i) return FOOD[i] end) > 4 then
+                note = give(ctx, who, "food", 4)
+            elseif count(st, "wheat") >= 3 then
+                note = make(ctx, "bread", count(st, "bread") + count(st, "wheat") // 3)
+            else
+                for _, raw in ipairs(sorted(RAW)) do
+                    if count(st, raw) > 0 then note = make(ctx, RAW[raw], count(st, RAW[raw]) + count(st, raw)); break end
+                end
+                if not note then
+                    for _, animal in ipairs({ "cow", "pig", "sheep", "chicken" }) do
+                        local animals = call("entities", { bot = name, type = animal })
+                        if type(animals) == "table" and #animals > 0 then
+                            local _, err = call("kill", { bot = name, type = animal, count = 1 })
+                            note = err and tostring(err) or "hunting food for the team"
+                            break
+                        end
+                    end
+                end
+                note = note or exchange(ctx)
+            end
+            state.prev[name] = nil
+            save(state)
+            return { action = "feed the hungry team", note = note }
+        end
+    end
     local x = features(st, ctx)
     local p = NN.forward(net, x)
     local pick, u = #p, math.random()
@@ -470,17 +693,18 @@ end
 
 bot.tool{
     name = "roles",
-    description = "Each trade's own neural network (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers): within its trade, it picks what a bot does next from 15 numbers about the bot (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
+    description = "Each bot has its own independently trained policy for each trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers): within its trade, it picks what a bot does next from 20 numbers about the bot (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). Every 5 game days the two best evaluated policies in each trade seed lightly mutated copies for the others; both parents are preserved. With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
     params = { act = "string", role = "string", members = "array", groups = "object", network = "string", bot = "string" },
     run = function(args)
         if type(args.act) == "string" then return act(args.act, args.role, args.members, args.groups) end
         if type(args.network) == "string" then
             local role = args.network
-            local spec, net = ROLES[role], state.nets[role]
+            local spec = ROLES[role]
             if not spec then error("no trade " .. role) end
+            local net = type(args.bot) == "string" and net_of(args.bot, role) or state.nets[role]
             local st = type(args.bot) == "string" and call("status", { bot = args.bot }) or nil
             local x = (type(st) == "table" and st.name) and features(st, { role = role }) or { 1 }
-            local p, hidden, value = NN.forward(net, x)
+            local p, hidden, value, activations = NN.forward(net, x)
             local inputs, outputs = {}, {}
             for i = 1, #INPUTS do inputs[i] = { name = INPUTS[i], value = x[i] or 0 } end
             for o, a in ipairs(spec.actions) do
@@ -488,8 +712,9 @@ bot.tool{
                     drawn = state.counts[role][a.name] or 0, avg_reward = state.rewards[role][a.name] }
             end
             local prev = type(args.bot) == "string" and state.prev[args.bot] or nil
-            return { role = role, bot = args.bot, inputs = inputs, hidden = hidden, hidden_bias = net.b1, outputs = outputs, value = value,
-                w1 = net.w1, w2 = net.w2, v = net.v, vb = net.vb,
+            return { role = role, bot = args.bot, generation = state.generation or 0,
+                last_generation = (state.last_generation or {})[role], inputs = inputs, hidden = hidden, hidden_bias = net.b1, outputs = outputs, value = value,
+                w1 = net.w1, w2 = net.w2, v = net.v, vb = net.vb, layers = net.layers, activations = activations,
                 last_action = prev and prev.role == role and spec.actions[prev.action].name or nil }
         end
         local out = {}

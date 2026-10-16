@@ -5,7 +5,7 @@ assert(not io.open("../empire_job.lua"), "../empire_job.lua exists: run from a c
 local names, carry, assigned, chat, made, attacks = {}, {}, {}, {}, {}, 0
 for i = 1, 15 do names[i] = { name = "Bot" .. i }; carry["Bot" .. i] = 0 end
 local brain_on, tool, tick = true, nil, nil
-local building, builds = {}, {}
+local building, builds, build_names = {}, {}, {}
 local homes_called = {}
 bot = { call = function(name, a)
     if name == "bots" then return names end
@@ -15,7 +15,7 @@ bot = { call = function(name, a)
         if a.bot == "Bot10" then inv.iron_sword = 1; inv.iron_chestplate = 1 end
         local b = (building[a.bot] or 0) > 0
         if b then building[a.bot] = building[a.bot] - 1 end
-        return { inventory = inv, health = 20, building = b, build_left = b and 10 or 0, position = { x = 0, y = 64, z = 0 } }
+        return { inventory = inv, health = 20, building = b, build_name = build_names[a.bot], build_done = not b and building[a.bot] ~= nil, build_left = b and 10 or 0, position = { x = 0, y = 64, z = 0 } }
     end
     if name == "leader" then return "Bot4" end
     if name == "berries" then return { bot = "Bot15" } end
@@ -30,7 +30,7 @@ bot = { call = function(name, a)
     if name == "home" then homes_called[a.bot] = { a.x, a.y, a.z } return "ok" end
     if name == "make" then made[#made + 1] = a.item end
     if name == "team_member" and a.objective == "attack" then attacks = attacks + 1 end
-    if name == "team_member" and a.objective == "build" then building[a.bot] = 2; builds[#builds + 1] = a end
+    if name == "team_member" and a.objective == "build" then building[a.bot] = 2; build_names[a.bot] = a.name; builds[#builds + 1] = a end
     if name == "get_block" then return { block = a.y > 70 and "minecraft:air" or "minecraft:grass_block" } end
     return {}
 end, tool = function(t) tool = t end, every = function(_, f) tick = f end, on_chat = function() end, log = print }
@@ -66,10 +66,10 @@ local ok, err = pcall(function()
     for i = before + 1, #builds do if builds[i].name:match("'s house$") then homes[builds[i].bot] = true end end
     local h = 0
     for _ in pairs(homes) do h = h + 1 end
-    assert(h >= 14, "a house order for every bot (the empire's builder may finish first), got " .. h)
+    assert(h >= 10, "a house order for every bot (the empire's builder may finish first), got " .. h)
     local n_ = 0
     for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
-    assert(#assigned > splits and n_ == 0, "no trade at all while building its house, got " .. n_)
+    assert(#assigned > splits and n_ == 4, "a supply crew works while houses are built, got " .. n_)
     for i = before + 1, #builds do
         local at = builds[i].blocks[1]
         assert(at[1] - 144 < 8 * 18, "8 lots to a row")
@@ -81,7 +81,7 @@ local ok, err = pcall(function()
     load(io.open(arg[1]):read("a"), "empire")()
     t = t + 200; tick()        -- it waits 150 s after a load for the bots to come back
     for i = said + 1, #chat do assert(not chat[i]:match("built its house"), "not built after a restart: " .. chat[i]) end
-    assert(#builds - handed >= 14, "handed again after a restart, got " .. (#builds - handed))
+    assert(#builds - handed >= 10, "handed again after a restart, got " .. (#builds - handed))
     local furnished = {}
     for i = before + 1, #builds do
         for _, e in ipairs(builds[i].blocks) do furnished[e[4]:match("^[%a_]+")] = true end
@@ -92,7 +92,15 @@ local ok, err = pcall(function()
         end
     end
     for _, k in ipairs({ "white_bed", "chest", "furnace", "oak_stairs", "oak_fence" }) do assert(furnished[k], "a house has a " .. k) end
-    for _ = 1, 10 do t = t + 60; tick() end
+    for _ = 1, 30 do
+        t = t + 60; tick()
+        local ready = true
+        local village = tool.run({}).village
+        for b in pairs(carry) do ready = ready and village[b] and village[b]:match("^house at") end
+        local traders = 0
+        for _, list in pairs(assigned[#assigned]) do traders = traders + #list end
+        if ready and traders == 15 then break end
+    end
     local roads = 0
     for i = before + 1, #builds do if builds[i].name:match("'s road$") then roads = roads + 1 end end
     assert(roads >= 14, "a road for every house, got " .. roads)

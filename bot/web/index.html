@@ -42,6 +42,11 @@
     <button>Connect</button>
     <span id="message" role="status"></span>
   </form>
+  <form class="row" id="spawn">
+    <label for="spawn-count">Spawn additional bots</label>
+    <input type="number" id="spawn-count" min="1" max="100" step="1" value="1" required style="width: 5em">
+    <button>Spawn bots</button>
+  </form>
   <form class="row" id="team">
     <label for="objective">Team up all bots to</label>
     <select id="objective">
@@ -99,6 +104,10 @@ document.getElementById("schematic").onsubmit = e => {
 document.getElementById("disband").onclick = () => call("team", { objective: "disband" });
 document.getElementById("leave-all").onclick = () => confirm("Every bot stores everything in the chests and disconnects. Go on?") && call("disconnect_all");
 document.getElementById("rejoin-all").onclick = () => confirm("Every bot stores everything, disconnects and joins again. Go on?") && call("reconnect_all");
+document.getElementById("spawn").onsubmit = e => {
+  e.preventDefault();
+  call("spawn", { count: Number(document.getElementById("spawn-count").value) });
+};
 document.getElementById("connect").onsubmit = e => { e.preventDefault(); call("connect", { name: document.getElementById("name").value }); };
 
 function card(bot, tree) {
@@ -184,29 +193,35 @@ function showNetwork(name) { networkBot = name; drawNetwork(); document.getEleme
 function networkSvg(n, title) {
   const NS = "http://www.w3.org/2000/svg";
   const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; };
-  const W = 760, H = 18 * Math.max(n.inputs.length, n.outputs.length + 1) + 30, xs = [150, 380, 560];
+  const W = 1060, H = 18 * Math.max(n.inputs.length, n.outputs.length + 1) + 30, xs = [150, 340, 470, 600, 760];
   const ys = count => Array.from({ length: count }, (_, i) => 15 + (i + 0.5) * (H - 30) / count);
-  const yi = ys(n.inputs.length), yh = ys(n.hidden.length), yo = ys(n.outputs.length + 1);
+  const hidden = n.activations || [n.hidden], hy = hidden.map(h => ys(h.length));
+  const yi = ys(n.inputs.length), yh = hy[0], yo = ys(n.outputs.length + 1), outX = xs[hidden.length + 1];
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": title });
-  const top = Math.max(...n.w1.flat().map(Math.abs), ...n.w2.flat().map(Math.abs), ...n.v.map(Math.abs), 1e-6);
+  const top = Math.max(...n.w1.flat().map(Math.abs), ...n.w2.flat().map(Math.abs), ...n.v.map(Math.abs), ...(n.layers || []).flatMap(l => l.w.flat().map(Math.abs)), 1);
   const edge = (x1, y1, x2, y2, w) => {
     const line = el("line", { x1, y1, x2, y2, stroke: w >= 0 ? "#3b7dd8" : "#d84a3b", "stroke-opacity": (0.08 + 0.9 * Math.abs(w) / top).toFixed(2), "stroke-width": (0.4 + 2.6 * Math.abs(w) / top).toFixed(2) });
     line.append(el("title", {}, "weight " + w.toFixed(3)));
     svg.append(line);
   };
   n.w1.forEach((row, h) => row.forEach((w, i) => edge(xs[0], yi[i], xs[1], yh[h], w)));
-  n.w2.forEach((row, o) => row.forEach((w, h) => edge(xs[1], yh[h], xs[2], yo[o], w)));
-  n.v.forEach((w, h) => edge(xs[1], yh[h], xs[2], yo[n.outputs.length], w));
+  (n.layers || []).forEach((layer, l) => {
+    layer.w.forEach((row, h) => row.forEach((w, i) => edge(xs[l + 1], hy[l][i], xs[l + 2], hy[l + 1][h], w)));
+    layer.w.forEach((_, h) => edge(xs[l + 1], hy[l][h], xs[l + 2], hy[l + 1][h], 1));
+  });
+  const lastY = hy[hidden.length - 1], lastX = xs[hidden.length];
+  n.w2.forEach((row, o) => row.forEach((w, h) => edge(lastX, lastY[h], outX, yo[o], w)));
+  n.v.forEach((w, h) => edge(lastX, lastY[h], outX, yo[n.outputs.length], w));
   const node = (x, y, a, label, side, tip) => {
     const c = el("circle", { cx: x, cy: y, r: 7, stroke: "currentColor", "stroke-width": 1, fill: a >= 0 ? `rgba(46,158,91,${Math.min(1, a)})` : `rgba(216,74,59,${Math.min(1, -a)})` });
     c.append(el("title", {}, tip)); svg.append(c);
     if (label) svg.append(el("text", { x: x + (side < 0 ? -12 : 12), y: y + 4, "text-anchor": side < 0 ? "end" : "start" }, label));
   };
   n.inputs.forEach((x, i) => node(xs[0], yi[i], x.value, `${x.name} ${(+x.value).toFixed(2)}`, -1, x.name + " = " + x.value));
-  n.hidden.forEach((a, h) => node(xs[1], yh[h], a, "", 1, `hidden ${h + 1}: ${a.toFixed(3)} (bias ${n.hidden_bias[h].toFixed(3)})`));
-  n.outputs.forEach((o, i) => node(xs[2], yo[i], o.percent / 100, `${o.name} ${o.percent}%` + (o.drawn !== undefined ? ` · drawn ${o.drawn}` + (o.avg_reward != null ? `, reward ${o.avg_reward.toFixed(1)}` : "") : ""), 1,
+  hidden.forEach((values, l) => values.forEach((a, h) => node(xs[l + 1], hy[l][h], a, "", 1, `layer ${l + 1}, unit ${h + 1}: ${a.toFixed(3)}`)));
+  n.outputs.forEach((o, i) => node(outX, yo[i], o.percent / 100, `${o.name} ${o.percent}%` + (o.drawn !== undefined ? ` · drawn ${o.drawn}` + (o.avg_reward != null ? `, reward ${o.avg_reward.toFixed(1)}` : "") : ""), 1,
     `${o.name}: wants it ${o.percent}% (bias ${o.bias.toFixed(3)})`));
-  node(xs[2], yo[n.outputs.length], Math.tanh(n.value), `critic value ${n.value.toFixed(2)}`, 1, "what the critic expects");
+  node(outX, yo[n.outputs.length], Math.tanh(n.value), `critic value ${n.value.toFixed(2)}`, 1, "what the critic expects");
   return svg;
 }
 async function drawNetwork() {
@@ -222,7 +237,7 @@ async function drawNetwork() {
       n.champion ? $("span", { className: "badge" }, "last winner: " + n.champion) : "", close),
     $("small", {}, "Blue lines: positive weights, red: negative; thicker = stronger. Circles: green active, red negative. Hover for numbers. Updated every 5 s."),
     $("h2", {}, "Which trade (this bot's own network, evolved every 5 days)"), networkSvg(n, n.bot + "'s trade network"),
-    ...(role && role.outputs ? [$("h2", {}, `What a ${role.role.replace(/s$/, "")} does next (the ${role.role}' network, shared by the trade)` + (role.last_action ? ` · last: ${role.last_action}` : "")),
+    ...(role && role.outputs ? [$("h2", {}, `What a ${role.role.replace(/s$/, "")} does next (${n.bot}'s own action policy)` + (role.last_action ? ` · last: ${role.last_action}` : "")),
       networkSvg(role, role.role + " network")] : []));
 }
 setInterval(() => networkBot && drawNetwork(), 5000);
