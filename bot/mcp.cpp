@@ -6859,8 +6859,23 @@ static bool show_gui = false;
 // No window, no views, no MCP on stdin: runs as a service until SIGINT or SIGTERM
 static bool headless = false;
 static volatile std::sig_atomic_t quit_signal = 0;
+// The program is stopping: the plugins' calls fail at once, so a plugin halfway through a round over every bot
+// lets go instead of holding the stop up for minutes
+static std::atomic<bool> stopping = false;
+// A second stop signal: at once. The main program takes its children along (the same process group), a child
+// only itself
+static bool QuitSignalChild();
+static void QuitSignal(int)
+{
+    if (quit_signal)
+    {
+        kill(QuitSignalChild() ? getpid() : 0, SIGKILL);
+    }
+    quit_signal = 1;
+}
 // --child: this process is one of the extra bots of another bot_mcp
 static bool is_child = false;
+static bool QuitSignalChild() { return is_child; }
 // Our executable, to start the processes of the other bots
 static std::string self_path;
 // Bots that were kicked or whose process died, waiting to join again: name -> when, and what to restore
@@ -7358,19 +7373,43 @@ static Value DisconnectChild(const std::shared_ptr<Child>& child)
     }
     Value result;
     result["disconnected"] = child->name;
-    std::lock_guard<std::mutex> lock(child->mutex);
-    try
+    // The pipe may be taken by a long call (a journey, a build step) for a while: up to 30 seconds for it
+    std::unique_lock<std::mutex> lock(child->mutex, std::defer_lock);
+    for (int i = 0; i < 300 && !lock.try_lock(); ++i)
     {
-        result = ForwardLocked(*child, "disconnect", Value(Json::Object()));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    catch (const std::exception& e)
+    if (lock.owns_lock())
     {
-        result["note"] = std::string(e.what());
+        try
+        {
+            result = ForwardLocked(*child, "disconnect", Value(Json::Object()));
+        }
+        catch (const std::exception& e)
+        {
+            result["note"] = std::string(e.what());
+        }
+        // End of input: the child process exits
+        fclose(child->to);
+        fclose(child->from);
     }
-    // End of input: the child process exits
-    fclose(child->to);
-    fclose(child->from);
-    waitpid(child->pid, nullptr, 0);
+    else
+    {
+        // Still busy: it is told to stop (SIGHUP: it stores and leaves once that call is over), the pipe left to the call
+        result["note"] = "busy: asked to stop";
+        kill(child->pid, SIGHUP);
+    }
+    // And it has 3 minutes to go (storing takes up to 2); after that it is killed (it keeps its items on the server)
+    for (int i = 0; i < 1800 && waitpid(child->pid, nullptr, WNOHANG) == 0; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (waitpid(child->pid, nullptr, WNOHANG) == 0)
+    {
+        kill(child->pid, SIGKILL);
+        waitpid(child->pid, nullptr, 0);
+        result["note"] = "killed after 3 minutes";
+    }
     return result;
 }
 
@@ -9555,6 +9594,10 @@ static bool CallFromLua(lua_State* L, const char* name)
 {
     try
     {
+        if (stopping)
+        {
+            throw std::runtime_error("the program is stopping");
+        }
         PushJson(L, CallTool(name, lua_istable(L, 2) ? ToJson(L, 2) : Value(Json::Object())));
         return true;
     }
@@ -10569,12 +10612,12 @@ int main(int argc, char* argv[])
         // stdin: every bot stores everything in the chests, disconnects, then the program exits
         for (const int sig : { SIGHUP, SIGUSR1, SIGUSR2 })
         {
-            std::signal(sig, [](int) { quit_signal = 1; });
+            std::signal(sig, QuitSignal);
         }
         if (headless)
         {
-            std::signal(SIGINT, [](int) { quit_signal = 1; });
-            std::signal(SIGTERM, [](int) { quit_signal = 1; });
+            std::signal(SIGINT, QuitSignal);
+            std::signal(SIGTERM, QuitSignal);
         }
         // stdin read by hand, a poll at a time: a signal is seen within 200 ms, whatever thread it lands on
         std::string line, pending;
@@ -10634,13 +10677,14 @@ int main(int argc, char* argv[])
         {
             LOG_INFO("Stopping on a signal: the bots store their items and leave");
         }
-        // stdin closed: stop spawning, then every bot stores its inventory and leaves
+        // stdin closed: stop spawning, then every bot stores its inventory and leaves. The plugins' thread and the
+        // team feed may be in the middle of long calls to the bots: joined once the bots are gone
+        // (waiting for them first, a stop with 50 bots never got as far as telling one to leave)
         stop = true;
+        stopping = true;
         spawner.join();
         snapshots.join();
-        chat_thread.join();
         web.join();
-        team_feed.join();
         rejoin_thread.join();
         // All the bots at once: each walks to its chests, one after the other took minutes per bot
         {
@@ -10669,6 +10713,8 @@ int main(int argc, char* argv[])
                 t.join();
             }
         }
+        chat_thread.join();
+        team_feed.join();
         while (true)
         {
             std::shared_ptr<McpBot> bot;
