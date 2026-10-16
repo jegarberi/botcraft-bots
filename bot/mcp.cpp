@@ -40,6 +40,7 @@
 
 #include "construction_policy.hpp"
 #include "spawn_names.hpp"
+#include "site_index.hpp"
 #include "botcraft/AI/BehaviourTree.hpp"
 #include "botcraft/AI/Tasks/AllTasks.hpp"
 #include "botcraft/AI/TemplatedBehaviourClient.hpp"
@@ -1809,16 +1810,6 @@ static void LightUp(BehaviourClient& c, const Position& where, const bool on_the
 // run, knows them: nothing inside is broken, except by a build whose own plan covers the spot
 static std::mutex sites_mutex;
 
-struct Site
-{
-    Position min, max;
-    std::string name;
-    bool Contains(const Position& p) const
-    {
-        return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y && p.z >= min.z && p.z <= max.z;
-    }
-};
-
 static std::vector<Site> LoadSites()
 {
     std::vector<Site> sites;
@@ -1838,23 +1829,16 @@ static bool InStoredSite(const Position& p)
 {
     // Asked for every block a search looks at (gathering filters with it): the boxes are read again only
     // every 5 seconds. ponytail: a box added by another bot process counts from then on
-    static std::vector<Site> sites;
+    static SiteIndex sites;
     static std::chrono::steady_clock::time_point read_at;
     std::lock_guard<std::mutex> lock(sites_mutex);
     const auto now = std::chrono::steady_clock::now();
     if (now - read_at > std::chrono::seconds(5))
     {
-        sites = LoadSites();
+        sites.Reset(LoadSites());
         read_at = now;
     }
-    for (const Site& site : sites)
-    {
-        if (site.Contains(p))
-        {
-            return true;
-        }
-    }
-    return false;
+    return sites.Contains(p);
 }
 
 /// @return false if a stored box already covers it

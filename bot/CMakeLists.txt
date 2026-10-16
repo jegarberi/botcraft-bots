@@ -34,3 +34,7 @@ target_compile_features(test_construction_policy PRIVATE cxx_std_17)
 add_executable(test_spawn_names EXCLUDE_FROM_ALL test_spawn_names.cpp)
 target_compile_features(test_spawn_names PRIVATE cxx_std_17)
 target_compile_options(test_spawn_names PRIVATE -UNDEBUG)
+
+add_executable(test_site_index EXCLUDE_FROM_ALL test_site_index.cpp)
+target_link_libraries(test_site_index PRIVATE botcraft)
+target_compile_options(test_site_index PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
