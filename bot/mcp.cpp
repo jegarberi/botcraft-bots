@@ -7141,7 +7141,7 @@ static const char* tools_json = R"JSON([
 {"name":"vault","description":"The vault: one chest per category of item (food, weapons, armor, equipment, valuables, building, materials). With category and x y z, declares the chest of a category; with nothing, lists them. Once declared, bots within 96 blocks store by category there instead of in a chest per item, and look there first for what they need. The result says full when a bot found a category's chests full on every floor: the castle plugin then digs another floor underneath.","inputSchema":{"type":"object","properties":{"category":{"type":"string","description":"food, weapons, armor, equipment, valuables, materials or building; with #2, #3... for the same category on a lower floor"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"full":{"type":"boolean","description":"false clears the 'vault is full' mark, once a floor has been added"}}}},
 {"name":"store","description":"Put the inventory in chests, one chest per item type. A missing chest is placed next to the bot from a chest item of its inventory, and remembered. By default the hotbar and the chest items are kept; everything=true empties the whole inventory.","inputSchema":{"type":"object","properties":{"everything":{"type":"boolean","default":false}}}},
 {"name":"bots","description":"List the connected bots (name and state). Every other tool accepts an optional bot argument with one of these names and defaults to the first bot.","inputSchema":{"type":"object","properties":{}}},
-{"name":"spawn","description":"Queue 1 to 100 additional bots with unused BotN names, spaced by the configured join delay. Returns the queued names; bots shows progress.","inputSchema":{"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100}},"required":["count"]}},
+{"name":"spawn","description":"Queue 1 to 100 additional bots with unused numbered names (base_name1, base_name2, ...), spaced by the configured join delay. Returns the queued names; bots shows progress.","inputSchema":{"type":"object","properties":{"count":{"type":"integer","minimum":1,"maximum":100},"base_name":{"type":"string","minLength":1,"maxLength":15,"pattern":"^[A-Za-z0-9_]+$","default":"Bot"}},"required":["count"]}},
 {"name":"connect","description":"Connect one more bot to the server under this player name.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}},
 {"name":"disconnect","description":"Make a bot store its whole inventory in chests, then disconnect it from the server.","inputSchema":{"type":"object","properties":{}}}
 ])JSON";
@@ -8810,7 +8810,7 @@ static Value CallTool(const std::string& name, const Value& a)
         for (const auto& slot : bots) { used.insert(slot.bot->GetNetworkManager()->GetMyName()); }
         for (const auto& child : children) { used.insert(child->name); }
         for (const auto& [waiting, rejoin] : rejoining) { used.insert(waiting); }
-        const auto names = NewBotNames(a["count"].get_number<int>(), used);
+        const auto names = NewBotNames(a["count"].get_number<int>(), a.contains("base_name") ? Str(a, "base_name") : "Bot", used);
         const auto now = std::chrono::steady_clock::now();
         Value result = Json::Array();
         for (std::size_t i = 0; i < names.size(); ++i)

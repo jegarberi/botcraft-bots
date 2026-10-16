@@ -13,8 +13,8 @@ remembers what it was doing across restarts. Together they build a castle (see `
     ./run.sh --headless --tui  # the same, but closing the panel stops the bots (they store their items first)
     ./run.sh --bots 15 --delay 8 --autopilot --chests --bind 0.0.0.0
 
-The web panel has a “Spawn additional bots” count; in the terminal panel press `C` and enter a count.
-Both queue 1–100 additional bots with unused `BotN` names and the configured delay between joins.
+The web panel has a “Spawn additional bots” count; in the terminal panel press `C` and enter a count and base name.
+Both queue 1–100 additional bots with unused numbered names (`Worker1`, `Worker2`, … for base `Worker`) and the configured delay between joins.
 
 The terminal panel is its own program, `bot/bin/bot_tui`: open it from any terminal while the bots run. It talks
 to the program and to each bot over unix sockets (`bot/run/.program.sock`, `bot/run/<name>.sock`, JSON-RPC lines

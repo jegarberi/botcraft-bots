@@ -45,6 +45,8 @@
   <form class="row" id="spawn">
     <label for="spawn-count">Spawn additional bots</label>
     <input type="number" id="spawn-count" min="1" max="100" step="1" value="1" required style="width: 5em">
+    <label for="spawn-base">Base name</label>
+    <input type="text" id="spawn-base" placeholder="e.g. Worker" pattern="[A-Za-z0-9_]+" maxlength="15" required>
     <button>Spawn bots</button>
   </form>
   <form class="row" id="team">
@@ -106,7 +108,7 @@ document.getElementById("leave-all").onclick = () => confirm("Every bot stores e
 document.getElementById("rejoin-all").onclick = () => confirm("Every bot stores everything, disconnects and joins again. Go on?") && call("reconnect_all");
 document.getElementById("spawn").onsubmit = e => {
   e.preventDefault();
-  call("spawn", { count: Number(document.getElementById("spawn-count").value) });
+  call("spawn", { count: Number(document.getElementById("spawn-count").value), base_name: document.getElementById("spawn-base").value });
 };
 document.getElementById("connect").onsubmit = e => { e.preventDefault(); call("connect", { name: document.getElementById("name").value }); };
 
