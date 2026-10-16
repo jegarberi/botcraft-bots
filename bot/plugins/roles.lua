@@ -1,11 +1,12 @@
 -- Each trade's own neural network: within its trade (the brain plugin picks the trade), what a bot does next.
--- One network per trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers), shared by
+-- One network per trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers), shared by
 -- the bots in it, so it learns from all of them. Same network code as the brain (the global NN it defines).
 --   bakers       bread, pumpkin pies and cakes from the farmers' wheat, eggs, milk and pumpkins; feed the hungry
 --   farmers      wheat fields, eggs from the chickens, pumpkins, milk from the cows
 --   butchers     breed the animals, slaughter some: meat (cooked) and leather
 --   miners       ores: coal and iron for the blacksmiths
 --   blacksmiths  smelt the iron, make tools, buckets, torches and armor (iron, or leather from the butchers)
+--   fishers      fish with a rod at open water, cook the catch (coal from the miners), feed the hungry
 -- The trades trade: each needs things the others make (NEEDS, PROVIDES). Its "trade" action asks a bot of the
 -- trade that makes what it lacks to hand it over, or else hands its own surplus to the bot that lacks it most.
 --   in   15 numbers about the bot: health, hunger, food, wood, stone, iron, coal it carries, its tools, night,
@@ -24,8 +25,9 @@ local INPUTS = { "bias", "health", "food level", "food carried", "wood carried",
     "has pickaxe", "has sword", "has hoe", "night", "hostiles near", "animals near", "needs unmet" }
 local ORES = { coal = "coal_ore", iron = "iron_ore", copper_gold = "copper_ore,gold_ore", deep = "redstone_ore,lapis_ore,diamond_ore" }
 local FOOD = { bread = true, pumpkin_pie = true, cake = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
-    carrot = true, apple = true, golden_carrot = true, sweet_berries = true }
-local RAW = { beef = "cooked_beef", porkchop = "cooked_porkchop", mutton = "cooked_mutton", chicken = "cooked_chicken", potato = "baked_potato" }
+    carrot = true, apple = true, golden_carrot = true, sweet_berries = true, cooked_cod = true, cooked_salmon = true }
+local RAW = { beef = "cooked_beef", porkchop = "cooked_porkchop", mutton = "cooked_mutton", chicken = "cooked_chicken", potato = "baked_potato",
+    cod = "cooked_cod", salmon = "cooked_salmon" }
 
 local function call(tool, args)
     local ok, r = pcall(bot.call, tool, args)
@@ -97,10 +99,11 @@ local NEEDS = {
     butchers = { wheat = 8, wheat_seeds = 8, carrot = 4, bread = 4 },
     miners = { iron_pickaxe = 1, torch = 16, bread = 4 },
     blacksmiths = { raw_iron = 9, coal = 8, leather = 4, bread = 4 },
+    fishers = { coal = 4, bread = 2 },
 }
 local PROVIDES = { wheat = "farmers", egg = "farmers", milk_bucket = "farmers", pumpkin = "farmers", wheat_seeds = "farmers",
     carrot = "farmers", bread = "bakers", leather = "butchers", raw_iron = "miners", coal = "miners", iron_pickaxe = "blacksmiths",
-    bucket = "blacksmiths", torch = "blacksmiths" }
+    bucket = "blacksmiths", torch = "blacksmiths", cooked_cod = "fishers", cooked_salmon = "fishers" }
 local function count(st, item) return carried(st, function(i) return i == item end) end
 local function sorted(t) local k = {} for x in pairs(t) do k[#k + 1] = x end table.sort(k) return k end
 
@@ -291,6 +294,31 @@ local ROLES = {
             { name = "store", run = store },
         },
     },
+    fishers = {
+        weights = { fished = 2, made = 1, given = 1, needs = 2 },
+        actions = {
+            { name = "fish", run = function(ctx)
+                if not has(ctx.st, "fishing_rod") then return make(ctx, "fishing_rod", 1) end
+                local r, err = call("fish", { bot = ctx.bot, count = 5 })
+                if r then return "fished: " .. (r.caught or 0) .. " caught" end
+                if tostring(err):match("no open water") then return "no water near: " .. walk_off(ctx, 32) end
+                return "could not fish: " .. tostring(err) end },
+            { name = "cook fish", run = function(ctx)
+                for _, raw in ipairs({ "cod", "salmon" }) do
+                    local n = count(ctx.st, raw)
+                    if n > 0 then return make(ctx, RAW[raw], n + count(ctx.st, RAW[raw])) end
+                end
+                return "no raw fish to cook" end },
+            { name = "feed the hungriest", run = function(ctx)
+                local who, low = nil, 15
+                for _, st in ipairs(team(ctx)) do if (st.food or 20) < low then who, low = st.name, st.food end end
+                if not who then return "nobody is hungry" end
+                if count(ctx.st, "cooked_cod") + count(ctx.st, "cooked_salmon") == 0 then return "no cooked fish to give" end
+                return give(ctx, who, "food", 8) end },
+            { name = "trade", run = exchange },
+            { name = "store", run = store },
+        },
+    },
     explorers = {
         weights = { collected = 0.3, explored = 1 },
         actions = {
@@ -322,7 +350,7 @@ for _, a in ipairs({
     { name = "trade", run = exchange },
     { name = "store", run = store },
 }) do table.insert(ROLES.butchers.actions, a) end
-local ORDER = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
+local ORDER = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
 
 -- ---------------------------------------------------------------- state
 local function save(state)
@@ -377,7 +405,7 @@ end
 
 -- What a bot's figures are now, to judge its next turn by
 local MADE = { torch = true, chest = true, iron_ingot = true, bread = true, pumpkin_pie = true, cake = true, bucket = true, leather = true,
-    shears = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true }
+    shears = true, cooked_cod = true, cooked_salmon = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true }
 local function snapshot(st, role)
     local s = { stats = {}, deaths = st.deaths or 0, stuck = st.times_stuck or 0, memory = 0, kinds = 0, made = 0, unmet = unmet(st, role) }
     for k, v in pairs(st.stats or {}) do s.stats[k] = tonumber(v) or 0 end
@@ -442,7 +470,7 @@ end
 
 bot.tool{
     name = "roles",
-    description = "Each trade's own neural network (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers): within its trade, it picks what a bot does next from 15 numbers about the bot (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
+    description = "Each trade's own neural network (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers): within its trade, it picks what a bot does next from 15 numbers about the bot (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
     params = { act = "string", role = "string", members = "array", groups = "object", network = "string", bot = "string" },
     run = function(args)
         if type(args.act) == "string" then return act(args.act, args.role, args.members, args.groups) end

@@ -50,7 +50,7 @@ local ok, err = pcall(function()
     for k, list in pairs(g) do for _, b in ipairs(list) do n = n + 1; where[b] = k end end
     assert(n == 15, "every bot in one trade, got " .. n)
     assert(where.Bot4 == "builders" and where.Bot15 == "farmers", "leader a builder, picker a farmer")
-    assert(#g.farmers == 4 and #g.soldiers == 0, "Dark Age, food short first: more farmers, no soldiers, got " .. #g.farmers .. " " .. #g.soldiers)
+    assert(#g.farmers >= 3 and #g.fishers >= 1 and #g.soldiers == 0, "Dark Age, food short first: farmers and a fisher, no soldiers, got " .. #g.farmers .. " " .. #g.soldiers)
     assert(where.Bot12 == "bakers" and where.Bot8 == "miners", "few bots moved")
     assert(chat[1]:match("^%[empire%] Bot") and chat[1]:match("->"), "the leader tells the moves")
     for _ = 1, 400 do

@@ -43,6 +43,7 @@
 #include "botcraft/Game/AssetsManager.hpp"
 #include "botcraft/Game/Entities/EntityManager.hpp"
 #include "botcraft/Game/Entities/entities/AgeableMobEntity.hpp"
+#include "botcraft/Game/Entities/entities/projectile/FishingHookEntity.hpp"
 #include "botcraft/Game/Entities/LocalPlayer.hpp"
 #include "botcraft/Game/Inventory/InventoryManager.hpp"
 #include "botcraft/Game/Inventory/Item.hpp"
@@ -4529,6 +4530,80 @@ static Status UseHeldAt(BehaviourClient& c, const std::string& item, const Vecto
 
 static int LookThroughRock(McpBot& c, const std::vector<std::string>& items, const int level);
 
+/// @brief Fish: at the nearest open water within 32 blocks (water with air over it), cast the rod, wait for a fish
+/// to bite (the hook's biting flag, from the server: a bite comes in 5 to 30 s), reel it in. casts times
+static Status FishTask(BehaviourClient& c, const int casts, std::atomic<int>& caught, std::string& error)
+{
+    const auto fish = [&]() { return CountItem(c, "minecraft:cod") + CountItem(c, "minecraft:salmon") + CountItem(c, "minecraft:tropical_fish") + CountItem(c, "minecraft:pufferfish"); };
+    const std::shared_ptr<World> world = c.GetWorld();
+    std::optional<Position> water;
+    for (const Position& w : FindBlocks(c, [](const Blockstate& b) { return b.IsWater(); }, 32, 400))
+    {
+        const Blockstate* up = world->GetBlock(w + Position(0, 1, 0));
+        if (up != nullptr && up->IsAir())
+        {
+            water = w;
+            break;
+        }
+    }
+    if (!water)
+    {
+        error = "no open water within 32 blocks";
+        return Status::Failure;
+    }
+    // On the shore, a few blocks off, so the hook flies out onto the water
+    if (GoTo(c, *water, 4, 2) == Status::Failure)
+    {
+        error = "could not reach the water at " + std::to_string(water->x) + " " + std::to_string(water->y) + " " + std::to_string(water->z);
+        return Status::Failure;
+    }
+    const Vector3<double> target(water->x + 0.5, water->y + 0.9, water->z + 0.5);
+    const auto use = [&]()
+        {
+            const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
+            LookAt(c, target, true, true);
+            std::shared_ptr<ProtocolCraft::ServerboundUseItemPacket> packet = std::make_shared<ProtocolCraft::ServerboundUseItemPacket>();
+            packet->SetHand(static_cast<int>(Hand::Main));
+            packet->SetSequence(world->GetNextWorldInteractionSequenceId());
+            packet->SetYRot(player->GetYaw());
+            packet->SetXRot(player->GetPitch());
+            c.GetNetworkManager()->Send(packet);
+        };
+    // ponytail: the hook nearest the spot cast at is taken for this bot's; two bots fishing the same water may
+    // reel in on each other's bite
+    const auto biting = [&]()
+        {
+            auto entities = c.GetEntityManager()->GetEntities();
+            for (const auto& [id, e] : *entities)
+            {
+                if (e && e->GetType() == EntityType::FishingHook && e->GetPosition().SqrDist(target) < 8.0 * 8.0 &&
+                    std::static_pointer_cast<FishingHookEntity>(e)->GetDataBiting())
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+    const int before = fish();
+    for (int i = 0; i < casts; ++i)
+    {
+        if (SetItemInHand(c, "minecraft:fishing_rod") == Status::Failure)
+        {
+            error = "no fishing rod in hand";
+            return Status::Failure;
+        }
+        use();
+        Wait(c, 1500);
+        Utilities::YieldForCondition(biting, c, 40000);
+        // Reeled in whether it bit or not: the hook comes back either way
+        use();
+        Wait(c, 1500);
+    }
+    caught = std::max(0, fish() - before);
+    Count(c, "fished", caught);
+    return Status::Success;
+}
+
 enum class Supply
 {
     Have,
@@ -6688,6 +6763,7 @@ static const char* tools_json = R"JSON([
 {"name":"collect","description":"Collect resources: repeatedly find the nearest block with this exact id, mine it and pick up the drop, until count is reached. Equip a suitable tool first. For a log the whole tree is cut (every connected log within reach, so the result can exceed count), and a sapling of that kind is replanted if the bot has one.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":32}},"required":["block"]}},
 {"name":"kill","description":"Hunt and attack entities until count are dead. type: an entity name like zombie or cow, or a group: hostile, animal. Equip a weapon first. Penned animals (a fence, gate, wall or iron bars within 8 blocks) are never attacked.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":24}},"required":["type"]}},
 {"name":"make","description":"Have the bot make an item until it holds count of it, by whatever it takes: craft it, smelt it, make what the recipe lacks, mine or cut the raw materials, build a furnace or a crafting table if needed. Works for anything with a recipe or a smelting source. Glass: make glass (sand is dug, a furnace built, coal mined for fuel); glass panes: make glass_pane (6 glass give 16). Also stone, stone_bricks, bricks, charcoal, iron_ingot, bucket, torch, chest... Returns at once: the autopilot does the work, status shows the progress. count 0 drops it.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"count":{"type":"number","default":1}},"required":["item"]}},
+{"name":"fish","description":"Fish with a rod at the nearest open water within 32 blocks: cast, wait for a bite, reel in, count times (default 5, each up to 40 s). Makes a fishing rod (3 sticks, 2 string) if the bot has none. Returns how many fish it caught.","inputSchema":{"type":"object","properties":{"count":{"type":"number","default":5}}}},
 {"name":"milk","description":"Milk cows: an empty bucket on up to count cows within radius, a milk bucket from each; the cows are unharmed. Makes a bucket from 3 iron ingots if the bot has none.","inputSchema":{"type":"object","properties":{"count":{"type":"number","default":1},"radius":{"type":"number","default":24}}}},
 {"name":"shear","description":"Shear sheep for wool without killing them: up to count sheep within radius, 1 to 3 wool each, picked up. Needs shears; makes them from 2 iron ingots if the bot has none. The sheep grow their wool back by grazing, so a pen of sheep is a wool farm.","inputSchema":{"type":"object","properties":{"count":{"type":"number","default":4},"radius":{"type":"number","default":32}}}},
 {"name":"dye","description":"Dye wool. color: white, orange, magenta, light_blue, yellow, lime, pink, gray, light_gray, cyan, purple, blue, brown, green, red or black. By default crafts count dyed wool from wool the bot carries (one dye each). sheep=true dyes count sheep instead: each then gives wool of that colour every time it is shorn. The dye comes from the inventory, or is made from what the bot carries (red from a poppy, yellow from a dandelion, white from bone meal...).","inputSchema":{"type":"object","properties":{"color":{"type":"string"},"count":{"type":"number","default":1},"sheep":{"type":"boolean","default":false}},"required":["color"]}},
@@ -8596,6 +8672,30 @@ static Value CallTool(const std::string& name, const Value& a)
         o["sheep_sheared"] = sheared->load();
         o["wool_gained"] = wool->load();
         o["note"] = *sheared > 0 ? "the sheep live and grow their wool back by grazing" : "no sheep with wool on them within range";
+        return o;
+    }
+    if (name == "fish")
+    {
+        const int casts = std::clamp(static_cast<int>(Num(a, "count", 5)), 1, 32);
+        const auto caught = std::make_shared<std::atomic<int>>(0);
+        const auto error = std::make_shared<std::string>();
+        Run(bot, 60 + casts * 45, name, [=](McpBot& c)
+            {
+                std::string craft_error;
+                if (CountItem(c, "minecraft:fishing_rod") == 0 && CraftOne(c, "minecraft:fishing_rod", craft_error) == 0)
+                {
+                    *error = "needs a fishing rod, and could not make one (3 sticks, 2 string): " + craft_error;
+                    return Status::Failure;
+                }
+                return FishTask(c, casts, *caught, *error);
+            });
+        if (!error->empty())
+        {
+            throw std::runtime_error(*error);
+        }
+        Value o;
+        o["caught"] = caught->load();
+        o["note"] = *caught > 0 ? "raw fish: cook it (make cooked_cod / cooked_salmon)" : "nothing bit";
         return o;
     }
     if (name == "milk")

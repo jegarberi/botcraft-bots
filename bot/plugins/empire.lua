@@ -23,21 +23,21 @@
 --   empire { village = true }   a house for every bot, then its trade (starts playing if it was not)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
 local RESOURCES = { "food", "wood", "stone", "ore" }
 -- Each age: its cost (to reach it) and how many bots of every 15 work in each trade
 local AGES = {
     { name = "Dark Age", cost = {},
-      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 4, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 0 } },
+      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 4, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 0, fishers = 1 } },
     { name = "Feudal Age", cost = { food = 128, wood = 128 },
-      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 1 } },
+      mix = { farmers = 3, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 1, fishers = 1 } },
     { name = "Castle Age", cost = { food = 192, stone = 256, ore = 64 },
-      mix = { farmers = 2, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 2 } },
+      mix = { farmers = 2, bakers = 2, butchers = 2, builders = 3, miners = 3, blacksmiths = 1, explorers = 0, soldiers = 2, fishers = 1 } },
     { name = "Imperial Age", cost = { food = 256, stone = 256, ore = 192 },
-      mix = { farmers = 2, bakers = 2, butchers = 1, builders = 3, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 3 } },
+      mix = { farmers = 2, bakers = 2, butchers = 1, builders = 3, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 3, fishers = 1 } },
 }
 -- The trades that bring in each resource: the one the next age lacks most gets 2 more bots' weight in each
-local NEED = { food = { "farmers", "bakers" }, wood = { "builders", "explorers" }, stone = { "builders", "miners" }, ore = { "miners" } }
+local NEED = { food = { "farmers", "bakers", "fishers" }, wood = { "builders", "explorers" }, stone = { "builders", "miners" }, ore = { "miners" } }
 -- who: the trade that makes it; item and count: what each of them is told to make
 local TECHS = {
     { name = "Stone Tools", age = 2, cost = { wood = 32, stone = 48 }, who = "blacksmiths", item = "stone_pickaxe", count = 4 },
@@ -169,7 +169,7 @@ local FIT = {
     soldiers = { "_sword", "_chestplate", "_helmet", "shield" }, miners = { "_pickaxe", "torch", "raw_iron", "coal" },
     farmers = { "_hoe", "wheat_seeds", "egg", "milk_bucket", "pumpkin" }, butchers = { "beef", "porkchop", "mutton", "leather", "shears", "wool" },
     bakers = { "wheat", "bread", "pumpkin_pie", "cake" }, builders = { "cobblestone", "_planks", "_log" },
-    blacksmiths = { "iron_ingot", "stick", "crafting_table", "furnace" }, explorers = { "boat", "map" },
+    blacksmiths = { "iron_ingot", "stick", "crafting_table", "furnace" }, explorers = { "boat", "map" }, fishers = { "fishing_rod", "cod", "salmon" },
 }
 local function fit(st, trade)
     local score = 0
@@ -453,6 +453,8 @@ local SHOPS = {
         { 5, 0, 3, "white_wool" } } },
     miners = { "Mining Office", { { 1, 0, 1, "furnace" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "chest" }, { 1, 0, 3, "iron_ore" },
         { 5, 0, 3, "coal_block" } } },
+    fishers = { "Fish Market", { { 1, 0, 1, "smoker" }, { 2, 0, 1, "barrel" }, { 3, 0, 1, "barrel" }, { 5, 0, 1, "chest" },
+        { 1, 0, 3, "cauldron" }, { 5, 0, 3, "crafting_table" } } },
     blacksmiths = { "Smithy", { { 1, 0, 1, "blast_furnace" }, { 2, 0, 1, "furnace" }, { 3, 0, 1, "anvil" }, { 4, 0, 1, "smithing_table" },
         { 5, 0, 1, "grindstone" }, { 1, 0, 3, "chest" }, { 5, 0, 3, "crafting_table" } } },
 }

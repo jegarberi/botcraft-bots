@@ -36,7 +36,7 @@ local all = roles.run({})
 assert(all.bakers and all.explorers and all.soldiers["hunt hostiles"], "every trade has its network")
 -- Each trade acts without error
 local groups = { miners = { "Bot1" }, butchers = { "Bot3" }, farmers = { "Farm1" }, bakers = { "Bot2" } }
-for _, role in ipairs({ "bakers", "farmers", "butchers", "builders", "soldiers", "blacksmiths", "explorers" }) do
+for _, role in ipairs({ "bakers", "farmers", "butchers", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }) do
     for _ = 1, 10 do
         local r = roles.run({ act = "Bot2", role = role, members = { "Bot2" }, groups = groups })
         assert(r.action and not tostring(r.note):match("^failed"), role .. " " .. tostring(r.action) .. ": " .. tostring(r.note))

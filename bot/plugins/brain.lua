@@ -26,8 +26,8 @@
 local FILE = "../brain_state.lua"
 -- The trades (in the places of the cooks, breeders and crafters before them: the networks' outputs keep their
 -- meaning; each trade has its own network for its actions, see the roles plugin)
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
-local IN, HID, OUT = 20, 10, 8
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
+local IN, HID, OUT = 21, 10, 9
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
 local VOTE_EVERY = 10
@@ -210,7 +210,7 @@ local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
 local INPUT_NAMES = { "bias", "health", "food level", "has pickaxe", "has axe", "has sword", "has hoe", "food carried", "wood carried",
-    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer" }
+    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer", "was fisher" }
 
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end

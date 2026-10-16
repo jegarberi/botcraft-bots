@@ -6,6 +6,7 @@
 --   builders   the castle team
 --   soldiers   hunt hostile mobs, guard the leader, gear up
 --   blacksmiths  smelt iron, make tools, buckets, torches and armor, and hand them out
+--   fishers      fish at open water, cook the catch, feed the hungry
 -- The trades hand each other what they make (the roles plugin's exchange).
 --   explorers  go far for what the team has not found yet
 -- What a bot does within its trade is drawn by that trade's own neural network (the roles plugin), one bot's
@@ -17,7 +18,7 @@
 -- The groups are kept in a file and taken up again after a restart.
 local FILE = "../groups_job.lua"
 local ORES = "coal_ore,iron_ore,copper_ore,gold_ore,redstone_ore,lapis_ore,diamond_ore"
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
 
 local groups = nil          -- { bakers = {...}, farmers = {...}, ... } (TRADES)
 local notes = {}            -- name -> what it did last
@@ -152,7 +153,7 @@ bot.tool{
             end
             return out
         end
-        -- Who goes where: the berry picker is a farmer, then in name order, two to a trade, the rest builders
+        -- Who goes where: the berry picker is a farmer, then in name order, two to a trade (a fisher only past 15 bots), the rest builders
         local names = {}
         for _, b in ipairs(call("bots", {}) or {}) do names[#names + 1] = b.name end
         local taken = {}
@@ -162,7 +163,7 @@ bot.tool{
         for _, n in ipairs(names) do
             if not taken[n] then
                 for _, k in ipairs(TRADES) do
-                    if k ~= "builders" and #g[k] < 2 then g[k][#g[k] + 1] = n; taken[n] = true; break end
+                    if k ~= "builders" and #g[k] < 2 and (k ~= "fishers" or (#names > 15 and #g[k] < 1)) then g[k][#g[k] + 1] = n; taken[n] = true; break end
                 end
                 if not taken[n] then g.builders[#g.builders + 1] = n end
             end
