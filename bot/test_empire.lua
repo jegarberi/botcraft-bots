@@ -120,7 +120,7 @@ local ok, err = pcall(function()
     for _, b in ipairs(builds) do
         names_[b.name] = true
         assert((b.bot ~= "Bot4" or b.name:match("'s %a+$")) and #b.blocks > 0 and #b.blocks <= 4096, "a builder, not the leader, within the order's size")
-        for _, e in ipairs(b.blocks) do if e[4] ~= "air" and e[4] ~= "cobblestone" then assert(e[2] >= 71, "built on the ground") end end
+        for _, e in ipairs(b.blocks) do if e[4] ~= "air" and e[4] ~= "cobblestone" and e[4] ~= "stone" then assert(e[2] >= 71, "built on the ground") end end
     end
     local soldier = false
     for _, b in ipairs(s.groups.soldiers) do soldier = soldier or b == "Bot10" end

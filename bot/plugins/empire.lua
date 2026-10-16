@@ -337,16 +337,19 @@ local BUILDINGS = {
 
 -- Where the next building goes: a grid of lots 18 blocks apart, 8 to a row, east of the castle (or of the leader),
 -- the first free one in reading order
+-- (Down to 80 below: the town's height came from where the leader stood, once 50 up on a hill.) Also whether it
+-- found the ground: not in a chunk no bot sees
 local function ground(x, z, from)
-    for y = from + 24, from - 24, -1 do
+    for y = from + 24, from - 80, -1 do
         local r = call("get_block", { x = x, y = y, z = z })
         local name = type(r) == "table" and tostring(r.block or "") or ""
-        if name:match("dirt") or name:match("grass_block") or name:match("stone") or name:match("sand") or name:match("gravel")
+        -- (not cobblestone: the bots' floors and roads, a house's half-built floor up in the air among them)
+        if name:match("dirt") or name:match("grass_block") or (name:match("stone") and not name:match("cobblestone")) or name:match("sand") or name:match("gravel")
             or name:match("clay") or name:match("podzol") or name:match("mud") or name:match("snow_block") or name:match("terracotta") then
-            return y + 1
+            return y + 1, true
         end
     end
-    return from
+    return from, false
 end
 
 local COLS = 8
@@ -479,11 +482,23 @@ end
 local function road(o)
     local b, t = {}, state.town
     local function pave(x, z)
-        b[#b + 1] = { x, o.y - 1, z, "cobblestone" }; b[#b + 1] = { x, o.y, z, "air" }; b[#b + 1] = { x, o.y + 1, z, "air" }
+        b[#b + 1] = { x, o.y - 1, z, "stone" }; b[#b + 1] = { x, o.y, z, "air" }; b[#b + 1] = { x, o.y + 1, z, "air" }
+    end
+    -- A lamp post beside the road every 7 blocks: a stone fence (cobblestone wall) with a torch on top, on the
+    -- town's grid so that the roads sharing a stretch put theirs on the same spots
+    local function post(x, z)
+        b[#b + 1] = { x, o.y - 1, z, "stone" }; b[#b + 1] = { x, o.y, z, "cobblestone_wall" }; b[#b + 1] = { x, o.y + 1, z, "torch" }
     end
     for z = o.z + 7, o.z + 13 do pave(o.x + 3, z) end
-    for x = t.x - 2, o.x + 3 do pave(x, o.z + 14); pave(x, o.z + 15) end
-    for z = t.z + 14, o.z + 15 do pave(t.x - 2, z); pave(t.x - 1, z) end
+    post(o.x + 4, o.z + 10)
+    for x = t.x - 2, o.x + 3 do
+        pave(x, o.z + 14); pave(x, o.z + 15)
+        if (x - t.x) % 7 == 0 then post(x, o.z + 16) end
+    end
+    for z = t.z + 14, o.z + 15 do
+        pave(t.x - 2, z); pave(t.x - 1, z)
+        if (z - t.z) % 7 == 0 then post(t.x - 3, z) end
+    end
     return b
 end
 
@@ -503,6 +518,21 @@ local function homes(names, now)
                 h.at = lot()
                 h.blocks, h.handed, h.started = home(h.at, n), nil, false
                 note(n .. "'s house moves nearer, to " .. h.at.x .. " " .. h.at.z)
+            end
+        end
+    end
+    -- A house not built yet that is not on the ground (planned 50 blocks up in the air): down to it.
+    -- ponytail: what was built of it up there stays
+    for n, h in pairs(state.village) do
+        if not h.road and not h.done and not h.grounded then
+            local y, found = ground(h.at.x + 4, h.at.z + 4, h.at.y)
+            if found then
+                h.grounded = true
+                if y ~= h.at.y then
+                    h.at.y, h.homed = y, nil
+                    h.blocks, h.handed, h.started = home(h.at, n), nil, false
+                    note(n .. "'s house moves down to the ground, at y " .. y)
+                end
             end
         end
     end
