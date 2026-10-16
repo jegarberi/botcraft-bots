@@ -990,6 +990,19 @@ static void SetOwn(const std::string& what, const Position& p)
     sqlite3_finalize(statement);
 }
 
+static void ForgetOwn(const std::string& what)
+{
+    std::lock_guard<std::mutex> lock(memory_mutex);
+    sqlite3_stmt* statement = nullptr;
+    if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "DELETE FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
+    {
+        return;
+    }
+    sqlite3_bind_text(statement, 1, what.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(statement);
+    sqlite3_finalize(statement);
+}
+
 static bool GetOwn(const std::string& what, Position& p)
 {
     std::lock_guard<std::mutex> lock(memory_mutex);
@@ -5798,8 +5811,17 @@ static bool IsBed(const Blockstate& b)
 /// @brief True if the bot has a bed to go to: one in sight, one it remembers, or one in its inventory
 static bool HasBed(McpBot& c)
 {
-    // Its own bed (its house's, in the village) counts wherever it is: it goes home to sleep
+    // Its own bed (its house's, in the village) counts wherever it is: it goes home to sleep. Unless it is in
+    // sight and no bed stands there (a house not built yet): forgotten, and the bot works on through the night
     Position mine;
+    if (GetOwn("bed", mine))
+    {
+        const Blockstate* block = c.GetWorld()->GetBlock(mine);
+        if (block != nullptr && !IsBed(*block))
+        {
+            ForgetOwn("bed");
+        }
+    }
     if (!ItemLike(c, "_bed").empty() || GetOwn("bed", mine) || !FindBlocks(c, IsBed, 32, 1).empty())
     {
         return true;
@@ -5963,7 +5985,7 @@ static void Dress(McpBot& c)
 /// @brief Night: lie down in a free bed and stay there until morning
 static Status SleepStep(McpBot& c)
 {
-    c.SetState("sleeping");
+    c.SetState("going to bed");
     std::vector<Position> beds = FindBlocks(c, [](const Blockstate& b) { return IsBed(b) && b.GetVariableValue("occupied") == "false"; }, 32, 64);
     // Its own bed first, wherever it is; any free one otherwise
     Position mine;
@@ -6030,6 +6052,7 @@ static Status SleepStep(McpBot& c)
             return Status::Success;
         }
     }
+    c.SetState("sleeping");
     c.SetNote("sleeping in the bed at " + std::to_string(bed->x) + " " + std::to_string(bed->y) + " " + std::to_string(bed->z));
     // By default the night is only skipped when every player sleeps: with the rule at 1 percent, one sleeper is
     // enough. Needs operator rights; said once per bot, in both spellings of the rule (it was renamed)
