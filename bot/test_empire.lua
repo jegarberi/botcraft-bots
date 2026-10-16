@@ -74,6 +74,14 @@ local ok, err = pcall(function()
         local at = builds[i].blocks[1]
         assert(at[1] - 144 < 8 * 18, "8 lots to a row")
     end
+    -- A restart mid-build: the orders are lost (nobody building), nothing counts as built, every house is handed again
+    t = t + 60; tick(); t = t + 60; tick()
+    local handed, said = #builds, #chat
+    for b in pairs(building) do building[b] = nil end
+    load(io.open(arg[1]):read("a"), "empire")()
+    t = t + 200; tick()        -- it waits 150 s after a load for the bots to come back
+    for i = said + 1, #chat do assert(not chat[i]:match("built its house"), "not built after a restart: " .. chat[i]) end
+    assert(#builds - handed >= 14, "handed again after a restart, got " .. (#builds - handed))
     local furnished = {}
     for i = before + 1, #builds do
         for _, e in ipairs(builds[i].blocks) do furnished[e[4]:match("^[%a_]+")] = true end

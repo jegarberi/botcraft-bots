@@ -96,6 +96,13 @@ do
         for old, new in pairs({ cooks = "bakers", breeders = "butchers", crafters = "blacksmiths" }) do
             if state.groups and state.groups[old] then state.groups[new], state.groups[old] = state.groups[old], nil end
         end
+        -- After a restart no bot has its build order any more, and "not building, nothing left" looked like a building
+        -- finished: every unfinished one is handed out again, a house whose road was under way checked first
+        for _, w in pairs(state.village or {}) do
+            if not w.done then w.handed, w.started, w.recheck = nil, false, w.road end
+        end
+        for _, w in pairs(state.shops or {}) do if not w.done then w.handed, w.started = 0, false end end
+        if state.work then state.work.handed, state.work.started = 0, false end
     end
 end
 
@@ -505,6 +512,9 @@ local function homes(names, now)
             local at = lot(call("leader", {}))
             h = { name = n .. "'s house", bot = n, at = at, blocks = home(at, n) }
             state.village[n] = h
+        end
+        if h.recheck then
+            h.road, h.recheck, h.name, h.blocks = nil, nil, n .. "'s house", home(h.at, n)
         end
         local st = looks[n]
         if (h.road or h.done) and not h.homed then
