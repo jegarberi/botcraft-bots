@@ -320,6 +320,13 @@ public:
     int assist_count = 0;
     Botcraft::Position assist_at;
     std::chrono::steady_clock::time_point assist_until;
+    /// @brief A player who hit a bot ("attacked by <name> at x y z"): every bot goes after them until avenge_until
+    /// (read under team_mutex). Bots are known by the names heard in team talk, and by this bot's name pattern
+    std::string avenge;
+    Botcraft::Position avenge_at;
+    std::chrono::steady_clock::time_point avenge_until;
+    std::chrono::steady_clock::time_point avenge_call_at;
+    std::set<std::string> bot_names;
     /// @brief When this bot last called the others to a fight: once every 30 seconds at most
     std::chrono::steady_clock::time_point mob_call_at;
     /// @brief Health at the last watchdog look, to see it being hurt; and the last call against a pillager
@@ -545,6 +552,38 @@ protected:
         ManagersClient::Handle(packet);
     }
 
+    virtual void Handle(ProtocolCraft::ClientboundDamageEventPacket& packet) override
+    {
+        // Hit by a player who is not one of the bots: every bot is called on them (the cause is the entity id + 1)
+        const std::shared_ptr<LocalPlayer> me = GetLocalPlayer();
+        if (me && packet.GetEntityId() == me->GetEntityID() && packet.GetSourceCauseId() > 0)
+        {
+            const std::shared_ptr<Entity> attacker = GetEntityManager()->GetEntity(packet.GetSourceCauseId() - 1);
+            const std::string name = attacker && attacker->IsRemotePlayer() ? GetPlayerName(attacker->GetUUID()) : "";
+            const auto now = std::chrono::steady_clock::now();
+            if (!name.empty() && !IsBotName(name) && now >= avenge_call_at)
+            {
+                avenge_call_at = now + std::chrono::seconds(10);
+                const Vector3<double> pos = me->GetPosition();
+                const Position at(static_cast<int>(std::floor(pos.x)), static_cast<int>(std::floor(pos.y)), static_cast<int>(std::floor(pos.z)));
+                Say("attacked by " + name + " at " + std::to_string(at.x) + " " + std::to_string(at.y) + " " + std::to_string(at.z));
+                std::lock_guard<std::mutex> lock(team_mutex);
+                avenge = name;
+                avenge_at = at;
+                avenge_until = now + std::chrono::seconds(120);
+            }
+        }
+        ManagersClient::Handle(packet);
+    }
+
+    /// @brief One of the bots: a name heard in team talk, or this bot's name with other digits at the end (Bot, Bot7)
+    bool IsBotName(const std::string& name)
+    {
+        const auto base = [](const std::string& n) { return n.substr(0, n.find_last_not_of("0123456789") + 1); };
+        std::lock_guard<std::mutex> lock(team_mutex);
+        return bot_names.count(name) != 0 || base(name) == base(GetNetworkManager()->GetMyName());
+    }
+
     virtual void Handle(ProtocolCraft::ClientboundSystemChatPacket& packet) override
     {
         std::string text = packet.GetContent().GetText();
@@ -590,6 +629,10 @@ private:
         if (colon != std::string::npos)
         {
             const std::string sender = line.substr(tag + 7, colon - tag - 7);
+            {
+                std::lock_guard<std::mutex> lock(team_mutex);
+                bot_names.insert(sender);
+            }
             if (sender != GetNetworkManager()->GetMyName())
             {
                 try
@@ -1043,6 +1086,15 @@ void McpBot::OnTeamMessage(const std::string& sender, const std::string& message
             words.push_back(message.substr(start, end - start));
         }
         start = end + 1;
+    }
+    if (words.size() >= 7 && words[0] == "attacked" && words[1] == "by" && words[3] == "at")
+    {
+        // A player hit one of the bots: all of them go after that player, wherever they are
+        std::lock_guard<std::mutex> lock(team_mutex);
+        avenge = words[2];
+        avenge_at = Position(std::stoi(words[4]), std::stoi(words[5]), std::stoi(words[6]));
+        avenge_until = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        return;
     }
     if (words.size() >= 7 && words[0] == "mob" && words[3] == "at")
     {
@@ -2416,7 +2468,8 @@ static Status LureTask(BehaviourClient& c, const std::string& type, const std::s
 }
 
 /// @brief Hunt the nearest entities of this type/group until count are dead (never a penned animal)
-static Status KillTask(BehaviourClient& c, const std::string& type, const int count, const double radius, std::atomic<int>& done)
+/// @param player_name Only the player of this name (type is then ignored)
+static Status KillTask(BehaviourClient& c, const std::string& type, const int count, const double radius, std::atomic<int>& done, const std::string& player_name = "")
 {
     const std::shared_ptr<EntityManager> entity_manager = c.GetEntityManager();
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
@@ -2431,7 +2484,22 @@ static Status KillTask(BehaviourClient& c, const std::string& type, const int co
     std::set<int> skipped;
     while (done < count)
     {
-        const std::vector<Ent> found = WildAnimals(c, type, radius);
+        std::vector<Ent> found;
+        if (player_name.empty())
+        {
+            found = WildAnimals(c, type, radius);
+        }
+        else
+        {
+            for (const Ent& e : FindEntities(c, "player", radius))
+            {
+                const std::shared_ptr<Entity> entity = entity_manager->GetEntity(e.id);
+                if (entity && c.GetPlayerName(entity->GetUUID()) == player_name)
+                {
+                    found.push_back(e);
+                }
+            }
+        }
         const auto target = std::find_if(found.begin(), found.end(), [&](const Ent& e) { return skipped.count(e.id) == 0; });
         if (target == found.end())
         {
@@ -6345,6 +6413,39 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         return KillTask(c, "hostile", 1, 10.0, killed);
                     })
             .end()
+            .sequence("avenge")
+                .leaf("a player attacked one of the bots?", [](McpBot& c)
+                    {
+                        std::lock_guard<std::mutex> lock(c.team_mutex);
+                        return !c.avenge.empty() && std::chrono::steady_clock::now() < c.avenge_until ? Status::Success : Status::Failure;
+                    })
+                .leaf("go after that player", [](McpBot& c)
+                    {
+                        std::string who;
+                        Position at;
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            who = c.avenge;
+                            at = c.avenge_at;
+                        }
+                        c.SetState("avenging");
+                        c.SetNote("going after " + who + ", who attacked a bot");
+                        std::atomic<int> killed = 0;
+                        if (KillTask(c, "", 1, 48.0, killed, who) == Status::Success)
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            c.avenge.clear();
+                            return Status::Success;
+                        }
+                        // Not in sight: to where the bot was hit
+                        const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
+                        if (std::abs(me.x - at.x) > 8.0 || std::abs(me.z - at.z) > 8.0)
+                        {
+                            return TravelTask(c, at.x, at.z);
+                        }
+                        return Status::Failure;
+                    })
+            .end()
             .sequence("assist")
                 .leaf("a bot nearby called for help against mobs, and this one is fit to fight?", [](McpBot& c)
                     {
@@ -10066,6 +10167,7 @@ static const char* tree_json = R"JSON([
 {"branch":"unstick","condition":"busy but not moving for 20 seconds?","action":"break a block beside (never above or below)","state":"unsticking"},
 {"branch":"survive","condition":"hungry and has food?","action":"eat","state":"eating"},
 {"branch":"defend","condition":"hostile within 10 blocks?","action":"fight with the best sword","state":"fighting"},
+{"branch":"avenge","condition":"a player attacked one of the bots?","action":"go after that player","state":"avenging"},
 {"branch":"assist","condition":"a bot nearby called for help against mobs, and this one is fit to fight?","action":"fight them together","state":"fighting with the others"},
 {"branch":"recover","condition":"died less than 5 minutes ago and lost what it carried?","action":"go back for the items","state":"recovering items"},
 {"branch":"salvage","condition":"a bot just died close by?","action":"pick up what it dropped","state":"picking up a teammate's items"},
