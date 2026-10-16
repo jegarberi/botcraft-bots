@@ -407,6 +407,8 @@ public:
     /// @brief Not before this time will the bot look for a bed again tonight, and the beds that refused it (behaviour thread only)
     std::chrono::steady_clock::time_point sleep_retry_at = std::chrono::steady_clock::now();
     std::set<Botcraft::Position> beds_refused;
+    // In bed: what it took off (armor, shield, weapon), as { the bag slot it went to, the slot it came from }
+    std::vector<std::pair<short, short>> undressed;
     /// @brief Fuel for the furnace: the bot is out getting coal; and until when it settles for wood after
     /// finding none (behaviour thread only)
     bool coal_wanted = false;
@@ -5791,6 +5793,60 @@ static void BedStep(McpBot& c, const std::string& stage)
     Check(c, KillTask(c, "sheep", 1, 32.0, killed));
 }
 
+/// @brief Into bed: armor, the shield and the weapon in hand go into the bag, each remembered with its place
+static void Undress(McpBot& c)
+{
+    std::vector<short> from = { Window::INVENTORY_HEAD_ARMOR, Window::INVENTORY_HEAD_ARMOR + 1, Window::INVENTORY_HEAD_ARMOR + 2,
+        Window::INVENTORY_FEET_ARMOR, Window::INVENTORY_OFFHAND_INDEX };
+    const short held = Window::INVENTORY_HOTBAR_START + c.GetInventoryManager()->GetIndexHotbarSelected();
+    const ProtocolCraft::Slot hand = c.GetInventoryManager()->GetHotbarSelected();
+    if (!hand.IsEmptySlot())
+    {
+        const std::string name = AssetsManager::getInstance().GetItem(hand.GetItemId())->GetName();
+        if (EndsWith(name, "_sword") || EndsWith(name, "_axe") || name == "minecraft:trident" || name == "minecraft:mace")
+        {
+            from.push_back(held);
+        }
+    }
+    for (const short f : from)
+    {
+        if (IsSlotEmpty(c, f))
+        {
+            continue;
+        }
+        short to = -1;
+        for (const auto& [index, slot] : PlayerSlots(c))
+        {
+            if (index >= Window::INVENTORY_STORAGE_START && index < Window::INVENTORY_HOTBAR_START && slot.IsEmptySlot())
+            {
+                to = index;
+                break;
+            }
+        }
+        if (to < 0)
+        {
+            break;      // A full bag: the rest stays on
+        }
+        if (SwapItemsInContainer(c, Window::PLAYER_INVENTORY_INDEX, f, to) == Status::Success)
+        {
+            c.undressed.push_back({ to, f });
+        }
+    }
+}
+
+/// @brief Up again: everything it took off back where it was (the last off, the first on)
+static void Dress(McpBot& c)
+{
+    for (auto it = c.undressed.rbegin(); it != c.undressed.rend(); ++it)
+    {
+        if (!IsSlotEmpty(c, it->first) && IsSlotEmpty(c, it->second))
+        {
+            SwapItemsInContainer(c, Window::PLAYER_INVENTORY_INDEX, it->first, it->second);
+        }
+    }
+    c.undressed.clear();
+}
+
 /// @brief Night: lie down in a free bed and stay there until morning
 static Status SleepStep(McpBot& c)
 {
@@ -5831,8 +5887,17 @@ static Status SleepStep(McpBot& c)
     }
     // The server says why when it refuses: monsters nearby, bed taken, too far
     const long long before = c.GetSystemCount();
-    if (ReachBlock(c, *bed) == Status::Failure || InteractWithBlock(c, *bed, PlayerDiggingFace::Up) == Status::Failure)
+    if (ReachBlock(c, *bed) == Status::Failure)
     {
+        c.beds_refused.insert(*bed);
+        return Status::Success;
+    }
+    // At the bed: armor, shield and weapon off (back on in the morning, or as soon as it is out of bed: see the
+    // first branch of the tree)
+    Undress(c);
+    if (InteractWithBlock(c, *bed, PlayerDiggingFace::Up) == Status::Failure)
+    {
+        Dress(c);
         c.beds_refused.insert(*bed);
         return Status::Success;
     }
@@ -5841,6 +5906,7 @@ static Status SleepStep(McpBot& c)
     {
         if (line.find("block.minecraft.bed.") != std::string::npos || line.find("sleep.not_possible") != std::string::npos)
         {
+            Dress(c);
             c.SetNote("could not sleep in the bed at " + std::to_string(bed->x) + " " + std::to_string(bed->y) + " " + std::to_string(bed->z) + ": " + line);
             // Monsters around clear up (the bot fights them); a taken bed stays taken tonight
             if (line.find("not_safe") == std::string::npos)
@@ -5867,6 +5933,7 @@ static Status SleepStep(McpBot& c)
         const WorkingInPlace in_bed(c);
         Utilities::YieldForCondition([&]() { return IsNightTime(c) == Status::Failure; }, c, 10 * 60 * 1000);
     }
+    Dress(c);
     c.beds_refused.clear();
     return Status::Success;
 }
@@ -6186,6 +6253,15 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         Wait(c, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::milliseconds(200) - (now - c.last_decision)).count()));
                     }
                     c.last_decision = std::chrono::steady_clock::now();
+                    return Status::Failure;
+                })
+            .leaf("out of bed with its gear off? back on", [](McpBot& c)
+                {
+                    // Woken in the night (a monster, the watchdog): it is not sleeping when the tree runs from the top
+                    if (!c.undressed.empty())
+                    {
+                        Dress(c);
+                    }
                     return Status::Failure;
                 })
             .sequence("unstick")
