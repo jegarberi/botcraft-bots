@@ -449,8 +449,29 @@ end
 -- A bot's own house: 7 by 7, with a bed, a double chest, a furnace, a table (a fence under a pressure plate) between
 -- two chairs (stairs, their backs away from it), and a sign by the door with its name. The door is on the south side.
 -- (Chests and furnaces are given no facing: they face the bot that places them, from inside)
+-- A plains villager's house: walls 4 high on a cobblestone base row, oak logs at the corners, and a pitched roof of
+-- oak stairs (any wood the bot carries does, see OtherWood) over the north and south sides, overhanging by one,
+-- with plank gables east and west. HOME_PLAN: houses planned before it are planned again
+local HOME_PLAN = 2
 local function home(o, owner)
-    local b = hut(o, 7, 7, 3, "oak_planks", "oak_log", "spruce_planks")
+    local H = 4
+    local b, put = hut(o, 7, 7, H, "oak_planks", "oak_log", "air")
+    for x = 1, 5 do
+        if x ~= 3 then put(x, 0, 6, "cobblestone") end      -- the doorway in the middle of the south side
+        put(x, 0, 0, "cobblestone"); put(0, 0, x, "cobblestone"); put(6, 0, x, "cobblestone")
+    end
+    for k = 0, 3 do
+        for x = -1, 7 do
+            -- A stair's high side is the way it faces: toward the ridge
+            put(x, H - 1 + k, k - 1, "oak_stairs[facing=south,half=bottom]")
+            put(x, H - 1 + k, 7 - k, "oak_stairs[facing=north,half=bottom]")
+        end
+        for z = k, 6 - k do
+            if k == 0 then break end      -- the walls' top row
+            put(0, H - 1 + k, z, "oak_planks"); put(6, H - 1 + k, z, "oak_planks")
+            for x = 1, 5 do put(x, H - 1 + k, z, k < 3 and "air" or "oak_planks") end    -- the ridge on top
+        end
+    end
     -- The ground levelled under it first: o.y is the ground's height at its middle, which stays as it was (the house
     -- rests on it); under the floor, wherever the ground is lower, dirt down to it. Above, hut clears the air
     for x = 0, 6 do
@@ -537,6 +558,12 @@ local function homes(names, now)
             end
         end
     end
+    -- A house not built yet, planned before the house it is now: planned again
+    for n, h in pairs(state.village) do
+        if not h.road and not h.done and h.plan ~= HOME_PLAN then
+            h.plan, h.blocks, h.handed, h.started = HOME_PLAN, home(h.at, n), nil, false
+        end
+    end
     -- A house not built yet that is not on the ground (planned 50 blocks up in the air): down to it.
     -- ponytail: what was built of it up there stays
     for n, h in pairs(state.village) do
@@ -556,7 +583,7 @@ local function homes(names, now)
         local h = state.village[n]
         if not h then
             local at = lot(call("leader", {}))
-            h = { name = n .. "'s house", bot = n, at = at, blocks = home(at, n) }
+            h = { name = n .. "'s house", bot = n, at = at, blocks = home(at, n), plan = HOME_PLAN }
             state.village[n] = h
         end
         if h.recheck then
