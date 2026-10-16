@@ -69,7 +69,11 @@ local ok, err = pcall(function()
     assert(h >= 14, "a house order for every bot (the empire's builder may finish first), got " .. h)
     local n_ = 0
     for _, list in pairs(assigned[#assigned]) do n_ = n_ + #list end
-    assert(#assigned == splits or n_ < 15, "no trade while building its house")
+    assert(#assigned > splits and n_ == 0, "no trade at all while building its house, got " .. n_)
+    for i = before + 1, #builds do
+        local at = builds[i].blocks[1]
+        assert(at[1] - 144 < 8 * 18, "8 lots to a row")
+    end
     local furnished = {}
     for i = before + 1, #builds do
         for _, e in ipairs(builds[i].blocks) do furnished[e[4]:match("^[%a_]+")] = true end

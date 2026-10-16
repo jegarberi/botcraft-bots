@@ -328,7 +328,8 @@ local BUILDINGS = {
           return b end },
 }
 
--- Where the next building goes: rows of three, 18 blocks apart, east of the castle (or of the leader)
+-- Where the next building goes: a grid of lots 18 blocks apart, 8 to a row, east of the castle (or of the leader),
+-- the first free one in reading order
 local function ground(x, z, from)
     for y = from + 24, from - 24, -1 do
         local r = call("get_block", { x = x, y = y, z = z })
@@ -340,6 +341,21 @@ local function ground(x, z, from)
     end
     return from
 end
+
+local COLS = 8
+-- The lots taken, "column,row"; a town laid out before was three to a row, its lots in order
+local function free_lot()
+    if not state.cells then
+        state.cells = {}
+        for s = 0, (state.lots or 0) - 1 do state.cells[(s % 3) .. "," .. (s // 3)] = true end
+    end
+    local i = 0
+    while state.cells[(i % COLS) .. "," .. (i // COLS)] do i = i + 1 end
+    return i
+end
+
+-- A lot's place in reading order
+local function lot_index(at) return (at.z - state.town.z) // 18 * COLS + (at.x - state.town.x) // 18 end
 
 local function lot(leader)
     if not state.town then
@@ -354,9 +370,9 @@ local function lot(leader)
             state.town = { x = math.floor(p.x) + 30, y = math.floor(p.y), z = math.floor(p.z) }
         end
     end
-    local slot = state.lots or 0
-    state.lots = slot + 1
-    local x, z = state.town.x + (slot % 3) * 18, state.town.z + (slot // 3) * 18
+    local i = free_lot()
+    state.cells[(i % COLS) .. "," .. (i // COLS)] = true
+    local x, z = state.town.x + (i % COLS) * 18, state.town.z + (i // COLS) * 18
     return { x = x, y = ground(x + 4, z + 4, state.town.y), z = z }
 end
 
@@ -466,6 +482,21 @@ end
 -- building under way, then its road the same way; once that is paved the bot is split into a trade
 local function homes(names, now)
     if not state.village then return end
+    -- A house not built yet out past the town's lots (a town laid out three to a row stretched far south) moves to
+    -- a free lot nearer in. ponytail: what was built of it stays where it was
+    if state.town then
+        local taken = 0
+        for _ in pairs(state.cells or {}) do taken = taken + 1 end
+        for n, h in pairs(state.village) do
+            local i = lot_index(h.at)
+            if not h.road and not h.done and i >= taken and free_lot() < i then
+                state.cells[(i % COLS) .. "," .. (i // COLS)] = nil
+                h.at = lot()
+                h.blocks, h.handed, h.started = home(h.at, n), nil, false
+                note(n .. "'s house moves nearer, to " .. h.at.x .. " " .. h.at.z)
+            end
+        end
+    end
     for _, n in ipairs(names) do
         local h = state.village[n]
         if not h then
@@ -596,9 +627,11 @@ local function play(now)
         for _, n in ipairs(names) do
             if not (state.work and state.work.bot == n) and not homeless(n) then traders[#traders + 1] = n end
         end
-        local g, leader
+        -- Nobody free (every bot at its house or road): no trades at all, not the ones from before
+        local g, leader = {}, "the leader"
+        for _, t in ipairs(TRADES) do g[t] = {} end
         if #traders > 0 then g, leader = split(traders) end
-        if g and not same(g, state.groups) then
+        if not same(g, state.groups) then
             state.groups = g
             call("groups", { assign = g })
             local counts = {}
