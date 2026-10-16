@@ -6320,18 +6320,20 @@ static Status UnstickStep(McpBot& c)
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
     const Position feet = BlockPos(player->GetPosition());
     const Vector3<double> front = player->GetFrontVector();
-    // Stuck again within two minutes with rock overhead: one block won't do, the bot is in a hole. Dig stairs up
-    // and out, by hand if it has no pickaxe (slow, but it gets there)
+    // Stuck again within two minutes, walled in on 3 sides or more: one block won't do, the bot is in a hole. Dig
+    // stairs up and out, by hand if it has no pickaxe (slow, but it gets there). (Not "anything solid overhead": a
+    // tree, a roof or a house left up in the air sent bots standing in the open digging stairs)
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     const bool again = now - c.last_unstick < std::chrono::minutes(2);
     c.last_unstick = now;
-    bool underground = false;
-    for (int up = 2; up <= 40 && !underground; ++up)
+    int walls = 0;
+    for (const Position& side : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
     {
-        const Blockstate* above = world->GetBlock(feet + Position(0, up, 0));
-        underground = above != nullptr && above->IsSolid();
+        const Blockstate* foot = world->GetBlock(feet + side);
+        const Blockstate* head = world->GetBlock(feet + side + Position(0, 1, 0));
+        walls += (foot != nullptr && foot->IsSolid()) || (head != nullptr && head->IsSolid());
     }
-    if (again && underground)
+    if (again && walls >= 3)
     {
         c.SetNote("stuck in a hole: digging stairs up and out");
         // Each bot its own way (they may all be in the same hole)
