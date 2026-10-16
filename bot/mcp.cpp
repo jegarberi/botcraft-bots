@@ -6655,6 +6655,21 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
                 .leaf("get food", GetFoodStep)
             .end()
+            .sequence("out of the mine")
+                .leaf("underground with no pickaxe nor wood to make one?", [](McpBot& c)
+                    {
+                        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+                        return HeldTool(c, "pickaxe").empty() && ItemLike(c, "_log").empty() && ItemLike(c, "_planks", 5).empty() &&
+                            feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0 ? Status::Success : Status::Failure;
+                    })
+                .leaf("dig stairs up to the surface", [](McpBot& c)
+                    {
+                        c.SetState("digging out of the mine");
+                        c.SetNote("underground with no pickaxe: digging stairs up to the surface");
+                        DigUp(c);
+                        return Status::Success;
+                    })
+            .end()
             .sequence("wood")
                 .leaf("has no wood?", [](McpBot& c)
                     {
@@ -9979,6 +9994,7 @@ static const char* tree_json = R"JSON([
 {"branch":"make","condition":"asked to make something it does not have enough of yet?","action":"one step toward it (craft, smelt, or get what is missing)","state":"making"},
 {"branch":"gather","condition":"resource goal set?","action":"collect one","state":"gathering"},
 {"branch":"food","condition":"has no food?","action":"get food (hunt)","state":"getting food"},
+{"branch":"out of the mine","condition":"underground with no pickaxe nor wood to make one?","action":"dig stairs up to the surface","state":"digging out of the mine"},
 {"branch":"wood","condition":"has no wood?","action":"cut a tree","state":"getting wood"},
 {"branch":"pickaxe","condition":"has no pickaxe?","action":"make pickaxe","state":"making pickaxe"},
 {"branch":"axe","condition":"has no axe?","action":"make axe","state":"making axe"},
