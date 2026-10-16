@@ -444,6 +444,8 @@ public:
     std::chrono::steady_clock::time_point follow_retry_at = std::chrono::steady_clock::now();
     /// @brief Set by an action that stands still on purpose (smelting): not moving is then not being stuck
     std::atomic<bool> working_in_place = false;
+    /// @brief When the last such action ended: building places one block per tick, so between blocks the flag is down
+    std::atomic<std::chrono::steady_clock::time_point> worked_in_place_at{};
     /// @brief How many times the watchdog found the bot stuck since it connected
     std::atomic<int> times_stuck = 0;
     /// @brief What the bot has done since it joined, for its performance (the brain plugin learns from it):
@@ -775,6 +777,7 @@ struct WorkingInPlace
         if (bot != nullptr)
         {
             bot->working_in_place = false;
+            bot->worked_in_place_at = std::chrono::steady_clock::now();
         }
     }
     WorkingInPlace(const WorkingInPlace&) = delete;
@@ -7313,10 +7316,11 @@ static void Watchdog(McpBot& bot)
     }
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     const bool danger = state != "fighting" && state != "eating" && now >= bot.danger_retry_at && !FindEntities(bot, "hostile", 10.0).empty();
-    const bool stuck = state != "idle" && !bot.working_in_place && now - bot.GetStateSince() > std::chrono::seconds(120);
+    const bool in_place = bot.working_in_place || now - bot.worked_in_place_at.load() < std::chrono::seconds(5);
+    const bool stuck = state != "idle" && !in_place && now - bot.GetStateSince() > std::chrono::seconds(120);
     // Busy but still within 1.5 blocks of the same spot after 20 seconds: walled in, or the pathfinder is bumping into something
     const Vector3<double> position = bot.GetLocalPlayer()->GetPosition();
-    if (position.SqrDist(bot.watch_position) > 1.5 * 1.5 || state == "idle" || state == "eating" || state == "starting" || state == "unsticking" || bot.working_in_place)
+    if (position.SqrDist(bot.watch_position) > 1.5 * 1.5 || state == "idle" || state == "eating" || state == "starting" || state == "unsticking" || in_place)
     {
         bot.watch_position = position;
         bot.moved_at = now;
