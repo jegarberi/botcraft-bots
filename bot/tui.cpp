@@ -591,8 +591,13 @@ int main()
                 const auto parsed = std::from_chars(text.data(), text.data() + text.size(), count);
                 if (parsed.ec == std::errc() && parsed.ptr == text.data() + text.size() && count >= 1 && count <= 100)
                 {
-                    args["count"] = count;
-                    run("", "spawn", args);
+                    const std::string base = ask("base name (e.g. Worker -> Worker1, Worker2): ");
+                    if (!base.empty())
+                    {
+                        args["count"] = count;
+                        args["base_name"] = base;
+                        run("", "spawn", args);
+                    }
                 }
                 else
                 {

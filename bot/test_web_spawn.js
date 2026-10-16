@@ -19,10 +19,13 @@ vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], {
     },
 });
 document.getElementById('spawn-count').value = '2';
+document.getElementById('spawn-base').value = 'Worker';
+assert.match(html, /label for="spawn-base"/);
+assert.match(html, /id="spawn-base"[^>]*maxlength="15"[^>]*required/);
 let prevented = false;
 nodes.get('spawn').onsubmit({ preventDefault() { prevented = true; } });
 assert(prevented);
-assert.deepEqual(requests[0], { name: 'spawn', arguments: { count: 2 } });
+assert.deepEqual(requests[0], { name: 'spawn', arguments: { count: 2, base_name: 'Worker' } });
 setImmediate(() => {
     assert.match(nodes.get('message').textContent, /spawn:/);
     console.log('web spawn OK: labeled bounded count, submission, queued result');
