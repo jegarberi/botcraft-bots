@@ -7642,6 +7642,21 @@ static Value DisconnectChild(const std::shared_ptr<Child>& child)
     }
     if (lock.owns_lock())
     {
+        // A child that never answers (two hung there for half an hour, holding up every other goodbye): killed after
+        // 3 minutes, which ends the call below
+        std::atomic<bool> answered = false;
+        const pid_t pid = child->pid;
+        std::thread watchdog([&answered, pid]()
+            {
+                for (int i = 0; i < 1800 && !answered; ++i)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                if (!answered)
+                {
+                    kill(pid, SIGKILL);
+                }
+            });
         try
         {
             result = ForwardLocked(*child, "disconnect", Value(Json::Object()));
@@ -7650,6 +7665,8 @@ static Value DisconnectChild(const std::shared_ptr<Child>& child)
         {
             result["note"] = std::string(e.what());
         }
+        answered = true;
+        watchdog.join();
         // End of input: the child process exits
         fclose(child->to);
         fclose(child->from);
@@ -7891,26 +7908,52 @@ static Value CallTool(const std::string& name, const Value& a)
                 names.push_back(child->name);
             }
         }
+        // Each one back as soon as it has left (one that hangs holds up only itself), 10 seconds after the last join
         std::thread([names]()
             {
-                CallTool("disconnect_all", Value());
+                std::mutex turn;
+                auto next = std::chrono::steady_clock::now();
+                std::vector<std::thread> each;
                 for (const std::string& who : names)
                 {
-                    if (stopping)
-                    {
-                        return;
-                    }
-                    Value args;
-                    args["name"] = who;
-                    try
-                    {
-                        CallTool("connect", args);
-                    }
-                    catch (const std::exception& e)
-                    {
-                        LOG_WARNING("reconnect_all: " << who << ": " << e.what());
-                    }
-                    std::this_thread::sleep_for(std::chrono::seconds(10));
+                    each.emplace_back([&, who]()
+                        {
+                            Value args;
+                            args["bot"] = who;
+                            try
+                            {
+                                CallTool("disconnect", args);
+                            }
+                            catch (const std::exception& e)
+                            {
+                                LOG_WARNING("reconnect_all: " << who << ": " << e.what());
+                            }
+                            std::chrono::steady_clock::time_point at;
+                            {
+                                std::lock_guard<std::mutex> lock(turn);
+                                at = std::max(next, std::chrono::steady_clock::now());
+                                next = at + std::chrono::seconds(10);
+                            }
+                            std::this_thread::sleep_until(at);
+                            if (stopping)
+                            {
+                                return;
+                            }
+                            Value again;
+                            again["name"] = who;
+                            try
+                            {
+                                CallTool("connect", again);
+                            }
+                            catch (const std::exception& e)
+                            {
+                                LOG_WARNING("reconnect_all: " << who << ": " << e.what());
+                            }
+                        });
+                }
+                for (std::thread& t : each)
+                {
+                    t.join();
                 }
             }).detach();
         return "every bot stores everything, leaves and joins again, 10 seconds apart";
