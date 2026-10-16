@@ -4664,6 +4664,43 @@ struct Wanted
 /// @brief Build objective: one more step of the blueprint. Each entry says what must stand at a spot:
 /// air (clear it), or a block (clear whatever else is there, then place it). Clearing goes first, from the top
 /// down; placing follows, from the bottom up; nearest first within a layer.
+/// @brief The item with its kind of wood replaced ("minecraft:oak_planks", "spruce" -> "minecraft:spruce_planks");
+/// with kind "*", the item with its wood taken out, to compare blocks whatever their wood. "" if it is not made of wood
+static std::string WithWood(const std::string& item, const std::string& kind)
+{
+    // dark_oak and pale_oak before oak, which they contain
+    static const char* woods[] = { "dark_oak", "pale_oak", "oak", "spruce", "birch", "jungle", "acacia", "mangrove", "cherry", "crimson", "warped", "bamboo" };
+    for (const char* w : woods)
+    {
+        const size_t at = item.find(w);
+        if (at != std::string::npos)
+        {
+            return item.substr(0, at) + kind + item.substr(at + std::strlen(w));
+        }
+    }
+    return "";
+}
+
+/// @brief The same block in the wood the bot carries the most of, for a plan asking for a wood it has none of
+/// (oak houses in a spruce forest: the bots wandered for oak with spruce in their bags). "" if none
+static std::string OtherWood(BehaviourClient& c, const std::string& item)
+{
+    std::string best;
+    int most = 0;
+    for (const char* w : { "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak", "crimson", "warped", "bamboo" })
+    {
+        // Counting the logs and planks it is made from too: spruce logs make spruce planks
+        const std::string other = WithWood(item, w);
+        const int n = other.empty() ? 0 : CountItem(c, other) + CountItem(c, std::string("minecraft:") + w + "_log") + CountItem(c, std::string("minecraft:") + w + "_planks");
+        if (n > most)
+        {
+            best = other;
+            most = n;
+        }
+    }
+    return best;
+}
+
 static Status BuildStep(McpBot& c)
 {
     c.SetState("building");
@@ -4719,7 +4756,9 @@ static Status BuildStep(McpBot& c)
         // (A torch that ended up on the side of a block is called wall_torch: it is the torch that was asked for)
         // (and a sign on the side of a block is a wall_sign)
         const bool is_it = (block->GetName() == wanted_block && wanted.StateMatches(*block)) || (wanted_block == "minecraft:water" && block->IsWater()) || (wanted_block == "minecraft:torch" && block->GetName() == "minecraft:wall_torch") ||
-            (EndsWith(wanted_block, "_sign") && block->GetName() == wanted_block.substr(0, wanted_block.size() - 5) + "_wall_sign");
+            (EndsWith(wanted_block, "_sign") && block->GetName() == wanted_block.substr(0, wanted_block.size() - 5) + "_wall_sign") ||
+            // Another wood does as well (see OtherWood)
+            (!WithWood(wanted_block, "*").empty() && WithWood(block->GetName(), "*") == WithWood(wanted_block, "*") && wanted.StateMatches(*block));
         if (clear ? empty : is_it)
         {
             continue;
@@ -4814,7 +4853,11 @@ static Status BuildStep(McpBot& c)
     const Position& p = next->first;
     // The block itself, without the text of a sign
     const Wanted wanted_next(next->second);
-    const std::string& item = wanted_next.item;
+    std::string item = wanted_next.item;
+    if (CountItem(c, item) == 0 && !OtherWood(c, item).empty())
+    {
+        item = OtherWood(c, item);
+    }
     const bool far_sideways = (me.x - p.x) * (me.x - p.x) + (me.z - p.z) * (me.z - p.z) > 32.0 * 32.0;
     if (!far_sideways && std::abs(me.y - p.y) > 20.0)
     {
@@ -5616,7 +5659,9 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
     if (c.GetGoal().second <= 0)
     {
         const std::string block = item.substr(item.find(':') + 1);
-        c.SetGoal(block == "cobblestone" ? "stone,cobblestone" : block == "dirt" ? "dirt,grass_block" : block, 32);
+        // Any tree will do for logs: the plan takes another wood (see OtherWood)
+        c.SetGoal(block == "cobblestone" ? "stone,cobblestone" : block == "dirt" ? "dirt,grass_block" :
+            EndsWith(block, "_log") ? "oak_log,spruce_log,birch_log,jungle_log,acacia_log,dark_oak_log,mangrove_log,cherry_log,pale_oak_log" : block, 32);
         c.explorations = 0;
     }
     c.SetNote("building: out of " + item + ", gathering more");
