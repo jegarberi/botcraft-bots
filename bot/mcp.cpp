@@ -6918,6 +6918,7 @@ static const char* tools_json = R"JSON([
 {"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds, crops, berry bushes and animals (mob:cow), with what the other bots reported (ores, logs, crops, berry bushes, animals). kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
 {"name":"schematic","description":"Materials and building plan of a structure from createmod.com. url: the link of a schematic page (https://createmod.com/schematics/<name>): returns its title, size, required mods and material list, and which materials this game does not have (blocks of other mods). The site gives the block-by-block file to players only, so the user downloads the .nbt from that page into bot/schematics/; then file=<name>.nbt returns the materials and the number of parts, and with x y z (the corner with the lowest coordinates) the team builds part `part` (default 1, 4000 blocks each, bottom up) there, gathering and crafting what it needs; blocks of other mods are left out.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"file":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"part":{"type":"number"}}}},
 {"name":"give","description":"The bot walks up to another player (a bot) and drops items at its feet, which it picks up. to: the player's name; item: an item id, food (anything edible) or wood (logs and planks), default food; count (default 16); x y z: where the player is, if out of sight.","inputSchema":{"type":"object","properties":{"to":{"type":"string"},"item":{"type":"string"},"count":{"type":"number"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["to"]}},
+{"name":"reconnect_all","description":"Every bot stores everything and disconnects, then the same bots join again 10 seconds apart, each from the binary on disk (a new build without stopping the program). Returns at once; it runs in the background.","inputSchema":{"type":"object","properties":{}}},
 {"name":"disconnect_all","description":"Every bot stores everything in the chests and disconnects, all at once. The program keeps running: connect brings bots back. None rejoins by itself.","inputSchema":{"type":"object","properties":{}}},
 {"name":"leader","description":"The leader the bots elected (every 10 Minecraft days, see the brain tool): it leads the team (the team tool's leader when none is given). With name, sets it.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
 {"name":"feeders","description":"Bots whose whole job is to feed the others: each hunts (cows, pigs, sheep in turn, from memory first), cuts wood, and takes food to the hungriest bot (food 8 or less), and logs to bots that have no wood. bots: their names, or count (default 3) to take the best fed ones; stop=true gives them back; with no argument, who they are and what they did.","inputSchema":{"type":"object","properties":{"bots":{"type":"array","items":{"type":"string"}},"count":{"type":"number"},"stop":{"type":"boolean"}}}},
@@ -7748,6 +7749,47 @@ static Value CallTool(const std::string& name, const Value& a)
         {
             return a["bot"].get_string() + " will not rejoin";
         }
+    }
+    if (name == "reconnect_all")
+    {
+        // In the background (storing everything takes minutes): every bot leaves, then the same names join
+        // again 10 seconds apart (the server throttles joins). Each starts from the binary on disk: a new build
+        // without stopping the program
+        std::vector<std::string> names;
+        {
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            for (const BotSlot& slot : bots)
+            {
+                names.push_back(slot.bot->GetNetworkManager()->GetMyName());
+            }
+            for (const std::shared_ptr<Child>& child : children)
+            {
+                names.push_back(child->name);
+            }
+        }
+        std::thread([names]()
+            {
+                CallTool("disconnect_all", Value());
+                for (const std::string& who : names)
+                {
+                    if (stopping)
+                    {
+                        return;
+                    }
+                    Value args;
+                    args["name"] = who;
+                    try
+                    {
+                        CallTool("connect", args);
+                    }
+                    catch (const std::exception& e)
+                    {
+                        LOG_WARNING("reconnect_all: " << who << ": " << e.what());
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(10));
+                }
+            }).detach();
+        return "every bot stores everything, leaves and joins again, 10 seconds apart";
     }
     if (name == "disconnect_all")
     {

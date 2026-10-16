@@ -57,6 +57,7 @@
     <button>Team up</button>
     <button type="button" id="disband">Disband</button>
     <button type="button" id="leave-all" title="Every bot stores everything in the chests, then disconnects">Store all &amp; disconnect every bot</button>
+    <button type="button" id="rejoin-all" title="Every bot stores everything, disconnects and joins again 10 seconds apart, from the binary on disk">Store all &amp; reconnect every bot</button>
   </form>
   <form class="row" id="schematic">
     <label for="schematic-source">Structure from createmod.com</label>
@@ -97,6 +98,7 @@ document.getElementById("schematic").onsubmit = e => {
 };
 document.getElementById("disband").onclick = () => call("team", { objective: "disband" });
 document.getElementById("leave-all").onclick = () => confirm("Every bot stores everything in the chests and disconnects. Go on?") && call("disconnect_all");
+document.getElementById("rejoin-all").onclick = () => confirm("Every bot stores everything, disconnects and joins again. Go on?") && call("reconnect_all");
 document.getElementById("connect").onsubmit = e => { e.preventDefault(); call("connect", { name: document.getElementById("name").value }); };
 
 function card(bot, tree) {

@@ -466,7 +466,7 @@ int main()
                 }
             };
         line(0, Column("🤖 botcraft  " + std::to_string(bots.size()) + " bots   ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
-            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  c 🔌 connect  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
+            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
         line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
         const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
@@ -601,6 +601,14 @@ int main()
             if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
             {
                 run("", "disconnect_all", args);
+            }
+        }
+        else if (key == 'R')
+        {
+            const std::string sure = ask("every bot stores everything, disconnects and joins again (a new build too)? (y/n) ");
+            if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
+            {
+                run("", "reconnect_all", args);
             }
         }
         else if (key == 'n')
