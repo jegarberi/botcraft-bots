@@ -18,7 +18,7 @@
 -- The groups are kept in a file and taken up again after a restart.
 local FILE = "../groups_job.lua"
 local ORES = "coal_ore,iron_ore,copper_ore,gold_ore,redstone_ore,lapis_ore,diamond_ore"
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
 
 local groups = nil          -- { bakers = {...}, farmers = {...}, ... } (TRADES)
 local notes = {}            -- name -> what it did last

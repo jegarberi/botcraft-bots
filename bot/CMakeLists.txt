@@ -27,3 +27,10 @@ target_link_libraries(bot_mcp PRIVATE botcraft PkgConfig::LUA PkgConfig::SQLITE)
 # The terminal panel: its own program, talks to bot_mcp through unix sockets (run/*.sock)
 add_executable(bot_tui tui.cpp)
 target_link_libraries(bot_tui PRIVATE protocolCraft PkgConfig::CURSES)
+
+add_executable(test_construction_policy EXCLUDE_FROM_ALL test_construction_policy.cpp)
+target_compile_features(test_construction_policy PRIVATE cxx_std_17)
+
+add_executable(test_spawn_names EXCLUDE_FROM_ALL test_spawn_names.cpp)
+target_compile_features(test_spawn_names PRIVATE cxx_std_17)
+target_compile_options(test_spawn_names PRIVATE -UNDEBUG)

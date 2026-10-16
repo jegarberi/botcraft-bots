@@ -1,12 +1,11 @@
 -- The bots' brain: a small neural network that picks each bot's trade every Minecraft day, trained by
 -- reinforcement on what the bot and the whole team achieved, and a vote for the leader every 10 days.
 --
--- The network (each bot its own; every 5 days the bot with the best average reward wins, and every other bot
--- goes on from a slightly mutated copy of the winner's: training plus evolution):
---   in   20 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
+-- Every bot has its own network; every 5 days the best two seed mutated copies for the others.
+--   in   23 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
 --        carries, how many bots are hungry, how the castle advanced, the trade it had (one-hot), a bias
---   ->   10 hidden units (tanh)
---   out  8 trades: baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer (softmax: how much it
+--   ->   three hidden layers of 10 units (tanh with residual connections)
+--   out  11 trades: baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer (softmax: how much it
 --        wants each); within its trade, the trade's own network picks what it does (the roles plugin)
 -- Every day: each bot draws a trade from its wants (that is the exploring), groups stay of two (the
 -- most decided bots get their choice first), and the groups plugin puts them to work.
@@ -26,15 +25,15 @@
 local FILE = "../brain_state.lua"
 -- The trades (in the places of the cooks, breeders and crafters before them: the networks' outputs keep their
 -- meaning; each trade has its own network for its actions, see the roles plugin)
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
-local IN, HID, OUT = 21, 10, 9
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
+local IN, HID, OUT = 23, 10, 11
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
 local VOTE_EVERY = 10
 local VALUE_RATE = 0.2        -- how fast the critic follows the rewards
 -- What a network is made of, sent with it: one of another shape is never merged into this one
-local ARCH = "brain:20x10x8+critic:v3"
-local GENERATION_DAYS = 5      -- each bot trains its own network; every 5 days the best one is copied to the others
+local ARCH = "brain:23x10x10x10x11+critic:community:v5"
+local GENERATION_DAYS = 5      -- every 5 days the best two seed the others
 local MUTATION = 0.05          -- with this much noise (a normal spread) on every weight of the copies
 
 local function call(tool, args)
@@ -70,6 +69,21 @@ end
 
 -- ---------------------------------------------------------------- the network
 -- Any size: the sizes are read from the network itself (the roles plugin uses the same code, global NN)
+-- Zero-initialized residual layers preserve the policy when upgrading saved networks.
+local function deepen(net)
+    if net.layers then return net end
+    net.layers = {}
+    for l = 1, 2 do
+        local layer = { w = {}, b = {} }
+        for h = 1, #net.w1 do
+            layer.w[h], layer.b[h] = {}, 0
+            for i = 1, #net.w1 do layer.w[h][i] = 0 end
+        end
+        net.layers[l] = layer
+    end
+    return net
+end
+
 local function new_network(n_in, n_hid, n_out, seed)
     n_in, n_hid, n_out = n_in or IN, n_hid or HID, n_out or OUT
     local rng = seed or 12345
@@ -91,7 +105,7 @@ local function new_network(n_in, n_hid, n_out, seed)
     -- The critic: what a day usually brings from such a situation (a linear head on the same hidden layer)
     net.v, net.vb = {}, 0
     for h = 1, n_hid do net.v[h] = 0 end
-    return net
+    return deepen(net)
 end
 
 local function copy_net(net)
@@ -106,6 +120,14 @@ local function copy_net(net)
         out.w2[o] = {}
         for h = 1, #net.w2[o] do out.w2[o][h] = net.w2[o][h] end
         out.b2[o] = net.b2[o]
+    end
+    out.layers = {}
+    for l, layer in ipairs(deepen(net).layers) do
+        out.layers[l] = { w = {}, b = {} }
+        for h, row in ipairs(layer.w) do
+            out.layers[l].w[h] = { table.unpack(row) }
+            out.layers[l].b[h] = layer.b[h]
+        end
     end
     return out
 end
@@ -124,7 +146,41 @@ local function mutated(net, sigma)
         for h = 1, #out.w2[o] do out.w2[o][h] = out.w2[o][h] + n() end
         out.b2[o] = out.b2[o] + n()
     end
+    for _, layer in ipairs(out.layers) do
+        for h, row in ipairs(layer.w) do
+            for i = 1, #row do row[i] = row[i] + n() end
+            layer.b[h] = layer.b[h] + n()
+        end
+    end
     return out
+end
+
+-- Keep the two best evaluated policies; alternate their mutated offspring among the rest.
+local function evolve_population(nets, fitness)
+    local ranking, names = {}, {}
+    for name in pairs(nets) do
+        names[#names + 1] = name
+        local f = fitness[name]
+        if f and f[2] > 0 then ranking[#ranking + 1] = { bot = name, fitness = f[1] / f[2] } end
+    end
+    table.sort(names)
+    table.sort(ranking, function(a, b)
+        if a.fitness ~= b.fitness then return a.fitness > b.fitness end
+        return a.bot < b.bot
+    end)
+    local parents, elite = {}, {}
+    for i = 1, math.min(2, #ranking) do
+        parents[i] = ranking[i].bot
+        elite[parents[i]] = copy_net(nets[parents[i]])
+    end
+    local child = 0
+    for _, name in ipairs(names) do
+        if #parents > 0 and not elite[name] then
+            child = child + 1
+            nets[name] = mutated(elite[parents[(child - 1) % #parents + 1]])
+        end
+    end
+    return ranking, parents
 end
 
 local function forward(net, x)
@@ -132,7 +188,19 @@ local function forward(net, x)
     for h = 1, #net.w1 do
         local s = net.b1[h]
         for i = 1, #net.w1[h] do s = s + net.w1[h][i] * (x[i] or 0) end
-        hidden[h] = math.tanh and math.tanh(s) or ((math.exp(s) - math.exp(-s)) / (math.exp(s) + math.exp(-s)))
+        hidden[h] = 2 / (1 + math.exp(-2 * s)) - 1
+    end
+    local activations = { hidden }
+    for _, layer in ipairs(deepen(net).layers) do
+        local next_hidden = {}
+        for h, row in ipairs(layer.w) do
+            local z = layer.b[h]
+            for i, w in ipairs(row) do z = z + w * hidden[i] end
+            -- Bounded residual branch; the identity path keeps old learning intact.
+            next_hidden[h] = hidden[h] + (2 / (1 + math.exp(-2 * z)) - 1)
+        end
+        hidden = next_hidden
+        activations[#activations + 1] = hidden
     end
     local logits, top = {}, -math.huge
     for o = 1, #net.w2 do
@@ -146,18 +214,18 @@ local function forward(net, x)
     for o = 1, #logits do p[o] = p[o] / sum end
     local value = net.vb or 0
     for h = 1, #hidden do value = value + (net.v and net.v[h] or 0) * hidden[h] end
-    return p, hidden, value
+    return p, hidden, value, activations
 end
 
 -- One step of actor-critic: the critic says what such a day usually brings; the chosen action's
 -- log-probability goes up by how much better the day was (the advantage), and the critic moves toward the
 -- reward. (REINFORCE with a learnt, situation-dependent baseline)
 local function learn(net, x, action, reward)
-    local p, hidden, value = forward(net, x)
+    local p, hidden, value, activations = forward(net, x)
     local advantage = reward - value
-    for h = 1, #hidden do net.v[h] = net.v[h] + VALUE_RATE * advantage * hidden[h] end
-    net.vb = net.vb + VALUE_RATE * advantage
     local clip = math.max(-2, math.min(2, advantage))
+    for h = 1, #hidden do net.v[h] = net.v[h] + VALUE_RATE * clip * hidden[h] end
+    net.vb = net.vb + VALUE_RATE * clip
     -- The policy gradient, plus the gradient of the entropy (how spread the wants are)
     local entropy = 0
     for o = 1, #p do entropy = entropy - p[o] * math.log(p[o] + 1e-12) end
@@ -167,10 +235,26 @@ local function learn(net, x, action, reward)
     end
     local dhidden = {}
     for h = 1, #hidden do
-        local s = 0
-        for o = 1, #p do s = s + net.w2[o][h] * dlogit[o] end
-        dhidden[h] = s * (1 - hidden[h] * hidden[h])
+        local z = 0
+        for o = 1, #p do z = z + net.w2[o][h] * dlogit[o] end
+        dhidden[h] = z
     end
+    for l = #net.layers, 1, -1 do
+        local layer, input, output = net.layers[l], activations[l], activations[l + 1]
+        local previous, delta = { table.unpack(dhidden) }, {}
+        for h, row in ipairs(layer.w) do
+            local branch = output[h] - input[h]
+            delta[h] = dhidden[h] * (1 - branch * branch)
+            for i, w in ipairs(row) do previous[i] = previous[i] + w * delta[h] end
+        end
+        for h, row in ipairs(layer.w) do
+            for i = 1, #row do row[i] = row[i] + LEARNING_RATE * delta[h] * input[i] end
+            layer.b[h] = layer.b[h] + LEARNING_RATE * delta[h]
+        end
+        dhidden = previous
+    end
+    local first = activations[1]
+    for h = 1, #first do dhidden[h] = dhidden[h] * (1 - first[h] * first[h]) end
     for o = 1, #p do
         for h = 1, #hidden do net.w2[o][h] = net.w2[o][h] + LEARNING_RATE * dlogit[o] * hidden[h] end
         net.b2[o] = net.b2[o] + LEARNING_RATE * dlogit[o]
@@ -191,11 +275,42 @@ local function grown(net, n_in, n_out)
         fresh.v[h] = net.v and net.v[h] or 0
     end
     fresh.vb = net.vb or 0
-    for o = 1, math.min(n_out, #net.w2) do fresh.w2[o], fresh.b2[o] = net.w2[o], net.b2[o] end
+    for o = 1, math.min(n_out, #net.w2) do fresh.w2[o], fresh.b2[o] = { table.unpack(net.w2[o]) }, net.b2[o] end
+    fresh.layers = copy_net(net).layers
     return fresh
 end
 
-NN = { new = new_network, copy = copy_net, mutated = mutated, forward = forward, learn = learn, serialize = serialize }
+NN = { evolve = evolve_population, new = new_network, copy = copy_net, mutated = mutated, forward = forward, learn = learn, serialize = serialize, grow = grown, deepen = deepen }
+
+local EDIBLE = {}
+for item in ("bread pumpkin_pie apple golden_apple carrot golden_carrot potato baked_potato beetroot beetroot_soup mushroom_stew rabbit_stew sweet_berries glow_berries melon_slice dried_kelp cooked_beef cooked_porkchop cooked_mutton cooked_chicken cooked_rabbit cooked_cod cooked_salmon beef porkchop mutton chicken rabbit cod salmon cookie honey_bottle"):gmatch("%S+") do EDIBLE[item] = true end
+local function condition(st)
+    local foods, best = 0, {}
+    local function gear(item)
+        local material, kind = item:match("^(%a+)_(%a+)$")
+        local tier = ({ wooden = 1, leather = 1, golden = 1, stone = 2, chainmail = 2, iron = 3, diamond = 4, netherite = 5 })[material]
+        if tier and ({ pickaxe = true, axe = true, sword = true, shovel = true, hoe = true, helmet = true, chestplate = true, leggings = true, boots = true })[kind] then
+            best[kind] = math.max(best[kind] or 0, tier)
+        end
+    end
+    for item, count in pairs(type(st.inventory) == "table" and st.inventory or {}) do
+        if count > 0 then if EDIBLE[item] then foods = foods + 1 end; gear(item) end
+    end
+    for _, item in pairs(type(st.equipment) == "table" and st.equipment or {}) do if type(item) == "string" then gear(item) end end
+    local quality = 0
+    for _, tier in pairs(best) do quality = quality + tier end
+    return { variety = foods, quality = quality, health = st.health or 20, food = st.food or 20,
+        at = os.time(), deaths = st.deaths or 0 }
+end
+local function living_reward(before, now)
+    if not before then return 0 end
+    local survived = now.deaths == before.deaths
+    local duration = math.max(0, math.min(300, now.at - before.at)) / 300
+    return (survived and duration * math.min(now.health, now.food) / 20 or 0)
+        + 2 * (now.variety - before.variety) + 3 * (now.quality - before.quality)
+        + (now.health - before.health) / 4 + (now.food - before.food) / 4
+end
+NN.condition, NN.living_reward, NN.edible = condition, living_reward, EDIBLE
 
 -- ---------------------------------------------------------------- what the bots see
 local function inventory_count(st, test)
@@ -210,7 +325,7 @@ local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
 local INPUT_NAMES = { "bias", "health", "food level", "has pickaxe", "has axe", "has sword", "has hoe", "food carried", "wood carried",
-    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer", "was fisher" }
+    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer", "was fisher", "was lumberjack", "was carpenter" }
 
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end
@@ -260,7 +375,7 @@ local function own_score(now, before)
         local a, b = tonumber(now[key]) or 0, tonumber(before and before[key]) or 0
         return a >= b and a - b or a
     end
-    return score - 20 * delta("deaths") - 2 * delta("times_stuck")
+    return score + living_reward(before and before.living, condition(now)) - 40 * delta("deaths") - 2 * delta("times_stuck")
 end
 
 -- ---------------------------------------------------------------- the state
@@ -288,7 +403,7 @@ local state = restore() or {
 local function snapshot(st)
     local stats = {}
     for k, v in pairs(st.stats or {}) do stats[k] = v end
-    return { stats = stats, deaths = st.deaths or 0, times_stuck = st.times_stuck or 0 }
+    return { stats = stats, deaths = st.deaths or 0, times_stuck = st.times_stuck or 0, living = condition(st) }
 end
 
 local function statuses()
@@ -312,24 +427,15 @@ local function net_of(name)
     return state.nets[name]
 end
 
--- The end of a generation: the bot with the best average reward wins; its network becomes the champion
--- and every other bot continues from a slightly mutated copy of it
+-- The best two bots seed the next generation, preserving both parents unchanged.
 local function evolve()
-    local best, best_fit, ranking = nil, -math.huge, {}
-    for name, f in pairs(state.fitness or {}) do
-        local avg = f[2] > 0 and f[1] / f[2] or -math.huge
-        ranking[#ranking + 1] = { bot = name, fitness = avg }
-        if state.nets[name] and avg > best_fit then best, best_fit = name, avg end
-    end
+    local ranking, parents = evolve_population(state.nets, state.fitness or {})
     state.fitness = {}
-    if not best then return end
-    table.sort(ranking, function(a, b) return a.fitness > b.fitness end)
-    state.net = copy_net(state.nets[best])
-    for name in pairs(state.nets) do
-        if name ~= best then state.nets[name] = mutated(state.net) end
-    end
+    if #parents == 0 then return end
+    state.net = copy_net(state.nets[parents[1]])
     state.generation = (state.generation or 0) + 1
-    state.last_generation = { generation = state.generation, day = state.day, winner = best, fitness = best_fit, ranking = ranking }
+    state.last_generation = { generation = state.generation, day = state.day, winner = parents[1], winners = parents,
+        fitness = ranking[1].fitness, ranking = ranking }
 end
 
 -- Which bot does what today: each draws from its wants, the most decided first, two to a trade (15 bots, 8 trades)
@@ -507,7 +613,7 @@ end
 local busy = false
 local loaded_at = os.time()
 -- A network saved smaller (before the critic, before the 8 trades) grows to the current shape
-local function fit(net) return (#net.w2 == OUT and #net.w1[1] == IN and net.v) and net or grown(net, IN, OUT) end
+local function fit(net) return (#net.w2 == OUT and #net.w1[1] == IN and net.v) and deepen(net) or grown(net, IN, OUT) end
 state.net = fit(state.net)
 for name, net in pairs(state.nets or {}) do state.nets[name] = fit(net) end
 for _, cp in ipairs(state.checkpoints or {}) do cp.net = fit(cp.net) end
@@ -548,6 +654,12 @@ local function flatten(net)
     for o = 1, OUT do for h = 1, HID do w[#w + 1] = net.w2[o][h] end; w[#w + 1] = net.b2[o] end
     for h = 1, HID do w[#w + 1] = net.v[h] end
     w[#w + 1] = net.vb
+    for _, layer in ipairs(net.layers) do
+        for h, row in ipairs(layer.w) do
+            for _, value in ipairs(row) do w[#w + 1] = value end
+            w[#w + 1] = layer.b[h]
+        end
+    end
     return w
 end
 
@@ -575,6 +687,12 @@ local function merge(w, samples, origin, arch)
     for o = 1, OUT do for h = 1, HID do net.w2[o][h] = step(net.w2[o][h]) end; net.b2[o] = step(net.b2[o]) end
     for h = 1, HID do net.v[h] = step(net.v[h]) end
     net.vb = step(net.vb)
+    for _, layer in ipairs(net.layers) do
+        for h, row in ipairs(layer.w) do
+            for i = 1, #row do row[i] = step(row[i]) end
+            layer.b[h] = step(layer.b[h])
+        end
+    end
     local worst, worst_fit = nil, math.huge
     for name in pairs(state.nets or {}) do
         local f = (state.fitness or {})[name]
@@ -595,7 +713,7 @@ end
 
 bot.tool{
     name = "brain",
-    description = "The bots' brain: a small neural network (20 inputs about the bot and the team, 10 hidden, 8 outputs) of its own (every 5 days the best-scoring bot's is copied, slightly mutated, to all the others) picks each bot's trade every Minecraft day (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer; groups of two; each trade's own network then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
+    description = "The bots' brain: a small neural network (23 inputs about the bot and the team, three hidden layers of 10 units, 11 outputs) of its own (every 5 days the two best-scoring bots seed slightly mutated copies for the others) picks each bot's trade every Minecraft day (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer, fisher; groups of two; each bot's own policy for its trade then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
     params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number", network = "string" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in
@@ -632,7 +750,7 @@ bot.tool{
             local list, hungry = statuses(), 0
             for _, o in ipairs(list) do if (o.food or 20) <= 8 then hungry = hungry + 1 end end
             local x = features(st, state.trades[st.name] or 5, { hungry = hungry / math.max(1, #list), castle = 0 })
-            local p, hidden, value = forward(net, x)
+            local p, hidden, value, activations = forward(net, x)
             local inputs, outputs = {}, {}
             for i = 1, IN do inputs[i] = { name = INPUT_NAMES[i], value = x[i] } end
             for o = 1, OUT do outputs[o] = { name = TRADES[o], percent = math.floor(p[o] * 1000 + 0.5) / 10, bias = net.b2[o] } end
@@ -641,7 +759,7 @@ bot.tool{
                 fitness = f and f[2] > 0 and f[1] / f[2] or nil, days_in_generation = f and f[2] or 0,
                 champion = state.last_generation and state.last_generation.winner or nil,
                 inputs = inputs, hidden = hidden, hidden_bias = net.b1, outputs = outputs, value = value,
-                w1 = net.w1, w2 = net.w2, v = net.v, vb = net.vb,
+                w1 = net.w1, w2 = net.w2, v = net.v, vb = net.vb, layers = net.layers, activations = activations,
                 -- Its trade's own network (the roles plugin), with what it makes of the bot now
                 role_network = call("roles", { network = TRADES[state.trades[st.name] or 5], bot = st.name }) }
         end

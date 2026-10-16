@@ -13,6 +13,9 @@ remembers what it was doing across restarts. Together they build a castle (see `
     ./run.sh --headless --tui  # the same, but closing the panel stops the bots (they store their items first)
     ./run.sh --bots 15 --delay 8 --autopilot --chests --bind 0.0.0.0
 
+The web panel has a “Spawn additional bots” count; in the terminal panel press `C` and enter a count.
+Both queue 1–100 additional bots with unused `BotN` names and the configured delay between joins.
+
 The terminal panel is its own program, `bot/bin/bot_tui`: open it from any terminal while the bots run. It talks
 to the program and to each bot over unix sockets (`bot/run/.program.sock`, `bot/run/<name>.sock`, JSON-RPC lines
 as on stdin), so it can come and go without touching the bots; `Q` in it stops the program.
@@ -42,3 +45,23 @@ remembers seeing, and its decision tree with the branch it is on.
   `./run.sh --empire` plays from the start, `./run.sh --village` too, a house for every bot first, then its trade)
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
+
+## Neural policies
+
+Each bot has its own trade-selection network (23 inputs, three hidden layers of 10 units) and its own
+action policy for each trade (20 inputs and three hidden layers of 8 units), including whether a build is active, its remaining blocks,
+and how long it has been idle. Both use actor-critic learning and residual hidden layers; old saved
+weights migrate with neutral added layers, and new actions are appended to preserve existing action indices.
+Builders and miners can gather construction stone and logs, builders and blacksmiths can make storage
+chests, bakers can cook available food, and blacksmiths can make and distribute building axes.
+The web and terminal network views show all three layers. Peer learning requires the same architecture.
+Every five game days, the two policies with the best average reward are kept unchanged; the others receive
+independent copies of either parent with small mutations (Gaussian noise, standard deviation 0.05).
+Action policies compete within the same trade, since different trades have different actions. Their evolution
+continues in village/empire mode, which controls trade assignments while enabled. Old shared action policies
+seed individual policies without discarding their learned weights.
+
+Village construction reserves supply workers, prioritizes feeding hungry teammates, and allows shops to start
+as their own builders finish their homes. Roads share saved elevations and use stone stairs on slopes, with a
+longer approach when needed. Unloaded terrain waits for a survey; failed placements remain pending and retry.
+Completion requires the named build to be verified complete, rather than merely idle.

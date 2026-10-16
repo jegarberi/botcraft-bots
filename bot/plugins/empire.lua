@@ -23,7 +23,7 @@
 --   empire { village = true }   a house for every bot, then its trade (starts playing if it was not)
 --   empire { stop = true }      stop: the groups stay, the brain works again
 local FILE = "../empire_job.lua"
-local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers" }
+local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
 local RESOURCES = { "food", "wood", "stone", "ore" }
 -- Each age: its cost (to reach it) and how many bots of every 15 work in each trade
 local AGES = {
@@ -37,7 +37,7 @@ local AGES = {
       mix = { farmers = 2, bakers = 2, butchers = 1, builders = 3, miners = 2, blacksmiths = 1, explorers = 1, soldiers = 3, fishers = 1 } },
 }
 -- The trades that bring in each resource: the one the next age lacks most gets 2 more bots' weight in each
-local NEED = { food = { "farmers", "bakers", "fishers" }, wood = { "builders", "explorers" }, stone = { "builders", "miners" }, ore = { "miners" } }
+local NEED = { food = { "farmers", "bakers", "fishers" }, wood = { "lumberjacks", "carpenters" }, stone = { "builders", "miners" }, ore = { "miners" } }
 -- who: the trade that makes it; item and count: what each of them is told to make
 local TECHS = {
     { name = "Stone Tools", age = 2, cost = { wood = 32, stone = 48 }, who = "blacksmiths", item = "stone_pickaxe", count = 4 },
@@ -99,7 +99,8 @@ do
         -- After a restart no bot has its build order any more, and "not building, nothing left" looked like a building
         -- finished: every unfinished one is handed out again, a house whose road was under way checked first
         for _, w in pairs(state.village or {}) do
-            if not w.done then w.handed, w.started, w.recheck = nil, false, w.road end
+            if w.road and w.road_plan ~= 2 then w.done = nil end
+            if not w.done then w.handed, w.started, w.recheck, w.offset = nil, false, w.road, nil end
         end
         for _, w in pairs(state.shops or {}) do if not w.done then w.handed, w.started = 0, false end end
         if state.work then state.work.handed, state.work.started = 0, false end
@@ -126,6 +127,7 @@ local function pay(cost) for r, n in pairs(cost) do state.stock[r] = state.stock
 
 -- The bots' inventories now: what rose since the last look goes to the stock
 local function gather(names)
+    looks = {}
     for _, name in ipairs(names) do
         local st = call("status", { bot = name })
         if type(st) == "table" and type(st.inventory) == "table" then
@@ -147,6 +149,7 @@ end
 local function targets(n)
     local mix = {}
     for t, w in pairs(AGES[state.age].mix) do mix[t] = w end
+    mix.lumberjacks, mix.carpenters = 2, 1
     local next_age = AGES[state.age + 1]
     if next_age then
         local worst, short = nil, 0
@@ -173,6 +176,7 @@ end
 
 -- What makes a bot fit for a trade: the tools and things it carries (ends of item names)
 local FIT = {
+    lumberjacks = { "_axe", "_log", "_sapling" }, carpenters = { "_planks", "_stairs", "chest", "stick" },
     soldiers = { "_sword", "_chestplate", "_helmet", "shield" }, miners = { "_pickaxe", "torch", "raw_iron", "coal" },
     farmers = { "_hoe", "wheat_seeds", "egg", "milk_bucket", "pumpkin" }, butchers = { "beef", "porkchop", "mutton", "leather", "shears", "wool" },
     bakers = { "wheat", "bread", "pumpkin_pie", "cake" }, builders = { "cobblestone", "_planks", "_log" },
@@ -191,6 +195,7 @@ end
 -- in its trade counts for 1: a move costs the work under way). It is a builder itself, the berry picker a farmer, the explorer
 -- (castle { action = "explore" }) an explorer.
 -- No leader yet: the first bot leads.
+local support = {}
 local function split(names)
     local want = targets(#names)
     local leader = call("leader", {})
@@ -203,6 +208,7 @@ local function split(names)
     if type(picker) == "table" and picker.bot and picker.bot ~= leader then keep[picker.bot] = "farmers" end
     local explorer = call("castle", { action = "explore" })      -- the road builder of castle { action = "explore" }
     if type(explorer) == "table" and explorer.bot and explorer.bot ~= leader then keep[explorer.bot] = "explorers" end
+    for n, role in pairs(support) do keep[n] = role end
     local was = {}
     for t, list in pairs(state.groups or {}) do for _, n in ipairs(list) do was[n] = t end end
     local g, placed, pairs_ = {}, {}, {}
@@ -339,8 +345,20 @@ local BUILDINGS = {
 -- the first free one in reading order
 -- (Down to 80 below: the town's height came from where the leader stood, once 50 up on a hill.) Also whether it
 -- found the ground: not in a chunk no bot sees
+local function observer(x, z)
+    local best, distance
+    for name, st in pairs(looks) do
+        local p = st.position
+        if p then
+            local d = (p.x - x) ^ 2 + (p.z - z) ^ 2
+            if not distance or d < distance then best, distance = name, d end
+        end
+    end
+    return best
+end
+
 local function block_at(x, y, z)
-    local r = call("get_block", { x = x, y = y, z = z })
+    local r = call("get_block", { bot = observer(x, z), x = x, y = y, z = z })
     return type(r) == "table" and tostring(r.block or "") or ""
 end
 
@@ -351,8 +369,13 @@ local function is_ground(name)
 end
 
 local function ground(x, z, from)
-    for y = from + 24, from - 80, -1 do
-        if is_ground(block_at(x, y, z)) then return y + 1, true end
+    local y, bottom = from + 24, from - 80
+    while y >= bottom do
+        local r = call("get_block", { bot = observer(x, z), x = x, y = y, z = z, y_min = bottom })
+        if type(r) ~= "table" then return from, false end
+        y = tonumber(r.y) or y
+        if is_ground(tostring(r.block or "")) then return y + 1, true end
+        y = y - 1
     end
     return from, false
 end
@@ -411,10 +434,44 @@ end
 
 -- A bot of the village still building its house: no trade, no other building for it until then
 -- (or putting up its trade's shop)
+local function supply_crew(names)
+    support = {}
+    if not state.village then return end
+    local pending, candidates = 0, {}
+    for _, n in ipairs(names) do
+        local h = state.village[n] or {}
+        if not h.done then pending = pending + 1 end
+        candidates[#candidates + 1] = n
+    end
+    if pending == 0 then return end
+    -- Finished homeowners take over supply work, letting the last suppliers build their own homes.
+    table.sort(candidates, function(a, b)
+        local ah, bh = state.village[a] or {}, state.village[b] or {}
+        if not not ah.done ~= not not bh.done then return not not ah.done end
+        local ap, bp = state.support and state.support[a], state.support and state.support[b]
+        if not not ap ~= not not bp then return not not ap end
+        return a > b
+    end)
+    local roles = {}
+    for _ = 1, math.max(1, math.ceil(#names / 15)) do
+        for _, role in ipairs({ "farmers", "bakers", "lumberjacks", "miners" }) do roles[#roles + 1] = role end
+    end
+    local unfinished = 0
+    for _, n in ipairs(candidates) do
+        if #roles == 0 then break end
+        local done = (state.village[n] or {}).done
+        if done or unfinished < pending - 1 then
+            support[n] = table.remove(roles, 1)
+            if not done then unfinished = unfinished + 1 end
+        end
+    end
+    state.support = support
+end
+
 local function homeless(n)
     local h = state.village and state.village[n]
     for _, w in pairs(state.shops or {}) do if w.bot == n and not w.done then return true end end
-    return h and not h.done
+    return h and not h.done and not support[n]
 end
 
 local function hand(w)
@@ -424,9 +481,25 @@ local function hand(w)
         local k = w.blocks[i][1] .. " " .. w.blocks[i][2] .. " " .. w.blocks[i][3]
         if not seen[k] then seen[k] = true; table.insert(blocks, 1, w.blocks[i]) end
     end
-    call("team_member", { bot = w.bot, objective = "build", plan = "blocks", members = { w.bot }, leader = w.bot, count = 1,
-        solo = true, name = w.name, blocks = blocks })
-    w.handed, w.started = os.time(), false
+    local part = {}
+    local first = (w.offset or 0) + 1
+    local last = math.min(#blocks, first + 4095)
+    for i = first, last do part[#part + 1] = blocks[i] end
+    local r, err = call("team_member", { bot = w.bot, objective = "build", plan = "blocks", members = { w.bot }, leader = w.bot, count = 1,
+        solo = true, name = w.name, blocks = part })
+    if r == nil then note("could not assign " .. w.name .. ": " .. tostring(err)); return false end
+    w.handed, w.started, w.batch_end, w.batch_total = os.time(), false, last, #blocks
+    return true
+end
+
+local function completed(w, st)
+    if st.build_done ~= true or st.build_name ~= w.name then return false end
+    if (w.batch_end or 0) < (w.batch_total or 0) then
+        w.offset = w.batch_end
+        hand(w)
+        return false
+    end
+    return true
 end
 
 -- A builder (never the leader nor the berry picker) for the building under way, the one it had if still here
@@ -492,13 +565,15 @@ end
 
 -- Each trade's shop, in the village: a hut with its sign and what the trade works with
 local SHOPS = {
+    lumberjacks = { "Lumber Yard", { { 1, 0, 1, "chest" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "oak_log" } } },
+    carpenters = { "Carpentry", { { 1, 0, 1, "crafting_table" }, { 3, 0, 1, "chest" }, { 5, 0, 1, "barrel" } } },
     bakers = { "Bakery", { { 1, 0, 1, "furnace" }, { 2, 0, 1, "smoker" }, { 4, 0, 1, "crafting_table" }, { 5, 0, 1, "barrel" },
         { 1, 0, 3, "hay_block" }, { 5, 0, 3, "chest" } } },
     farmers = { "Farm Store", { { 1, 0, 1, "composter" }, { 2, 0, 1, "hay_block" }, { 3, 0, 1, "hay_block" }, { 5, 0, 1, "barrel" },
         { 1, 0, 3, "carved_pumpkin" }, { 5, 0, 3, "chest" } } },
     butchers = { "Butcher's", { { 1, 0, 1, "smoker" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "barrel" }, { 1, 0, 3, "chest" },
         { 5, 0, 3, "white_wool" } } },
-    miners = { "Mining Office", { { 1, 0, 1, "furnace" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "chest" }, { 1, 0, 3, "iron_ore" },
+    miners = { "Mining Office", { { 1, 0, 1, "furnace" }, { 3, 0, 1, "crafting_table" }, { 5, 0, 1, "chest" }, { 1, 0, 3, "raw_iron_block" },
         { 5, 0, 3, "coal_block" } } },
     fishers = { "Fish Market", { { 1, 0, 1, "smoker" }, { 2, 0, 1, "barrel" }, { 3, 0, 1, "barrel" }, { 5, 0, 1, "chest" },
         { 1, 0, 3, "cauldron" }, { 5, 0, 3, "crafting_table" } } },
@@ -511,32 +586,140 @@ local function shop(o, trade)
     return with(b, o, { { 2, -1, 5, "cobblestone" }, { 2, 0, 5, "oak_sign|" .. name .. "|" } }), name
 end
 
--- A bot's road, once its house stands: from its door south to the street in front of its row of lots (past the
--- deepest building, the Wonder), along the street west to the town's edge and up that edge to the first row, so
--- every house is joined to every other. Cobblestone with the space over it cleared.
--- ponytail: at the height of its own house, so two houses' roads meet with a step on a slope; a ground() per
--- column would follow the land at 48 get_block calls each
+-- Shared columns are saved with the town: every builder uses the same heights and stairs.
+local ROAD_PLAN = 2
 local function road(o)
-    local b, t = {}, state.town
-    local function pave(x, z)
-        b[#b + 1] = { x, o.y - 1, z, "stone" }; b[#b + 1] = { x, o.y, z, "air" }; b[#b + 1] = { x, o.y + 1, z, "air" }
+    local t = state.town
+    local function plan(switchback)
+        local nodes, route = {}, {}
+        local function key(x, z) return x .. "," .. z end
+        local function node(x, z)
+            local k = key(x, z)
+            if not nodes[k] then
+                local old = (state.roads or {})[k]
+                local h, known
+                if old then h, known = old.h, true else h, known = ground(x, z, t.y) end
+                if not known then error("road ground is not loaded at " .. x .. " " .. z, 0) end
+                nodes[k] = { x = x, z = z, h = h, ground = old and old.ground or h, fixed = old and old.h, item = old and old.item, edges = {} }
+            end
+            route[k] = true
+            return nodes[k]
+        end
+        local function link(a, b)
+            a.edges[key(b.x, b.z)], b.edges[key(a.x, a.z)] = b, a
+        end
+        local function line(x1, z1, x2, z2)
+            local n = math.max(math.abs(x2 - x1), math.abs(z2 - z1))
+            local prev
+            for i = 0, n do
+                local p = node(x1 + (x2 - x1) * i // math.max(1, n), z1 + (z2 - z1) * i // math.max(1, n))
+                if prev then link(prev, p) end
+                prev = p
+            end
+        end
+        -- Streets have two lanes, with cross-links so both sides remain walkable.
+        for z = t.z + 14, o.z + 15 do
+            local a, b = node(t.x - 2, z), node(t.x - 1, z)
+            link(a, b)
+            if z > t.z + 14 then link(a, node(t.x - 2, z - 1)); link(b, node(t.x - 1, z - 1)) end
+        end
+        local end_x = o.x + (switchback and 15 or 3)
+        for x = t.x - 2, end_x do
+            local a, b = node(x, o.z + 14), node(x, o.z + 15)
+            link(a, b)
+            if x > t.x - 2 then link(a, node(x - 1, o.z + 14)); link(b, node(x - 1, o.z + 15)) end
+        end
+        if switchback then
+            line(o.x + 3, o.z + 6, o.x + 3, o.z + 8)
+            line(o.x + 3, o.z + 8, o.x + 15, o.z + 8)
+            line(o.x + 15, o.z + 8, o.x + 15, o.z + 10)
+            line(o.x + 15, o.z + 10, o.x + 3, o.z + 10)
+            line(o.x + 3, o.z + 10, o.x + 3, o.z + 12)
+            line(o.x + 3, o.z + 12, o.x + 15, o.z + 12)
+            line(o.x + 15, o.z + 12, o.x + 15, o.z + 14)
+        else
+            line(o.x + 3, o.z + 6, o.x + 3, o.z + 14)
+        end
+        local door = node(o.x + 3, o.z + 6)
+        if door.fixed and door.fixed ~= o.y then error("existing road disagrees with the doorway", 0) end
+        door.fixed = o.y
+        -- Lower/upper bounds spread from saved roads and the doorway, one block per step.
+        for _, p in pairs(nodes) do p.lo, p.hi = p.fixed or -math.huge, p.fixed or math.huge end
+        local changed = true
+        while changed do
+            changed = false
+            for _, p in pairs(nodes) do
+                for _, q in pairs(p.edges) do
+                    local lo, hi = math.max(p.lo, q.lo - 1), math.min(p.hi, q.hi + 1)
+                    if lo > hi then error("slope needs a longer approach", 0) end
+                    if lo ~= p.lo or hi ~= p.hi then p.lo, p.hi, changed = lo, hi, true end
+                end
+            end
+        end
+        for _, p in pairs(nodes) do p.h = math.max(p.lo, math.min(p.hi, p.h)) end
+        changed = true
+        while changed do
+            changed = false
+            for _, p in pairs(nodes) do
+                for _, q in pairs(p.edges) do
+                    if p.h > q.h + 1 then p.h, changed = q.h + 1, true end
+                end
+            end
+        end
+        -- A stair cannot face two uphill exits: flatten that junction and its approaches.
+        changed = true
+        while changed do
+            changed = false
+            for _, p in pairs(nodes) do
+                local high, required = 0, p.h
+                for _, q in pairs(p.edges) do
+                    if q.h > p.h then high = high + 1 end
+                    required = math.max(required, q.h - 1)
+                end
+                if high > 1 and not p.fixed then required = math.max(required, p.h + 1) end
+                if required > p.h then
+                    if required > p.hi then error("slope needs a longer approach", 0) end
+                    p.h, changed = required, true
+                end
+            end
+        end
+        local blocks, saved = {}, {}
+        local keys = {}
+        for k in pairs(route) do keys[#keys + 1] = k end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local p = nodes[k]
+            local item = p.item or "air"
+            if not p.item then
+                for _, q in pairs(p.edges) do
+                    if q.h > p.h then
+                        local facing = q.x > p.x and "east" or q.x < p.x and "west" or q.z > p.z and "south" or "north"
+                        item = "stone_stairs[facing=" .. facing .. ",half=bottom]"
+                        break
+                    end
+                end
+            end
+            for y = math.min(p.ground - 1, p.h - 1), p.h - 1 do blocks[#blocks + 1] = { p.x, y, p.z, "stone" } end
+            blocks[#blocks + 1] = { p.x, p.h, p.z, item }
+            for y = p.h + 1, math.max(p.h + 2, p.ground + 1) do blocks[#blocks + 1] = { p.x, y, p.z, "air" } end
+            if p.z >= o.z + 14 and (p.x - t.x) % 7 == 0 then
+                local lamp = key(p.x, p.z + 1)
+                if not route[lamp] and not (state.roads or {})[lamp] then
+                    blocks[#blocks + 1] = { p.x, p.h - 1, p.z + 1, "stone" }
+                    blocks[#blocks + 1] = { p.x, p.h, p.z + 1, "cobblestone_wall" }
+                    blocks[#blocks + 1] = { p.x, p.h + 1, p.z + 1, "torch" }
+                end
+            end
+            saved[k] = { h = p.h, ground = p.ground, item = item }
+        end
+        return blocks, saved
     end
-    -- A lamp post beside the road every 7 blocks: a stone fence (cobblestone wall) with a torch on top, on the
-    -- town's grid so that the roads sharing a stretch put theirs on the same spots
-    local function post(x, z)
-        b[#b + 1] = { x, o.y - 1, z, "stone" }; b[#b + 1] = { x, o.y, z, "cobblestone_wall" }; b[#b + 1] = { x, o.y + 1, z, "torch" }
-    end
-    for z = o.z + 7, o.z + 13 do pave(o.x + 3, z) end
-    post(o.x + 4, o.z + 10)
-    for x = t.x - 2, o.x + 3 do
-        pave(x, o.z + 14); pave(x, o.z + 15)
-        if (x - t.x) % 7 == 0 then post(x, o.z + 16) end
-    end
-    for z = t.z + 14, o.z + 15 do
-        pave(t.x - 2, z); pave(t.x - 1, z)
-        if (z - t.z) % 7 == 0 then post(t.x - 3, z) end
-    end
-    return b
+    local ok, blocks, columns = pcall(plan, false)
+    if not ok then ok, blocks, columns = pcall(plan, true) end
+    if not ok then return nil, blocks end
+    state.roads = state.roads or {}
+    for k, v in pairs(columns) do state.roads[k] = v end
+    return blocks
 end
 
 -- The village: a house for each bot (a lot of the town), handed as its own solo build order, watched like the
@@ -587,39 +770,53 @@ local function homes(names, now)
             state.village[n] = h
         end
         if h.recheck then
-            h.road, h.recheck, h.name, h.blocks = nil, nil, n .. "'s house", home(h.at, n)
+            h.road, h.recheck, h.name, h.blocks, h.offset = nil, nil, n .. "'s house", home(h.at, n), nil
         end
         local st = looks[n]
         if (h.road or h.done) and not h.homed then
             -- Its bed (the head, at the house's north-west corner): slept in every night from now on
             h.homed = call("home", { bot = n, x = h.at.x + 1, y = h.at.y, z = h.at.z + 1 }) ~= nil
         end
-        if h.done or (state.work and state.work.bot == n) then
+        if support[n] then
+            h.handed, h.started = nil, false
+        elseif h.done or (state.work and state.work.bot == n) then
             -- built, or putting up the empire's building first
         elseif not h.handed then
             hand(h)
             note(n .. " builds its house at " .. h.at.x .. " " .. h.at.z)
         elseif type(st) == "table" then
             if st.building then h.started = true end
-            if h.started and not st.building and (st.build_left or 0) == 0 then
+            if completed(h, st) then
                 if not h.road then
-                    h.road, h.name, h.blocks = true, n .. "'s road", road(h.at)
-                    hand(h)
-                    announce(n .. " built its house at " .. h.at.x .. " " .. h.at.z .. ", now its road")
+                    local blocks, err = road(h.at)
+                    if blocks then
+                        h.road, h.name, h.blocks, h.road_plan, h.offset = true, n .. "'s road", blocks, ROAD_PLAN, nil
+                        hand(h)
+                        announce(n .. " built its house at " .. h.at.x .. " " .. h.at.z .. ", now its road")
+                    else
+                        note(n .. " waits for its road: " .. tostring(err))
+                        local x, z = tostring(err):match("not loaded at (-?%d+) (-?%d+)")
+                        if x and now - (h.survey_at or 0) >= 600 then
+                            h.survey_at = now
+                            call("travel", { bot = n, x = tonumber(x), z = tonumber(z) })
+                        end
+                    end
                 else
                     h.done, h.blocks, last_split = true, nil, 0       -- the blocks only weigh on the saved file now
                     note(n .. " paved its road")
                 end
-            elseif now - h.handed >= 600 and not st.building then
+            elseif now - h.handed >= 600 and (not st.building or st.build_name ~= h.name) then
                 hand(h)     -- the order was lost: again
             end
         end
     end
-    -- Every house up: each trade's shop, built by the first bot of that trade
-    for _, n in ipairs(names) do if not (state.village[n] or {}).done then return end end
+    -- A trade can open its shop as soon as one of its homeowners is free.
     state.shops = state.shops or {}
     for trade in pairs(SHOPS) do
-        local w, who = state.shops[trade], ((state.groups or {})[trade] or {})[1]
+        local w, who = state.shops[trade], nil
+        for _, n in ipairs((state.groups or {})[trade] or {}) do
+            if (state.village[n] or {}).done and not homeless(n) and not (state.work and state.work.bot == n) then who = n; break end
+        end
         if not w and who then
             local at = lot(call("leader", {}))
             local blocks, name = shop(at, trade)
@@ -629,13 +826,17 @@ local function homes(names, now)
             announce(who .. " builds the " .. name .. " at " .. at.x .. " " .. at.z)
             last_split = 0
         elseif w and not w.done then
+            if not looks[w.bot] and who then
+                w.bot, w.handed, w.started = who, nil, false
+                hand(w)
+            end
             local st = looks[w.bot]
             if type(st) == "table" then
                 if st.building then w.started = true end
-                if w.started and not st.building and (st.build_left or 0) == 0 then
+                if completed(w, st) then
                     w.done, w.blocks, last_split = true, nil, 0
                     announce("the " .. w.name .. " is open at " .. w.at.x .. " " .. w.at.z)
-                elseif now - w.handed >= 600 and not st.building then
+                elseif now - (w.handed or 0) >= 600 and (not st.building or st.build_name ~= w.name) then
                     hand(w)
                 end
             end
@@ -652,14 +853,14 @@ local function construct(names, now)
         local st = looks[w.bot]
         if here and type(st) == "table" then
             if st.building then w.started = true end
-            if w.started and not st.building and (st.build_left or 0) == 0 then
+            if completed(w, st) then
                 state.built[w.name] = (state.built[w.name] or 0) + 1
                 announce(w.bot .. " built " .. (w.name == "Wonder" and "a Wonder: we win!" or ("a " .. w.name)) ..
                     " at " .. w.at.x .. " " .. w.at.z)
                 state.work, last_split = nil, 0
                 return
             end
-            if now - w.handed >= 600 and not st.building then hand(w) end     -- the order was lost: again
+            if now - (w.handed or 0) >= 600 and (not st.building or st.build_name ~= w.name) then hand(w) end     -- the order was lost: again
         else
             local leader = call("leader", {})
             w.bot = worker(names, leader)
@@ -686,6 +887,7 @@ local function play(now)
     for _, b in ipairs(call("bots", {}) or {}) do names[#names + 1] = b.name end
     if #names == 0 then return end
     gather(names)
+    supply_crew(names)
     homes(names, now)
     construct(names, now)
     local next_age = AGES[state.age + 1]
@@ -765,8 +967,12 @@ end)
 bot.tool{
     name = "empire",
     description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name; it sleeps there every night), then a road joining it to the others, and then take a trade; once every house stands, each trade's shop goes up (bakery, farm store, butcher's, mining office, smithy) (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
-    params = { start = "boolean", stop = "boolean", village = "boolean" },
+    params = { start = "boolean", stop = "boolean", village = "boolean", residence = "string" },
     run = function(args)
+        if args.residence then
+            local h = state.village and state.village[args.residence]
+            return h and { at = h.at, ready = h.road or h.done or false } or {}
+        end
         if args.village then
             state.village = state.village or {}
             last_split = 0
