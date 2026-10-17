@@ -26,13 +26,13 @@ local FILE = "../brain_state.lua"
 -- The trades (in the places of the cooks, breeders and crafters before them: the networks' outputs keep their
 -- meaning; each trade has its own network for its actions, see the roles plugin)
 local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
-local IN, HID, OUT = 23, 10, 11
+local IN, HID, OUT, EXTRA_LAYERS = 44, 10, 11, 4
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
 local VOTE_EVERY = 10
 local VALUE_RATE = 0.2        -- how fast the critic follows the rewards
 -- What a network is made of, sent with it: one of another shape is never merged into this one
-local ARCH = "brain:23x10x10x10x11+critic:community:v5"
+local ARCH = "brain:44x10x10x10x10x10x11+critic:community:v6"
 local GENERATION_DAYS = 5      -- every 5 days the best two seed the others
 local MUTATION = 0.05          -- with this much noise (a normal spread) on every weight of the copies
 
@@ -71,9 +71,8 @@ end
 -- Any size: the sizes are read from the network itself (the roles plugin uses the same code, global NN)
 -- Zero-initialized residual layers preserve the policy when upgrading saved networks.
 local function deepen(net)
-    if net.layers then return net end
-    net.layers = {}
-    for l = 1, 2 do
+    net.layers = net.layers or {}
+    for l = #net.layers + 1, EXTRA_LAYERS do
         local layer = { w = {}, b = {} }
         for h = 1, #net.w1 do
             layer.w[h], layer.b[h] = {}, 0
@@ -321,24 +320,113 @@ local function inventory_count(st, test)
     return n
 end
 
+local function armor_worn(st)
+    local eq = type(st.equipment) == "table" and st.equipment or {}
+    local n = 0
+    for _, slot in ipairs({ "head", "chest", "legs", "feet" }) do
+        if type(eq[slot]) == "string" and eq[slot] ~= "" then n = n + 1 end
+    end
+    return n / 4
+end
+
+local function stored_resources(st)
+    local n = 0
+    for _, c in pairs(type(st.stored) == "table" and st.stored or {}) do n = n + (tonumber(c) or 0) end
+    return math.min(1, n / 256)
+end
+
+local function stations_known(st)
+    local m = type(st.memory) == "table" and st.memory or {}
+    local n = (tonumber(m.chest) or 0) + (tonumber(m.barrel) or 0) + (tonumber(m.furnace) or 0)
+        + (tonumber(m.blast_furnace) or 0) + (tonumber(m.smoker) or 0) + (tonumber(m.crafting_table) or 0)
+    return math.min(1, n / 10)
+end
+
+local function world_resources(st)
+    local m = type(st.memory) == "table" and st.memory or {}
+    local n = 0
+    for k, v in pairs(m) do
+        if k ~= "chest" and k ~= "barrel" and k ~= "furnace" and k ~= "blast_furnace" and k ~= "smoker" and k ~= "crafting_table" then
+            n = n + (tonumber(v) or 0)
+        end
+    end
+    return math.min(1, n / 50)
+end
+
+local function has_objective(st)
+    return (st.building or (tonumber(st.gather_left) or 0) > 0 or (tonumber(st.making_until) or 0) > 0
+        or (type(st.team_order) == "string" and st.team_order ~= "")) and 1 or 0
+end
+
+NN.armor_worn, NN.stored_resources, NN.stations_known, NN.world_resources, NN.has_objective =
+    armor_worn, stored_resources, stations_known, world_resources, has_objective
+
 local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
-local INPUT_NAMES = { "bias", "health", "food level", "has pickaxe", "has axe", "has sword", "has hoe", "food carried", "wood carried",
-    "stone carried", "team hungry", "castle progress", "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier", "was blacksmith", "was explorer", "was fisher", "was lumberjack", "was carpenter" }
+local INPUT_NAMES = {
+    "bias", "health", "food level", "air", "pos x", "pos y", "pos z", "night",
+    "needs unmet", "team hungry", "castle progress",
+    "building", "build remaining", "build idle", "has objective",
+    "armor worn", "gear quality", "has pickaxe", "has axe", "has sword", "has hoe",
+    "food carried", "food variety", "wood carried", "stone carried", "iron carried", "coal carried",
+    "hostiles near", "animals near", "players near",
+    "chest resources", "furnaces known", "world resources",
+    "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier",
+    "was blacksmith", "was explorer", "was fisher", "was lumberjack", "was carpenter",
+}
 
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end
+    local function near(kind, max_n)
+        local list = st.name and call("entities", { bot = st.name, type = kind }) or {}
+        local k = 0
+        for _, e in ipairs(type(list) == "table" and list or {}) do if (e.distance or 99) <= 16 then k = k + 1 end end
+        if kind == "player" and k == 0 and type(st.players_online) == "table" then
+            k = math.max(0, #st.players_online - 1)
+        end
+        return math.min(1, k / max_n)
+    end
+    local pos = type(st.position) == "table" and st.position or {}
+    local cond = condition(st)
+    local time = tonumber(st.day_time) or 0
+    local food_carry = math.min(1, inventory_count(st, function(i) return FOOD[i] or EDIBLE[i] end) / 16)
+    local wood_carry = math.min(1, inventory_count(st, function(i) return i:match("_log$") or i:match("_planks$") end) / 64)
+    local stone_carry = math.min(1, inventory_count(st, function(i) return i == "cobblestone" or i == "stone" end) / 64)
+    local iron_carry = math.min(1, inventory_count(st, function(i) return i == "iron_ingot" or i == "raw_iron" end) / 16)
+    local coal_carry = math.min(1, inventory_count(st, function(i) return i == "coal" or i == "charcoal" end) / 16)
+    local unmet = math.max(0, 1 - (food_carry + wood_carry + stone_carry + has("_pickaxe") + has("_axe")) / 5)
     local x = {
         1,
         (st.health or 20) / 20,
         (st.food or 20) / 20,
-        has("_pickaxe"), has("_axe"), has("_sword"), has("_hoe"),
-        math.min(1, inventory_count(st, function(i) return FOOD[i] end) / 16),
-        math.min(1, inventory_count(st, function(i) return i:match("_log$") or i:match("_planks$") end) / 64),
-        math.min(1, inventory_count(st, function(i) return i == "cobblestone" or i == "stone" end) / 64),
+        math.max(0, math.min(1, (tonumber(st.air) or 300) / 300)),
+        math.tanh((tonumber(pos.x) or 0) / 500),
+        math.max(0, math.min(1, ((tonumber(pos.y) or 64) + 64) / 384)),
+        math.tanh((tonumber(pos.z) or 0) / 500),
+        (time % 24000) >= 13000 and 1 or 0,
+        unmet,
         team.hungry,
         team.castle,
+        st.building and 1 or 0,
+        math.min(1, (tonumber(st.build_left) or 0) / 1000),
+        math.min(1, (tonumber(st.build_idle) or 0) / 600),
+        has_objective(st),
+        armor_worn(st),
+        cond.quality / 45,
+        has("_pickaxe"), has("_axe"), has("_sword"), has("_hoe"),
+        food_carry,
+        math.min(1, cond.variety / 8),
+        wood_carry,
+        stone_carry,
+        iron_carry,
+        coal_carry,
+        near("hostile", 4),
+        near("animal", 8),
+        near("player", 4),
+        stored_resources(st),
+        stations_known(st),
+        world_resources(st),
     }
     for t = 1, OUT do x[#x + 1] = (t == trade) and 1 or 0 end
     return x

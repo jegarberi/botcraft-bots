@@ -4,7 +4,7 @@ assert(loadfile(arg[1]))()
 local net = NN.new(3, 4, 2, 42)
 local x = { 1, 0.3, -0.2 }
 local p, _, value, layers = NN.forward(net, x)
-assert(#layers == 3 and #net.layers == 2, "three hidden layers")
+assert(#layers == 5 and #net.layers == 4, "five hidden layers")
 local legacy = NN.copy(net)
 legacy.layers = nil
 local migrated = NN.grow(legacy, 5, 3)
@@ -27,7 +27,7 @@ for _, field in ipairs({ "input", "middle", "last", "output" }) do
     local function row(n)
         if field == "input" then return n.w1[1] end
         if field == "output" then return n.w2[1] end
-        return n.layers[field == "middle" and 1 or 2].w[1]
+        return n.layers[field == "middle" and 1 or #n.layers].w[1]
     end
     local plus, minus, trained = NN.copy(net), NN.copy(net), NN.copy(net)
     row(plus)[1], row(minus)[1] = row(plus)[1] + 1e-5, row(minus)[1] - 1e-5
@@ -39,7 +39,7 @@ local before = NN.copy(net)
 NN.learn(net, x, 1, 1)
 assert(net.w1[1][1] ~= before.w1[1][1], "input layer learns")
 assert(net.w2[1][1] ~= before.w2[1][1], "output layer learns")
-for l = 1, 2 do
+for l = 1, 4 do
     assert(net.layers[l].w[1][1] ~= before.layers[l].w[1][1], "every added layer learns")
     assert(before.layers[l].w[1][1] == 0, "copies do not alias layers")
 end

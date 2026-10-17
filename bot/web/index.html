@@ -195,9 +195,10 @@ function showNetwork(name) { networkBot = name; drawNetwork(); document.getEleme
 function networkSvg(n, title) {
   const NS = "http://www.w3.org/2000/svg";
   const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; return e; };
-  const W = 1060, H = 18 * Math.max(n.inputs.length, n.outputs.length + 1) + 30, xs = [150, 340, 470, 600, 760];
+  const W = 1060, H = 18 * Math.max(n.inputs.length, n.outputs.length + 1) + 30;
   const ys = count => Array.from({ length: count }, (_, i) => 15 + (i + 0.5) * (H - 30) / count);
   const hidden = n.activations || [n.hidden], hy = hidden.map(h => ys(h.length));
+  const xs = Array.from({ length: hidden.length + 2 }, (_, i) => Math.round(150 + i * 610 / (hidden.length + 1)));
   const yi = ys(n.inputs.length), yh = hy[0], yo = ys(n.outputs.length + 1), outX = xs[hidden.length + 1];
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": title });
   const top = Math.max(...n.w1.flat().map(Math.abs), ...n.w2.flat().map(Math.abs), ...n.v.map(Math.abs), ...(n.layers || []).flatMap(l => l.w.flat().map(Math.abs)), 1);

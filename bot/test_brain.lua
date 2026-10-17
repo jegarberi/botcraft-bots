@@ -51,7 +51,7 @@ assert(io.open("../brain_state.lua"), "the brain is kept for a restart")
 
 -- Merging another program's network: checked, merged once, given to the bot doing worst as a challenger
 local mine = tool.run({ export = true })
-assert(mine.arch and #mine.w == 23 * 10 + 10 + 10 * 11 + 11 + 10 + 1 + 2 * (10 * 10 + 10), "the network goes out with its critic and its architecture")
+assert(mine.arch and #mine.w == 44 * 10 + 10 + 10 * 11 + 11 + 10 + 1 + 4 * (10 * 10 + 10), "the network goes out with its critic and its architecture")
 local w = {}
 for i, v in ipairs(mine.w) do w[i] = v + 0.5 end
 local function rejected(m) local ok, err = pcall(tool.run, { merge = m }) return not ok and tostring(err) end
@@ -74,7 +74,7 @@ for h, row in ipairs(n1.w1) do
 end
 assert(differ, "evolved networks differ even when rounded probabilities agree")
 local view = tool.run({ network = "Bot3" })
-assert(#view.inputs == 23 and #view.hidden == 10 and #view.outputs == 11 and #view.w1 == 10 and #view.w2 == 11 and #view.activations == 3 and #view.layers == 2, "one bot's network for the panels")
+assert(#view.inputs == 44 and #view.hidden == 10 and #view.outputs == 11 and #view.w1 == 10 and #view.w2 == 11 and #view.activations == 5 and #view.layers == 4, "one bot's network for the panels")
 -- Rollback by hand to the network of an earlier morning
 assert(tool.run({ rollback = 1 }):match("back to the network of day"))
 os.remove("../brain_state.lua")

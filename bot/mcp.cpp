@@ -1657,6 +1657,31 @@ static Value MemorySummary()
     return summary;
 }
 
+/// @brief How many items of each kind are remembered in chests in this dimension
+static Value StoredSummary(const std::string& dimension)
+{
+    Value summary = Json::Object();
+    sqlite3* db = SharedDb();
+    sqlite3_stmt* statement = nullptr;
+    if (db == nullptr || sqlite3_prepare_v2(db, "SELECT item, SUM(count) FROM chest_contents"
+        " WHERE dimension = ?1 AND item != '' AND count > 0 GROUP BY item", -1, &statement, nullptr) != SQLITE_OK)
+    {
+        return summary;
+    }
+    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
+    while (sqlite3_step(statement) == SQLITE_ROW)
+    {
+        std::string item = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+        if (item.rfind("minecraft:", 0) == 0)
+        {
+            item = item.substr(10);
+        }
+        summary[item] = sqlite3_column_int(statement, 1);
+    }
+    sqlite3_finalize(statement);
+    return summary;
+}
+
 /// @brief Entities around the bot, nearest first.
 /// @param type "" for everything, an entity name ("zombie"), or a group: "hostile", "animal", "player"
 static std::vector<Ent> FindEntities(BehaviourClient& c, std::string type, const double radius)
@@ -1909,6 +1934,14 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
     }
     const auto is_floor = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsSolid(); };
     McpBot* const builder = dynamic_cast<McpBot*>(&c);
+    const auto in_site = [&](const Position& p) { return InStoredSite(p) || (builder != nullptr && builder->InSite(p)); };
+    {
+        const Position start = BlockPos(c.GetLocalPlayer()->GetPosition());
+        if (in_site(start) || (target.x - start.x) * (target.x - start.x) + (target.z - start.z) * (target.z - start.z) > 6 * 6)
+        {
+            GoTo(c, Position(target.x, start.y, target.z), 3);
+        }
+    }
     for (int step = 0; step < max_steps; ++step)
     {
         const Position me = BlockPos(c.GetLocalPlayer()->GetPosition());
@@ -1920,7 +1953,18 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             return Status::Success;
         }
         // One step along the longest horizontal distance (any side when right above or below, the stairs then zigzag)
-        const Position side = std::abs(dx) >= std::abs(dz) ? Position(dx >= 0 ? 1 : -1, 0, 0) : Position(0, 0, dz > 0 ? 1 : -1);
+        Position side = std::abs(dx) >= std::abs(dz) ? Position(dx >= 0 ? 1 : -1, 0, 0) : Position(0, 0, dz > 0 ? 1 : -1);
+        if (in_site(me + side))
+        {
+            for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+            {
+                if (!in_site(me + d))
+                {
+                    side = d;
+                    break;
+                }
+            }
+        }
         // Up, level or down as the target asks, but only onto a spot that has a floor (stairs can't cross a void)
         int slope = dy < 0 ? -1 : dy > 0 ? 1 : 0;
         if (!is_floor(me + side + Position(0, slope - 1, 0)))
@@ -2173,6 +2217,7 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
             }
         }
     }
+    int failures = 0;
     const auto give_up_on = [&](const Position& p)
         {
             failed.insert(p);
@@ -2186,14 +2231,15 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
     {
         const std::vector<Position> found = FindBlocks(c, match, radius, failed.size() + 1, outside_the_site);
         const auto target = std::find_if(found.begin(), found.end(), [&](const Position& p) { return failed.count(p) == 0; });
-        if (target == found.end())
+        if (target == found.end() || failures >= 8)
         {
-            return Status::Failure;
+            return done > 0 ? Status::Success : Status::Failure;
         }
         if (tunnel && LavaNear(c.GetWorld(), *target))
         {
             // Ore with lava against it stays where it is
             give_up_on(*target);
+            ++failures;
             continue;
         }
         const Blockstate* wanted = c.GetWorld()->GetBlock(*target);
@@ -2221,6 +2267,7 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
                     }
                 }
                 give_up_on(*target);
+                ++failures;
             }
             done += felled;
             Count(c, "collected", felled);
@@ -2230,6 +2277,7 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
             (!tunnel || TunnelToward(c, *target, 48) == Status::Failure || SafeDig(c, *target, true, PlayerDiggingFace::Up, false) == Status::Failure))
         {
             give_up_on(*target);
+            ++failures;
             continue;
         }
         ++done;
@@ -3844,7 +3892,8 @@ static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& mat
     }
     c.SetNote(stage + ": getting " + what);
     std::atomic<int> done = 0;
-    Check(c, CollectTask(c, match, 1, 32, done, ore));
+    const bool tunnel = ore || (tool_kind == "pickaxe" && !tool.empty());
+    Check(c, CollectTask(c, match, 1, 32, done, tunnel));
 }
 
 /// @brief True if the bot holds count planks of one kind. Otherwise does one action toward it (craft from a log, cut a tree)
@@ -3862,6 +3911,16 @@ static bool EnsurePlanks(McpBot& c, const int count, const std::string& stage)
         grid[0][0] = log;
         std::string error;
         Check(c, CraftAt(c, grid, error));
+        return false;
+    }
+    if (stage == "building")
+    {
+        if (c.GetGoal().second <= 0)
+        {
+            c.SetGoal("oak_log,spruce_log,birch_log,jungle_log,acacia_log,dark_oak_log,mangrove_log,cherry_log,pale_oak_log", 16);
+            c.explorations = 0;
+        }
+        c.SetNote("building: out of wood, gathering logs");
         return false;
     }
     MineOne(c, [](const Blockstate& b) { return EndsWith(b.GetName(), "_log"); }, "trees", "axe", stage, "_log");
@@ -3942,7 +4001,7 @@ static void MakeTool(McpBot& c, const ToolCost* next, const bool stone, const st
     {
         if (CountItem(c, "minecraft:cobblestone") < next->material)
         {
-            MineOne(c, IsStone, "stone", "pickaxe", stage);
+            MineOne(c, IsStone, "stone", "pickaxe", stage, "stone");
             return;
         }
         m = "minecraft:cobblestone";
@@ -4287,7 +4346,17 @@ static bool EnsureFurnace(McpBot& c, const std::string& stage, Position& furnace
     }
     else if (CountItem(c, "minecraft:cobblestone") < 8)
     {
-        MineOne(c, IsStone, "stone", "pickaxe", stage);
+        if (stage == "building")
+        {
+            if (c.GetGoal().second <= 0)
+            {
+                c.SetGoal("stone,cobblestone", 32);
+                c.explorations = 0;
+            }
+            c.SetNote("building: out of cobblestone for a furnace, gathering stone");
+            return false;
+        }
+        MineOne(c, IsStone, "stone", "pickaxe", stage, "stone");
     }
     else if (EnsureTable(c, stage))
     {
@@ -4694,6 +4763,8 @@ enum class Supply
     Working,
     // A raw material is missing: a gather goal is set, the gather branch of the tree takes over
     Gathering,
+    // Cannot be obtained right now (no sheep in reach): try the other spots of the plan first
+    Unavailable,
 };
 static Supply Obtain(McpBot& c, const std::string& item, const int depth = 0, const bool more = false);
 static void ShareSurplus(McpBot& c, const std::string& item);
@@ -4868,7 +4939,7 @@ static Status BuildStep(McpBot& c)
                 continue;
             }
         }
-        const std::tuple<int, int, double> rank = { clearing ? 0 : 1, clearing ? -p.y : p.y, focus.SqrDist(Vector3<double>(p.x + 0.5, p.y + 0.5, p.z + 0.5)) };
+        const std::tuple<int, int, double> rank = { Construction::PlacementStage(clearing, wanted_block), clearing ? -p.y : p.y, focus.SqrDist(Vector3<double>(p.x + 0.5, p.y + 0.5, p.z + 0.5)) };
         if (next == nullptr || rank < best)
         {
             next = &entry;
@@ -4948,6 +5019,15 @@ static Status BuildStep(McpBot& c)
         // Right above or below, on a hillside: a teleport if the bot may, otherwise the pathfinder gets its chance
         TeleportNear(c, p.x, top_of(p), p.z, true);
     }
+    else if (!far_sideways && me.y < p.y - 4 && world->GetSkyLight(BlockPos(me) + Position(0, 1, 0)) == 0 && !c.InBlueprint(BlockPos(me)))
+    {
+        if (!TeleportNear(c, p.x, top_of(p), p.z, true))
+        {
+            c.SetNote("building: underground beneath the site, digging up to the surface");
+            DigUp(c);
+            return Status::Success;
+        }
+    }
     if (far_sideways)
     {
         // Seen from afar: get to the site first, digging out of wherever the bot is if it has to
@@ -5004,7 +5084,12 @@ static Status BuildStep(McpBot& c)
     {
         // Out of material: make some (craft, smelt) or go and get it, then carry on here.
         // Failure hands over to the gather branch, which comes next in the tree
-        return Obtain(c, item) == Supply::Gathering ? Status::Failure : Status::Success;
+        const Supply supply = Obtain(c, item);
+        if (supply == Supply::Unavailable)
+        {
+            give_up_on(p);
+        }
+        return supply == Supply::Gathering ? Status::Failure : Status::Success;
     }
     const auto facing = wanted_next.state.find("facing");
     if (facing != wanted_next.state.end())
@@ -5619,6 +5704,12 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
     std::string error;
     if (EndsWith(item, "_wool"))
     {
+        if (item == "minecraft:white_wool" &&
+            (CountItem(c, "minecraft:string") >= 4 || (TakeFromChest(c, "minecraft:string") && CountItem(c, "minecraft:string") >= 4)) &&
+            CraftOne(c, item, error) > 0)
+        {
+            return Supply::Working;
+        }
         std::atomic<int> obtained = 0;
         if (CountItem(c, "minecraft:shears") > 0 && ShearTask(c, 3, 32.0, obtained) == Status::Success)
         {
@@ -5627,12 +5718,14 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
         if (!WildAnimals(c, "sheep", 32.0).empty())
         {
             KillTask(c, "sheep", 1, 32.0, obtained);
+            return obtained > 0 ? Supply::Working : Supply::Unavailable;
         }
-        else
+        if (GoToRemembered(c, "mob:sheep"))
         {
-            Explore(c, "sheep for building wool");
+            return Supply::Working;
         }
-        return Supply::Working;
+        Explore(c, "sheep for building wool");
+        return Supply::Unavailable;
     }
     if (item.find("minecraft:stripped_") == 0)
     {
@@ -5709,26 +5802,11 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
             std::any_of(recipe->second.pattern.begin(), recipe->second.pattern.end(), [](const std::string& row) { return row.size() > 2; });
         if (big && !EnsureTable(c, stage))
         {
-            return Supply::Working;
+            return c.GetGoal().second > 0 ? Supply::Gathering : Supply::Working;
         }
         if (CraftOne(c, item, error) > 0)
         {
             return Supply::Working;
-        }
-        // Made of planks (chests, doors...): planks come from trees, not from a mine
-        std::vector<std::vector<std::string>> needs = recipe->second.ingredients;
-        for (const auto& [letter, accepted] : recipe->second.key)
-        {
-            needs.push_back(accepted);
-        }
-        for (const std::vector<std::string>& accepted : needs)
-        {
-            if (std::find(accepted.begin(), accepted.end(), "minecraft:oak_planks") != accepted.end() &&
-                std::none_of(accepted.begin(), accepted.end(), [&](const std::string& a) { return CountItem(c, a) >= 8; }))
-            {
-                EnsurePlanks(c, 8, stage);
-                return Supply::Working;
-            }
         }
     }
     const auto sources = smelt_inputs.find(item);
@@ -5746,56 +5824,54 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
             {
                 UseFurnace(c, furnace, in_hand != sources->second.end() ? *in_hand : sources->second.front(), stage);
             }
-            return for_fuel ? Supply::Gathering : Supply::Working;
+            return for_fuel || c.GetGoal().second > 0 ? Supply::Gathering : Supply::Working;
         }
         if (depth < 3)
         {
-            return Obtain(c, sources->second.front(), depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+            return Obtain(c, sources->second.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
         }
     }
     if (recipe != recipes.end() && depth < 3)
     {
-        // The first ingredient of the recipe that the bot has none of
-        std::vector<std::vector<std::string>> wanted = recipe->second.ingredients;
+        // Count how many of each ingredient the recipe requires, and obtain more of the first one that is short
+        std::vector<std::pair<std::vector<std::string>, int>> wanted;
+        for (const std::vector<std::string>& accepted : recipe->second.ingredients)
+        {
+            auto it = std::find_if(wanted.begin(), wanted.end(), [&](const auto& w) { return w.first == accepted; });
+            if (it != wanted.end())
+            {
+                ++it->second;
+            }
+            else
+            {
+                wanted.push_back({ accepted, 1 });
+            }
+        }
         for (const auto& [letter, accepted] : recipe->second.key)
         {
-            wanted.push_back(accepted);
-        }
-        for (const std::vector<std::string>& accepted : wanted)
-        {
-            if (!accepted.empty() && std::none_of(accepted.begin(), accepted.end(), [&](const std::string& a) { return CountItem(c, a) > 0; }))
+            int needed = 0;
+            for (const std::string& row : recipe->second.pattern)
             {
-                return Obtain(c, accepted.front(), depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+                needed += static_cast<int>(std::count(row.begin(), row.end(), letter));
+            }
+            if (needed > 0)
+            {
+                wanted.push_back({ accepted, needed });
             }
         }
-        // It has some of everything, just not enough yet: more of the first
-        if (!wanted.empty() && !wanted.front().empty())
+        for (const auto& [accepted, needed] : wanted)
         {
-            const std::string more = wanted.front().front();
-            if (smelt_inputs.count(more) != 0 || recipes.count(more) != 0)
+            if (accepted.empty() || std::any_of(accepted.begin(), accepted.end(), [&](const std::string& a) { return CountItem(c, a) >= needed; }))
             {
-                // Made, not mined: one more round of making it
-                const auto made_from = smelt_inputs.find(more);
-                if (made_from != smelt_inputs.end())
-                {
-                    Position furnace;
-                    const auto in_hand = std::find_if(made_from->second.begin(), made_from->second.end(), [&](const std::string& source) { return CountItem(c, source) > 0; });
-                    bool for_fuel = false;
-                    if (in_hand != made_from->second.end() && EnsureFurnace(c, stage, furnace) && EnsureFuel(c, stage, for_fuel))
-                    {
-                        UseFurnace(c, furnace, *in_hand, stage);
-                        return Supply::Working;
-                    }
-                    if (for_fuel)
-                    {
-                        return Supply::Gathering;
-                    }
-                    return Obtain(c, made_from->second.front(), depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
-                }
+                continue;
             }
-            // Mined, not made: more of that ingredient (not of the item itself: a bot with one cobblestone set
-            // out to dig up a stone hoe)
-            return Obtain(c, more, depth + 1) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+            if (std::find(accepted.begin(), accepted.end(), "minecraft:oak_planks") != accepted.end() && accepted.size() > 1)
+            {
+                EnsurePlanks(c, std::max(needed, 8), stage);
+                return c.GetGoal().second > 0 ? Supply::Gathering : Supply::Working;
+            }
+            const auto held = std::find_if(accepted.begin(), accepted.end(), [&](const std::string& a) { return CountItem(c, a) > 0; });
+            return Obtain(c, held != accepted.end() ? *held : accepted.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
         }
     }
     // A raw material: mine it
@@ -6605,6 +6681,15 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             c.beds_refused.clear();
                             return Status::Failure;
                         }
+                        bool building = false;
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            building = c.team.building;
+                        }
+                        if (building && !OwnsBed(c))
+                        {
+                            return Status::Failure;
+                        }
                         return std::chrono::steady_clock::now() >= c.sleep_retry_at && HasBed(c) ? Status::Success : Status::Failure;
                     })
                 .leaf("sleep until morning", SleepStep)
@@ -6783,6 +6868,10 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("team build objective set?", [](McpBot& c)
                     {
                         std::lock_guard<std::mutex> lock(c.team_mutex);
+                        if (Construction::ShouldFinishGatherFirst(c.team.building, c.GetGoal().second))
+                        {
+                            return Status::Failure;
+                        }
                         return c.team.building && std::chrono::steady_clock::now() >= c.build_retry_at ? Status::Success : Status::Failure;
                     })
                 .leaf("place one block", BuildStep)
@@ -6850,9 +6939,19 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             }
                             SetItemInHand(c, HeldTool(c, "pickaxe"));
                         }
-                        else if (EndsWith(wanted.front(), "_log") && !HeldTool(c, "axe").empty())
+                        else if (EndsWith(wanted.front(), "_log"))
                         {
-                            SetItemInHand(c, HeldTool(c, "axe"));
+                            if (!HeldTool(c, "axe").empty())
+                            {
+                                SetItemInHand(c, HeldTool(c, "axe"));
+                            }
+                            const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+                            if (feet.y < 62 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0)
+                            {
+                                c.SetNote("gathering " + spec + ": underground, digging up to the surface");
+                                DigUp(c);
+                                return Status::Success;
+                            }
                         }
                         else if (wanted.front() == "stone" || wanted.front() == "cobblestone")
                         {
@@ -6865,13 +6964,15 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             SetItemInHand(c, HeldTool(c, "pickaxe"));
                         }
                         const auto match = [&](const Blockstate& b) { return MatchesAny(b.GetName(), wanted); };
-                        if (FindBlocks(c, match, 32, 1, [&](const Position& p) { return !c.InSite(p); }).empty())
+                        const auto gatherable = [&](const Position& p) { return !InStoredSite(p) && !c.InSite(p) && c.unreachable.count(p) == 0; };
+                        if (FindBlocks(c, match, 32, 1, gatherable).empty())
                         {
                             if (ore)
                             {
                                 return SeekOre(c, wanted) ? Status::Success : give_up("none found after digging for it");
                             }
-                            if (GoToRemembered(c, wanted.front()))
+                            const std::string remembered = EndsWith(wanted.front(), "_log") && wanted.size() > 1 ? "_log" : wanted.front();
+                            if (GoToRemembered(c, remembered))
                             {
                                 return Status::Success;
                             }
@@ -6879,21 +6980,35 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         }
                         c.explorations = 0;
                         std::atomic<int> collected = 0;
+                        const bool tunnel = ore || ((wanted.front() == "stone" || wanted.front() == "cobblestone") && !HeldTool(c, "pickaxe").empty());
                         // Found but not reachable: drop the goal instead of retrying forever
-                        if (CollectTask(c, match, 1, 32, collected, ore) == Status::Failure)
+                        if (CollectTask(c, match, 1, 32, collected, tunnel) == Status::Failure)
                         {
+                            if (!FindBlocks(c, match, 32, 1, gatherable).empty())
+                            {
+                                return Status::Success;
+                            }
                             return give_up("the ones in range can't be reached or mined");
                         }
-                        c.SetNote("gathering " + spec + ", " + std::to_string(left - 1) + " left");
-                        c.SetGoal(spec, left - 1);
+                        const int got = std::max(1, collected.load());
+                        const int remaining = std::max(0, left - got);
+                        c.SetNote("gathering " + spec + ", " + std::to_string(remaining) + " left");
+                        c.SetGoal(spec, remaining);
                         // Store once the whole goal is done, not after every block
-                        c.needs_store = c.needs_store || left - 1 == 0;
+                        c.needs_store = c.needs_store || remaining == 0;
                         return Status::Success;
                     })
             .end()
             .sequence("food")
                 .leaf("has no food?", [](McpBot& c)
                     {
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            if (c.team.building)
+                            {
+                                return Status::Failure;
+                            }
+                        }
                         return FindFood(c).empty() && std::chrono::steady_clock::now() >= c.food_retry_at ? Status::Success : Status::Failure;
                     })
                 .leaf("get food", GetFoodStep)
@@ -6944,6 +7059,13 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("better tools")
                 .leaf("still missing stone tools or an iron pickaxe?", [](McpBot& c)
                     {
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            if (c.team.building)
+                            {
+                                return Status::Failure;
+                            }
+                        }
                         return c.gear && !ToolStage(c).empty() ? Status::Success : Status::Failure;
                     })
                 .leaf("next tool step", [](McpBot& c)
@@ -6993,6 +7115,13 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("armor")
                 .leaf("still missing a bed, leather armor or a shield?", [](McpBot& c)
                     {
+                        {
+                            std::lock_guard<std::mutex> lock(c.team_mutex);
+                            if (c.team.building)
+                            {
+                                return Status::Failure;
+                            }
+                        }
                         if (c.gear && ToolStage(c).empty() && ArmorStage(c).empty() && c.GetGearSkipped().empty())
                         {
                             // Everything is made. (Stages given up on are tried again after five minutes:
@@ -8873,6 +9002,7 @@ static Value CallTool(const std::string& name, const Value& a)
         o["position"] = PosJson(me->GetPosition());
         o["health"] = me->GetHealth();
         o["food"] = me->GetFood();
+        o["air"] = me->GetDataAirSupplyId();
         o["game_mode"] = mode >= 0 && mode < 4 ? modes[mode] : "unknown";
         o["dimension"] = world->GetCurrentDimension();
         o["day_time"] = bot.GetDayTime();
@@ -8906,8 +9036,9 @@ static Value CallTool(const std::string& name, const Value& a)
                 count = (count.is_null() ? 0 : count.get_number<int>()) + slot.GetItemCount();
             }
         }
-        // Remembered places: kind -> how many
+        // Remembered places: kind -> how many, and items remembered in chests
         o["memory"] = MemorySummary();
+        o["stored"] = StoredSummary(world->GetCurrentDimension());
         {
             std::lock_guard<std::mutex> lock(bot.team_mutex);
             o["team_leader"] = bot.team.leader;

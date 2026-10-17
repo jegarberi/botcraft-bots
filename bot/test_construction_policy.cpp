@@ -9,5 +9,12 @@ static_assert(!Construction::RetryReady(1, 59));
 static_assert(Construction::RetryReady(1, 60));
 static_assert(Construction::RetryReady(8, 60));
 static_assert(Construction::RetryReady(100, 60));
+static_assert(!Construction::ShouldFinishGatherFirst(false, 16));
+static_assert(!Construction::ShouldFinishGatherFirst(true, 0));
+static_assert(Construction::ShouldFinishGatherFirst(true, 1));
+static_assert(Construction::PlacementStage(true, "minecraft:white_bed") == 0);
+static_assert(Construction::PlacementStage(false, "minecraft:cobblestone") == 1);
+static_assert(Construction::PlacementStage(false, "minecraft:oak_planks") == 1);
+static_assert(Construction::PlacementStage(false, "minecraft:white_bed") == 2);
 
 int main() {}

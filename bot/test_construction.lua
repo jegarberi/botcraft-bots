@@ -17,7 +17,7 @@ bot = {
     every = function() end, on_chat = function() end,
 }
 local f = assert(io.open(arg[1])); local src = f:read("a"); f:close()
-for _, name in ipairs({ "road", "supply_crew", "homes", "hand", "completed" }) do src = src:gsub("local function " .. name .. "%(", "function " .. name .. "(") end
+for _, name in ipairs({ "road", "supply_crew", "homes", "hand", "completed", "worker" }) do src = src:gsub("local function " .. name .. "%(", "function " .. name .. "(") end
 for _, name in ipairs({ "state", "support", "looks" }) do src = src:gsub("local " .. name .. " =", name .. " =") end
 assert(load(src, "empire"))()
 state.town = { x = 0, y = 71, z = 0 }
@@ -65,6 +65,9 @@ end
 state.village.Bot1.done = true
 supply_crew({ "Bot1", "Bot2", "Bot3", "Bot4", "Bot5" })
 assert(support.Bot1, "finished homeowner takes over supply work")
+state.village.Bot2.done = true
+state.groups = { builders = { "Bot1", "Bot2" } }
+assert(worker({ "Bot1", "Bot2" }) == "Bot2", "supply crew member is not reassigned to empire building")
 -- An idle, cancelled order is not a finished house. One unfinished neighbor does not block a shop.
 state.village = {
     Bot1 = { done = true, road = true, homed = true, at = { x = 0, y = 71, z = 0 }, plan = 2, grounded = true },

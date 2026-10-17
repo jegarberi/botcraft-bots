@@ -514,7 +514,7 @@ local function worker(names, leader)
         local list = (state.groups or {})[t] or {}
         for i = #list, 1, -1 do
             local n = list[i]
-            if here[n] and n ~= leader and n ~= picker and n ~= explorer and not homeless(n) then return n end
+            if here[n] and n ~= leader and n ~= picker and n ~= explorer and not homeless(n) and not support[n] then return n end
         end
     end
 end
@@ -736,7 +736,7 @@ local function homes(names, now)
             if not h.road and not h.done and i >= taken and free_lot() < i then
                 state.cells[(i % COLS) .. "," .. (i // COLS)] = nil
                 h.at = lot()
-                h.blocks, h.handed, h.started = home(h.at, n), nil, false
+                h.blocks, h.handed, h.started, h.homed = home(h.at, n), nil, false, nil
                 note(n .. "'s house moves nearer, to " .. h.at.x .. " " .. h.at.z)
             end
         end
@@ -744,7 +744,7 @@ local function homes(names, now)
     -- A house not built yet, planned before the house it is now: planned again
     for n, h in pairs(state.village) do
         if not h.road and not h.done and h.plan ~= HOME_PLAN then
-            h.plan, h.blocks, h.handed, h.started = HOME_PLAN, home(h.at, n), nil, false
+            h.plan, h.blocks, h.handed, h.started, h.homed = HOME_PLAN, home(h.at, n), nil, false, nil
         end
     end
     -- A house not built yet that is not on the ground (planned 50 blocks up in the air): down to it.

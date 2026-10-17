@@ -20,8 +20,15 @@
 --   roles { network = "miners", bot = "Bot3" } the network, and what it makes of the bot now (the panels)
 local FILE = "../roles_state.lua"
 local HID = 8
-local INPUTS = { "bias", "health", "food level", "food carried", "wood carried", "stone carried", "iron carried", "coal carried",
-    "has pickaxe", "has sword", "has hoe", "night", "hostiles near", "animals near", "needs unmet", "building", "build remaining", "build idle", "food variety", "gear quality" }
+local INPUTS = {
+    "bias", "health", "food level", "air", "pos x", "pos y", "pos z", "night",
+    "needs unmet", "team hungry",
+    "building", "build remaining", "build idle", "has objective",
+    "armor worn", "gear quality", "has pickaxe", "has axe", "has sword", "has hoe",
+    "food carried", "food variety", "wood carried", "stone carried", "iron carried", "coal carried",
+    "hostiles near", "animals near", "players near",
+    "chest resources", "furnaces known", "world resources",
+}
 local ORES = { coal = "coal_ore", iron = "iron_ore", copper_gold = "copper_ore,gold_ore", deep = "redstone_ore,lapis_ore,diamond_ore" }
 local FOOD = NN.edible or { bread = true, pumpkin_pie = true, cake = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, golden_carrot = true, sweet_berries = true, cooked_cod = true, cooked_salmon = true }
@@ -103,16 +110,21 @@ local NEEDS = {
     blacksmiths = { raw_iron = 9, coal = 8, leather = 4, bread = 4 },
     fishers = { coal = 4, bread = 2 },
 }
-local PROVIDES = { oak_log = "lumberjacks", spruce_log = "lumberjacks", birch_log = "lumberjacks", chest = "carpenters", oak_planks = "carpenters", oak_stairs = "carpenters", oak_fence = "carpenters", stone_axe = "blacksmiths", cobblestone = "miners", wheat = "farmers", egg = "farmers", milk_bucket = "farmers", pumpkin = "farmers", wheat_seeds = "farmers",
+local PROVIDES = { oak_log = "lumberjacks", spruce_log = "lumberjacks", birch_log = "lumberjacks", jungle_log = "lumberjacks",
+    acacia_log = "lumberjacks", dark_oak_log = "lumberjacks", mangrove_log = "lumberjacks", cherry_log = "lumberjacks", pale_oak_log = "lumberjacks",
+    chest = "carpenters", oak_planks = "carpenters", oak_stairs = "carpenters", oak_fence = "carpenters", stone_axe = "blacksmiths",
+    cobblestone = "miners", wheat = "farmers", egg = "farmers", milk_bucket = "farmers", pumpkin = "farmers", wheat_seeds = "farmers",
     carrot = "farmers", bread = "bakers", leather = "butchers", raw_iron = "miners", coal = "miners", iron_pickaxe = "blacksmiths",
     bucket = "blacksmiths", torch = "blacksmiths", cooked_cod = "fishers", cooked_salmon = "fishers" }
 local function count(st, item) return carried(st, function(i) return i == item end) end
+local function logs_carried(st) return carried(st, function(i) return i:sub(-4) == "_log" end) end
+local function have_need(st, item) return item == "oak_log" and logs_carried(st) or count(st, item) end
 local function sorted(t) local k = {} for x in pairs(t) do k[#k + 1] = x end table.sort(k) return k end
 
 -- How much of what its trade needs the bot lacks: 0 has it all, 1 has none of it
 local function unmet(st, role)
     local needs, lack, n = NEEDS[role] or {}, 0, 0
-    for item, want in pairs(needs) do lack, n = lack + math.max(0, want - count(st, item)) / want, n + 1 end
+    for item, want in pairs(needs) do lack, n = lack + math.max(0, want - have_need(st, item)) / want, n + 1 end
     return n > 0 and lack / n or 0
 end
 
@@ -125,30 +137,55 @@ local function exchange(ctx)
     local needs = NEEDS[ctx.role] or {}
     -- What it lacks, from a bot of the trade that makes it and has more than its own trade keeps
     for _, item in ipairs(sorted(needs)) do
-        local lack = needs[item] - count(ctx.st, item)
+        local lack = needs[item] - have_need(ctx.st, item)
         local from = PROVIDES[item]
         if lack > 0 and from ~= ctx.role then
             for _, b in ipairs(ctx.groups and ctx.groups[from] or {}) do
                 local st = status(b)
+                local give_item = item
                 local spare = st and count(st, item) - ((NEEDS[from] or {})[item] or 0) or 0
+                if item == "oak_log" and spare <= 0 and st then
+                    for k, v in pairs(inv(st)) do
+                        if k:sub(-4) == "_log" and (tonumber(v) or 0) > spare then give_item, spare = k, tonumber(v) end
+                    end
+                end
                 if spare > 0 then
-                    local _, err = call("give", { bot = b, to = ctx.bot, item = "minecraft:" .. item, count = math.min(spare, lack) })
-                    return err and ("asked " .. b .. " for " .. item .. ": " .. err) or ("got " .. item .. " from " .. b)
+                    local _, err = call("give", { bot = b, to = ctx.bot, item = "minecraft:" .. give_item, count = math.min(spare, lack) })
+                    return err and ("asked " .. b .. " for " .. give_item .. ": " .. err) or ("got " .. give_item .. " from " .. b)
                 end
             end
         end
     end
-    -- What it makes beyond its own needs, to the bot of another trade lacking it most
+    -- What it makes beyond its own needs, to the bot of another trade (or active house builder) lacking it most
     for _, item in ipairs(sorted(PROVIDES)) do
-        local spare = PROVIDES[item] == ctx.role and count(ctx.st, item) - (needs[item] or 0) or 0
+        local need_key = item:sub(-4) == "_log" and "oak_log" or item
+        local spare = PROVIDES[item] == ctx.role and count(ctx.st, item) - (needs[need_key] or 0) or 0
         if spare > 0 then
             local who, most = nil, 0
             for _, trade in ipairs(sorted(NEEDS)) do
-                local want = trade ~= ctx.role and NEEDS[trade][item]
+                local want = trade ~= ctx.role and NEEDS[trade][need_key]
                 for _, b in ipairs(want and ctx.groups and ctx.groups[trade] or {}) do
                     local st = status(b)
-                    local lack = st and want - count(st, item) or 0
+                    local lack = st and want - have_need(st, need_key) or 0
                     if lack > most then who, most = b, lack end
+                end
+                if want and trade == "builders" then
+                    local seen = {}
+                    for _, st in ipairs(team(ctx)) do
+                        seen[st.name] = true
+                        local lack = st.building and want - have_need(st, need_key) or 0
+                        if lack > most then who, most = st.name, lack end
+                    end
+                    for _, members in pairs(ctx.groups or {}) do
+                        for _, b in ipairs(members) do
+                            if not seen[b] and b ~= ctx.bot then
+                                seen[b] = true
+                                local st = status(b)
+                                local lack = st and st.building and want - have_need(st, need_key) or 0
+                                if lack > most then who, most = b, lack end
+                            end
+                        end
+                    end
                 end
             end
             if who then return give(ctx, who, "minecraft:" .. item, math.min(spare, most)) end
@@ -426,12 +463,87 @@ local function upgrade(ctx, kinds)
     end
     return "gear already upgraded"
 end
+local function hunt_action(ctx)
+    local hostiles = call("entities", { bot = ctx.bot, type = "hostile" }) or {}
+    if #hostiles > 0 then
+        local _, err = call("kill", { bot = ctx.bot, type = hostiles[1].type or "zombie", count = 1 })
+        return err and ("hunt hostile: " .. err) or "hunted hostile mob"
+    end
+    for _, animal in ipairs({ "cow", "pig", "sheep", "chicken" }) do
+        local list = call("entities", { bot = ctx.bot, type = animal }) or {}
+        if #list > 0 then
+            local _, err = call("kill", { bot = ctx.bot, type = animal, count = 1 })
+            return err and ("hunt " .. animal .. ": " .. err) or ("hunted " .. animal)
+        end
+    end
+    return butcher(ctx)
+end
+local function mine_action(ctx)
+    if has(ctx.st, "_pickaxe") then return mine(ctx, ORES.coal .. "," .. ORES.iron) end
+    return gather(ctx, "stone,cobblestone", 16)
+end
+local function eat_action(ctx)
+    if (ctx.st.food or 20) < 20 and carried(ctx.st, function(i) return FOOD[i] end) > 0 then
+        local _, err = call("eat", { bot = ctx.bot })
+        return err and ("could not eat: " .. err) or "ate food"
+    end
+    for _, raw in ipairs(sorted(RAW)) do
+        if count(ctx.st, raw) > 0 then return make(ctx, RAW[raw], count(ctx.st, RAW[raw]) + count(ctx.st, raw)) end
+    end
+    if count(ctx.st, "wheat") >= 3 then return make(ctx, "bread", count(ctx.st, "bread") + count(ctx.st, "wheat") // 3) end
+    return (ctx.st.food or 20) >= 20 and "already full" or "no food to eat"
+end
+local function craft_action(ctx)
+    if not has(ctx.st, "_pickaxe") then return make(ctx, "stone_pickaxe", 1) end
+    if not has(ctx.st, "_axe") then return make(ctx, "stone_axe", 1) end
+    if not has(ctx.st, "_sword") then return make(ctx, "stone_sword", 1) end
+    if count(ctx.st, "torch") < 8 and count(ctx.st, "coal") + count(ctx.st, "charcoal") > 0 then
+        return make(ctx, "torch", count(ctx.st, "torch") + 16)
+    end
+    if logs_carried(ctx.st) > 0 and count(ctx.st, "oak_planks") < 16 then
+        return make(ctx, "oak_planks", count(ctx.st, "oak_planks") + 16)
+    end
+    return make(ctx, "chest", count(ctx.st, "chest") + 1)
+end
+local function rest_action(ctx)
+    call("autopilot", { bot = ctx.bot, enabled = true, gather = "", count = 0 })
+    return "resting"
+end
+local function sleep_action(ctx)
+    local _, err = call("home", { bot = ctx.bot })
+    return err and ("could not sleep: " .. err) or "went home to sleep"
+end
+local function help_players_action(ctx)
+    for _, other in ipairs(team(ctx)) do
+        if (other.food or 20) < 15 and carried(ctx.st, function(i) return FOOD[i] end) > 1 then
+            return give(ctx, other.name, "food", 4)
+        end
+    end
+    local r = exchange(ctx)
+    if r ~= "nothing to trade" then return r end
+    local players = call("entities", { bot = ctx.bot, type = "player" }) or {}
+    for _, p in ipairs(players) do
+        if p.name ~= ctx.bot and p.position then
+            call("goto", { bot = ctx.bot, x = math.floor(p.position.x), y = math.floor(p.position.y), z = math.floor(p.position.z), tolerance = 2 })
+            return "went to help " .. (p.name or "player")
+        end
+    end
+    return "no player in need nearby"
+end
 for _, role in ipairs({ "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }) do
     table.insert(ROLES[role].actions, { name = "decorate home", run = decorate })
     table.insert(ROLES[role].actions, { name = "upgrade tools", run = function(ctx) return upgrade(ctx, { "pickaxe", "axe", "sword", "shovel", "hoe" }) end })
     table.insert(ROLES[role].actions, { name = "upgrade armor", run = function(ctx)
         call("autopilot", { bot = ctx.bot, enabled = true, gear = true })
         return upgrade(ctx, { "chestplate", "helmet", "leggings", "boots" }) end })
+    table.insert(ROLES[role].actions, { name = "move", run = function(ctx) return walk_off(ctx, 24) end })
+    table.insert(ROLES[role].actions, { name = "hunt", run = hunt_action })
+    table.insert(ROLES[role].actions, { name = "mine", goal = true, run = mine_action })
+    table.insert(ROLES[role].actions, { name = "eat", run = eat_action })
+    table.insert(ROLES[role].actions, { name = "craft", run = craft_action })
+    table.insert(ROLES[role].actions, { name = "rest", run = rest_action })
+    table.insert(ROLES[role].actions, { name = "sleep", run = sleep_action })
+    table.insert(ROLES[role].actions, { name = "help other players", run = help_players_action })
 end
 for _, item in ipairs({ "baked_potato", "beetroot_soup", "mushroom_stew", "rabbit_stew", "cookie" }) do
     table.insert(ROLES.bakers.actions, { name = "cook " .. item, run = function(ctx) return make(ctx, item, 4) end })
@@ -566,21 +678,53 @@ local function features(st, ctx)
         local list = call("entities", { bot = st.name, type = kind }) or {}
         local k = 0
         for _, e in ipairs(list) do if (e.distance or 99) <= 16 then k = k + 1 end end
+        if kind == "player" and k == 0 and type(st.players_online) == "table" then
+            k = math.max(0, #st.players_online - 1)
+        end
         return math.min(1, k / n)
     end
+    local pos = type(st.position) == "table" and st.position or {}
+    local cond = NN.condition(st)
     local time = tonumber(st.day_time) or 0
+    local hungry_team = math.max(0, (14 - (st.food or 20)) / 14)
+    if ctx and ctx.team and #ctx.team > 0 then
+        local h = 0
+        for _, o in ipairs(ctx.team) do if (o.food or 20) <= 12 then h = h + 1 end end
+        hungry_team = math.max(hungry_team, h / #ctx.team)
+    end
     return {
-        1, (st.health or 20) / 20, (st.food or 20) / 20,
+        1,
+        (st.health or 20) / 20,
+        (st.food or 20) / 20,
+        math.max(0, math.min(1, (tonumber(st.air) or 300) / 300)),
+        math.tanh((tonumber(pos.x) or 0) / 500),
+        math.max(0, math.min(1, ((tonumber(pos.y) or 64) + 64) / 384)),
+        math.tanh((tonumber(pos.z) or 0) / 500),
+        (time % 24000) >= 13000 and 1 or 0,
+        unmet(st, ctx and ctx.role),
+        hungry_team,
+        st.building and 1 or 0,
+        math.min(1, (st.build_left or 0) / 1000),
+        math.min(1, (st.build_idle or 0) / 600),
+        NN.has_objective(st),
+        NN.armor_worn(st),
+        cond.quality / 45,
+        has(st, "_pickaxe") and 1 or 0,
+        has(st, "_axe") and 1 or 0,
+        has(st, "_sword") and 1 or 0,
+        has(st, "_hoe") and 1 or 0,
         math.min(1, carried(st, function(i) return FOOD[i] or RAW[i] end) / 16),
+        math.min(1, cond.variety / 8),
         math.min(1, carried(st, function(i) return i:match("_log$") or i:match("_planks$") end) / 64),
         math.min(1, carried(st, function(i) return i == "cobblestone" or i == "stone" end) / 64),
         math.min(1, carried(st, function(i) return i == "iron_ingot" or i == "raw_iron" end) / 16),
         math.min(1, carried(st, function(i) return i == "coal" or i == "charcoal" end) / 16),
-        has(st, "_pickaxe") and 1 or 0, has(st, "_sword") and 1 or 0, has(st, "_hoe") and 1 or 0,
-        (time % 24000) >= 13000 and 1 or 0,
-        near("hostile", 4), near("animal", 8), unmet(st, ctx.role),
-        st.building and 1 or 0, math.min(1, (st.build_left or 0) / 1000), math.min(1, (st.build_idle or 0) / 600),
-        math.min(1, NN.condition(st).variety / 8), NN.condition(st).quality / 45,
+        near("hostile", 4),
+        near("animal", 8),
+        near("player", 4),
+        NN.stored_resources(st),
+        NN.stations_known(st),
+        NN.world_resources(st),
     }
 end
 
