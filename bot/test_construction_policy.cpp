@@ -17,6 +17,7 @@ static_assert(Construction::PlacementStage(false, "minecraft:cobblestone") == 1)
 static_assert(Construction::PlacementStage(false, "minecraft:oak_planks") == 1);
 static_assert(Construction::PlacementStage(false, "minecraft:white_bed") == 2);
 static_assert(Construction::PlacementStage(false, "minecraft:oak_door") == 2);
+static_assert(Construction::PlacementStage(false, "minecraft:oak_fence_gate") == 2);
 static_assert(Construction::PlacementStage(false, "minecraft:campfire") == 2);
 static_assert(Construction::PlacementStage(false, "minecraft:torch") == 2);
 static_assert(Construction::PlacementStage(false, "minecraft:water") == 2);

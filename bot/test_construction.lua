@@ -17,7 +17,7 @@ bot = {
     every = function() end, on_chat = function() end,
 }
 local f = assert(io.open(arg[1])); local src = f:read("a"); f:close()
-for _, name in ipairs({ "road", "supply_crew", "homes", "hand", "completed", "worker" }) do src = src:gsub("local function " .. name .. "%(", "function " .. name .. "(") end
+for _, name in ipairs({ "road", "supply_crew", "homes", "hand", "completed", "worker", "village_wall" }) do src = src:gsub("local function " .. name .. "%(", "function " .. name .. "(") end
 for _, name in ipairs({ "state", "support", "looks" }) do src = src:gsub("local " .. name .. " =", name .. " =") end
 assert(load(src, "empire"))()
 state.town = { x = 0, y = 71, z = 0 }
@@ -87,6 +87,16 @@ local shop_map = map(state.shops.bakers.blocks)
 assert(shop_map[state.shops.bakers.at.x + 3 .. "," .. state.shops.bakers.at.y .. "," .. state.shops.bakers.at.z + 4] == "oak_door[facing=north,half=lower]", "shop doorway has lower door")
 assert(shop_map[state.shops.bakers.at.x + 3 .. "," .. state.shops.bakers.at.y + 1 .. "," .. state.shops.bakers.at.z + 4] == "oak_door[facing=north,half=upper]", "shop doorway has upper door")
 assert(shop_map[state.shops.bakers.at.x + 4 .. "," .. state.shops.bakers.at.y + 1 .. "," .. state.shops.bakers.at.z + 5] == "torch", "shop has exterior torch")
+for _, side in ipairs({ "North Wall", "South Wall", "West Wall", "East Wall" }) do
+    local w_blocks = village_wall(side)
+    assert(#w_blocks > 0 and #w_blocks <= 4096, side .. " fits a build order")
+    local gates, walls = 0, 0
+    for _, e in ipairs(w_blocks) do
+        if e[4] == "oak_fence_gate" then gates = gates + 1 end
+        if e[4] == "cobblestone_wall" then walls = walls + 1 end
+    end
+    assert(gates >= 3 and walls > 0, side .. " has fence gates and wall battlements")
+end
 local large = { bot = "Bot2", name = "long road", blocks = {} }
 for x = 1, 4100 do large.blocks[x] = { x, 70, 0, "stone" } end
 assert(hand(large) and #orders[#orders].blocks == 4096, "large plans use bounded batches")
@@ -94,4 +104,4 @@ assert(not completed(large, { build_done = true, build_name = "other" }), "anoth
 assert(not completed(large, { build_done = true, build_name = large.name }), "first batch is not the entire road")
 assert(#orders[#orders].blocks == 4, "remaining blocks are handed out")
 assert(completed(large, { build_done = true, build_name = large.name }), "last verified batch completes the plan")
-print("construction OK: stairs, shared streets, unloaded terrain, suppliers, cancelled orders, early shops")
+print("construction OK: stairs, shared streets, unloaded terrain, suppliers, cancelled orders, early shops, village walls and gates")

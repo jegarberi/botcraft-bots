@@ -4993,7 +4993,7 @@ static Status BuildStep(McpBot& c)
         // under it is there
         if (!clearing && (EndsWith(wanted_block, ":chest") || EndsWith(wanted_block, ":barrel") || EndsWith(wanted_block, "furnace") ||
             EndsWith(wanted_block, ":smoker") || EndsWith(wanted_block, ":crafting_table") || EndsWith(wanted_block, "_bed") ||
-            EndsWith(wanted_block, "_door") || EndsWith(wanted_block, ":campfire") || EndsWith(wanted_block, ":composter")))
+            EndsWith(wanted_block, "_door") || EndsWith(wanted_block, "_fence_gate") || EndsWith(wanted_block, ":campfire") || EndsWith(wanted_block, ":composter")))
         {
             const Blockstate* under = world->GetBlock(p + Position(0, -1, 0));
             if (under == nullptr || !under->IsSolid())
@@ -5174,7 +5174,7 @@ static Status BuildStep(McpBot& c)
             }
         }
     }
-    const std::optional<PlayerDiggingFace> face = EndsWith(item, "_door") ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
+    const std::optional<PlayerDiggingFace> face = (EndsWith(item, "_door") || EndsWith(item, "_fence_gate")) ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
     if (PlaceBlock(c, item, p, face, true, false, facing == wanted_next.state.end()) == Status::Failure)
     {
         give_up_on(p);

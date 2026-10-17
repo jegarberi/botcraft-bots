@@ -103,6 +103,7 @@ do
             if not w.done then w.handed, w.started, w.recheck, w.offset = nil, false, w.road, nil end
         end
         for _, w in pairs(state.shops or {}) do if not w.done then w.handed, w.started = 0, false end end
+        for _, w in pairs(state.walls or {}) do if not w.done then w.handed, w.started = 0, false end end
         if state.work then state.work.handed, state.work.started = 0, false end
     end
 end
@@ -505,6 +506,7 @@ end
 local function homeless(n)
     local h = state.village and state.village[n]
     for _, w in pairs(state.shops or {}) do if w.bot == n and not w.done then return true end end
+    for _, w in pairs(state.walls or {}) do if w.bot == n and not w.done then return true end end
     return h and not h.done and not support[n]
 end
 
@@ -791,6 +793,115 @@ local function shop(o, trade)
     return b, name
 end
 
+local WALLS = { "North Wall", "South Wall", "West Wall", "East Wall" }
+
+local function village_bounds()
+    local t = state.town
+    local max_col, max_row = 0, 0
+    local cells = {}
+    for k in pairs(state.cells or {}) do
+        cells[k] = true
+        local c, r = k:match("^(-?%d+),(-?%d+)$")
+        if c and r then max_col, max_row = math.max(max_col, tonumber(c)), math.max(max_row, tonumber(r)) end
+    end
+    for _, h in pairs(state.village or {}) do
+        if h.at then
+            local c, r = (h.at.x - t.x) // 18, (h.at.z - t.z) // 18
+            cells[c .. "," .. r] = true
+            max_col, max_row = math.max(max_col, c), math.max(max_row, r)
+        end
+    end
+    local missing_shops = 0
+    for trade in pairs(SHOPS) do
+        local w = (state.shops or {})[trade]
+        if w and w.at then
+            local c, r = (w.at.x - t.x) // 18, (w.at.z - t.z) // 18
+            cells[c .. "," .. r] = true
+            max_col, max_row = math.max(max_col, c), math.max(max_row, r)
+        else
+            missing_shops = missing_shops + 1
+        end
+    end
+    local i = 0
+    while missing_shops > 0 do
+        local c, r = i % COLS, i // COLS
+        if not cells[c .. "," .. r] then
+            cells[c .. "," .. r] = true
+            max_col, max_row = math.max(max_col, c), math.max(max_row, r)
+            missing_shops = missing_shops - 1
+        end
+        i = i + 1
+    end
+    return t.x - 5, t.x + (max_col + 1) * 18, t.z - 3, t.z + (max_row + 1) * 18, max_row
+end
+
+-- A perimeter wall with arched gates and torches along one side of the village border
+local function village_wall(side)
+    local t = state.town
+    local x1, x2, z1, z2, max_row = village_bounds()
+    local b = {}
+    local function put(x, y, z, item) b[#b + 1] = { x, y, z, item } end
+    local function column(x, z, edge_dist, gate_dist)
+        local g, known = ground(x, z, t.y)
+        local h = known and g or t.y
+        local r = call("get_block", { bot = observer(x, z), x = x, y = h + 18, z = z, y_min = h })
+        local top_name = type(r) == "table" and tostring(r.block or "") or ""
+        if top_name:match("_log$") or top_name:match("_leaves$") then
+            for y = (tonumber(r.y) or h), h, -1 do put(x, y, z, "air") end
+        end
+        for y = math.min(g - 1, h - 1), h - 1 do put(x, y, z, "cobblestone") end
+        for y = h, h + 4 do put(x, y, z, "air") end
+        if gate_dist and math.abs(gate_dist) <= 2 then
+            if math.abs(gate_dist) <= 1 then
+                put(x, h, z, "oak_fence_gate")
+                put(x, h + 3, z, "cobblestone")
+                put(x, h + 4, z, "cobblestone_wall")
+                if gate_dist == 0 then put(x, h + 5, z, "torch") end
+            else
+                for y = h, h + 3 do put(x, y, z, "oak_log") end
+                put(x, h + 4, z, "torch")
+            end
+        elseif edge_dist == 0 then
+            for y = h, h + 2 do put(x, y, z, "oak_log") end
+            put(x, h + 3, z, "cobblestone_wall")
+            put(x, h + 4, z, "torch")
+        else
+            put(x, h, z, "cobblestone")
+            put(x, h + 1, z, "cobblestone")
+            if edge_dist % 6 == 0 then
+                put(x, h + 2, z, "oak_log")
+                put(x, h + 3, z, "torch")
+            else
+                put(x, h + 2, z, "cobblestone_wall")
+            end
+        end
+    end
+    local function gate_offset(pos, gates)
+        local best
+        for _, g in ipairs(gates) do
+            local d = pos - g
+            if not best or math.abs(d) < math.abs(best) then best = d end
+        end
+        return best
+    end
+    if side == "North Wall" or side == "South Wall" then
+        local z = side == "North Wall" and z1 or z2
+        local gates = { t.x - 1, (x1 + x2) // 2 }
+        for x = x1, x2 do
+            column(x, z, math.min(x - x1, x2 - x), gate_offset(x, gates))
+        end
+        return b, { x = (x1 + x2) // 2, y = t.y, z = z }
+    else
+        local x = side == "West Wall" and x1 or x2
+        local gates = {}
+        for row = 0, max_row do gates[#gates + 1] = t.z + row * 18 + 14 end
+        for z = z1, z2 do
+            column(x, z, math.min(z - z1, z2 - z), gate_offset(z, gates))
+        end
+        return b, { x = x, y = t.y, z = (z1 + z2) // 2 }
+    end
+end
+
 -- The village: a house for each bot (a lot of the town), handed as its own solo build order, watched like the
 -- building under way, then its road the same way; once that is paved the bot is split into a trade
 local function homes(names, now)
@@ -881,13 +992,14 @@ local function homes(names, now)
     end
     -- A trade can open its shop as soon as one of its homeowners is free.
     state.shops = state.shops or {}
+    local leader = call("leader", {})
     for trade in pairs(SHOPS) do
         local w, who = state.shops[trade], nil
         for _, n in ipairs((state.groups or {})[trade] or {}) do
-            if (state.village[n] or {}).done and not homeless(n) and not (state.work and state.work.bot == n) then who = n; break end
+            if n ~= leader and (state.village[n] or {}).done and not homeless(n) and not (state.work and state.work.bot == n) then who = n; break end
         end
         if not w and who then
-            local at = lot(call("leader", {}))
+            local at = lot(leader)
             local blocks, name = shop(at, trade)
             w = { name = name, bot = who, at = at, blocks = blocks }
             state.shops[trade] = w
@@ -907,6 +1019,41 @@ local function homes(names, now)
                     announce("the " .. w.name .. " is open at " .. w.at.x .. " " .. w.at.z)
                 elseif now - (w.handed or 0) >= 600 and (not st.building or st.build_name ~= w.name) then
                     hand(w)
+                end
+            end
+        end
+    end
+    -- Free homeowners also enclose the village border with a wall and gates on all four sides.
+    if state.town then
+        state.walls = state.walls or {}
+        for _, side in ipairs(WALLS) do
+            local w, who = state.walls[side], nil
+            for _, n in ipairs(names) do
+                if n ~= leader and (state.village[n] or {}).done and not homeless(n) and not support[n] and not (state.work and state.work.bot == n) then
+                    who = n; break
+                end
+            end
+            if not w and who then
+                local blocks, at = village_wall(side)
+                w = { name = side, bot = who, at = at, blocks = blocks }
+                state.walls[side] = w
+                hand(w)
+                announce(who .. " builds the " .. side .. " at " .. at.x .. " " .. at.z)
+                last_split = 0
+            elseif w and not w.done then
+                if not looks[w.bot] and who then
+                    w.bot, w.handed, w.started = who, nil, false
+                    hand(w)
+                end
+                local st = looks[w.bot]
+                if type(st) == "table" then
+                    if st.building then w.started = true end
+                    if completed(w, st) then
+                        w.done, w.blocks, last_split = true, nil, 0
+                        announce("the " .. w.name .. " stands at " .. w.at.x .. " " .. w.at.z)
+                    elseif now - (w.handed or 0) >= 600 and (not st.building or st.build_name ~= w.name) then
+                        hand(w)
+                    end
                 end
             end
         end
@@ -1035,7 +1182,7 @@ end)
 
 bot.tool{
     name = "empire",
-    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name; it sleeps there every night), then a road joining it to the others, and then take a trade; once every house stands, each trade's shop goes up (bakery, farm store, butcher's, mining office, smithy) (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
+    description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name; it sleeps there every night), then a road joining it to the others, and then take a trade; once every house stands, each trade's shop goes up (bakery, farm store, butcher's, mining office, smithy) and the village border wall and gates (north, south, west, east) are built (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
     params = { start = "boolean", stop = "boolean", village = "boolean", residence = "string" },
     run = function(args)
         if args.residence then
@@ -1068,6 +1215,7 @@ bot.tool{
                 local v = {}
                 for n, h in pairs(state.village) do v[n] = (h.done and "house at " or h.road and "paving its road from " or "building its house at ") .. h.at.x .. " " .. h.at.z end
                 for _, w in pairs(state.shops or {}) do v[w.name] = (w.done and "open at " or (w.bot .. " building it at ")) .. w.at.x .. " " .. w.at.z end
+                for _, w in pairs(state.walls or {}) do v[w.name] = (w.done and "standing at " or (w.bot .. " building it at ")) .. w.at.x .. " " .. w.at.z end
                 return v end)() }
     end,
 }

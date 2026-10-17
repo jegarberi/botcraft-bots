@@ -52,7 +52,7 @@ index a669863..63a3c4e 100644
          /// @brief Names of all connected players
          std::map<ProtocolCraft::UUID, std::string> player_names;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..dc7c57e 100644
+index 958521f..552eef1 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -65,7 +65,7 @@ index 958521f..dc7c57e 100644
  #include "botcraft/AI/Tasks/PathfindingTask.hpp"
  #include "botcraft/Game/Entities/EntityManager.hpp"
  #include "botcraft/Game/Entities/LocalPlayer.hpp"
-@@ -9,9 +13,15 @@
+@@ -9,9 +13,16 @@
  #include "botcraft/Utilities/Logger.hpp"
  #include "botcraft/Utilities/MiscUtilities.hpp"
  #include "botcraft/Utilities/SleepUtilities.hpp"
@@ -75,13 +75,14 @@ index 958521f..dc7c57e 100644
  {
 +    static bool IsWoodenDoor(const Blockstate* block)
 +    {
-+        return block != nullptr && Utilities::EndsWith(block->GetName(), "_door") && block->GetName() != "minecraft:iron_door";
++        return block != nullptr && ((Utilities::EndsWith(block->GetName(), "_door") && block->GetName() != "minecraft:iron_door") ||
++            Utilities::EndsWith(block->GetName(), "_fence_gate"));
 +    }
 +
      class PathfindingBlockstate
      {
      public:
-@@ -45,7 +55,7 @@ namespace Botcraft
+@@ -45,7 +56,7 @@ namespace Botcraft
                  return;
              }
  
@@ -90,7 +91,7 @@ index 958521f..dc7c57e 100644
              {
                  solid = true;
                  const auto& colliders = block->GetCollidersAtPos(pos);
-@@ -149,7 +159,7 @@ namespace Botcraft
+@@ -149,7 +160,7 @@ namespace Botcraft
  
          bool end_is_inside_solid = false;
          block = world->GetBlock(end);
@@ -99,7 +100,7 @@ index 958521f..dc7c57e 100644
  
          while (!nodes_to_explore.empty())
          {
-@@ -607,6 +617,17 @@ namespace Botcraft
+@@ -607,6 +618,17 @@ namespace Botcraft
  
                          if (block != nullptr && ((block->IsSolid() && !block->IsClimbable()) || (take_damage && block->IsHazardous())))
                          {
@@ -117,7 +118,7 @@ index 958521f..dc7c57e 100644
                              break;
                          }
  
-@@ -960,6 +981,10 @@ namespace Botcraft
+@@ -960,6 +982,10 @@ namespace Botcraft
          // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
          // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
          // climbable at the bottom, preventing fall damage
@@ -128,7 +129,7 @@ index 958521f..dc7c57e 100644
          if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
              {
                  // Previous inputs have not been processed by physics thread yet
-@@ -984,8 +1009,48 @@ namespace Botcraft
+@@ -984,8 +1010,48 @@ namespace Botcraft
                      (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
                  local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
  
@@ -178,7 +179,7 @@ index 958521f..dc7c57e 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1194,41 @@ namespace Botcraft
+@@ -1129,7 +1195,41 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
@@ -220,7 +221,7 @@ index 958521f..dc7c57e 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1289,8 @@ namespace Botcraft
+@@ -1190,6 +1290,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -229,7 +230,7 @@ index 958521f..dc7c57e 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1212,6 +1313,22 @@ namespace Botcraft
+@@ -1212,6 +1314,22 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
  
@@ -252,7 +253,7 @@ index 958521f..dc7c57e 100644
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
  
-@@ -1297,7 +1414,45 @@ namespace Botcraft
+@@ -1297,7 +1415,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal
@@ -276,6 +277,10 @@ index 958521f..dc7c57e 100644
 +                    if (!IsWoodenDoor(b))
 +                    {
 +                        return false;
++                    }
++                    if (Utilities::EndsWith(b->GetName(), "_fence_gate"))
++                    {
++                        return !b->GetCollidersAtPos(door_pos).empty();
 +                    }
 +                    for (const auto& c : b->GetCollidersAtPos(door_pos))
 +                    {

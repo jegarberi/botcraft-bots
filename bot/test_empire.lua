@@ -118,6 +118,9 @@ local ok, err = pcall(function()
     for _, shop in ipairs({ "Bakery", "Farm Store", "Butcher's", "Mining Office", "Smithy" }) do
         assert(v[shop] and v[shop]:match("^open at"), shop .. " open: " .. tostring(v[shop]))
     end
+    for _, wall in ipairs({ "North Wall", "South Wall", "West Wall", "East Wall" }) do
+        assert(v[wall] and v[wall]:match("^standing at"), wall .. " standing: " .. tostring(v[wall]))
+    end
     local s = tool.run({ stop = true })
     assert(s.age == "Imperial Age", "went up the ages, got " .. s.age)
     assert(brain_on, "the brain works again")
