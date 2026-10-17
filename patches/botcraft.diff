@@ -52,17 +52,54 @@ index a669863..63a3c4e 100644
          /// @brief Names of all connected players
          std::map<ProtocolCraft::UUID, std::string> player_names;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..ef99c43 100644
+index 958521f..dc7c57e 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-@@ -1,3 +1,6 @@
+@@ -1,5 +1,9 @@
 +#include <chrono>
 +#include <optional>
 +
  #include "botcraft/AI/BehaviourClient.hpp"
  #include "botcraft/AI/Blackboard.hpp"
++#include "botcraft/AI/Tasks/BaseTasks.hpp"
  #include "botcraft/AI/Tasks/PathfindingTask.hpp"
-@@ -607,6 +610,17 @@ namespace Botcraft
+ #include "botcraft/Game/Entities/EntityManager.hpp"
+ #include "botcraft/Game/Entities/LocalPlayer.hpp"
+@@ -9,9 +13,15 @@
+ #include "botcraft/Utilities/Logger.hpp"
+ #include "botcraft/Utilities/MiscUtilities.hpp"
+ #include "botcraft/Utilities/SleepUtilities.hpp"
++#include "botcraft/Utilities/StringUtilities.hpp"
+ 
+ namespace Botcraft
+ {
++    static bool IsWoodenDoor(const Blockstate* block)
++    {
++        return block != nullptr && Utilities::EndsWith(block->GetName(), "_door") && block->GetName() != "minecraft:iron_door";
++    }
++
+     class PathfindingBlockstate
+     {
+     public:
+@@ -45,7 +55,7 @@ namespace Botcraft
+                 return;
+             }
+ 
+-            if (block->IsSolid())
++            if (block->IsSolid() && !IsWoodenDoor(block))
+             {
+                 solid = true;
+                 const auto& colliders = block->GetCollidersAtPos(pos);
+@@ -149,7 +159,7 @@ namespace Botcraft
+ 
+         bool end_is_inside_solid = false;
+         block = world->GetBlock(end);
+-        end_is_inside_solid = block != nullptr && block->IsSolid();
++        end_is_inside_solid = block != nullptr && block->IsSolid() && !IsWoodenDoor(block);
+ 
+         while (!nodes_to_explore.empty())
+         {
+@@ -607,6 +617,17 @@ namespace Botcraft
  
                          if (block != nullptr && ((block->IsSolid() && !block->IsClimbable()) || (take_damage && block->IsHazardous())))
                          {
@@ -80,7 +117,7 @@ index 958521f..ef99c43 100644
                              break;
                          }
  
-@@ -960,6 +974,10 @@ namespace Botcraft
+@@ -960,6 +981,10 @@ namespace Botcraft
          // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
          // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
          // climbable at the bottom, preventing fall damage
@@ -91,7 +128,7 @@ index 958521f..ef99c43 100644
          if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
              {
                  // Previous inputs have not been processed by physics thread yet
-@@ -984,8 +1002,48 @@ namespace Botcraft
+@@ -984,8 +1009,48 @@ namespace Botcraft
                      (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
                  local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
  
@@ -141,7 +178,7 @@ index 958521f..ef99c43 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1187,41 @@ namespace Botcraft
+@@ -1129,7 +1194,41 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
@@ -183,7 +220,7 @@ index 958521f..ef99c43 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1282,8 @@ namespace Botcraft
+@@ -1190,6 +1289,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -192,7 +229,7 @@ index 958521f..ef99c43 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1212,6 +1306,22 @@ namespace Botcraft
+@@ -1212,6 +1313,22 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
  
@@ -215,7 +252,7 @@ index 958521f..ef99c43 100644
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
  
-@@ -1297,7 +1407,20 @@ namespace Botcraft
+@@ -1297,7 +1414,45 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal
@@ -232,6 +269,31 @@ index 958521f..ef99c43 100644
 +                        drop = b != nullptr && b->IsAir();
 +                    }
 +                    careful = careful || drop;
++                }
++                const auto door_blocks_step = [&](const Position& door_pos) -> bool
++                {
++                    const Blockstate* b = world->GetBlock(door_pos);
++                    if (!IsWoodenDoor(b))
++                    {
++                        return false;
++                    }
++                    for (const auto& c : b->GetCollidersAtPos(door_pos))
++                    {
++                        if ((path[i].first.x != current_position.x && c.GetHalfSize().z > 0.4) ||
++                            (path[i].first.z != current_position.z && c.GetHalfSize().x > 0.4))
++                        {
++                            return true;
++                        }
++                    }
++                    return false;
++                };
++                for (const Position& door_pos : { current_position, path[i].first })
++                {
++                    if (door_blocks_step(door_pos))
++                    {
++                        InteractWithBlock(client, door_pos, PlayerDiggingFace::Up, true);
++                        Utilities::YieldForCondition([&]() { return !door_blocks_step(door_pos); }, client, 10.0 * ms_per_tick);
++                    }
 +                }
 +                if (!Move(client, local_player, Vector3<double>(path[i].first.x + 0.5, path[i].second, path[i].first.z + 0.5), speed_factor, sprint && !careful))
                  {

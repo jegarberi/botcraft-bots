@@ -30,8 +30,12 @@ local function check_road(o)
     local blocks, err = road(o)
     assert(blocks, err)
     assert(#blocks <= 4096, "road fits a build order")
-    local stairs = 0
-    for _, b in ipairs(blocks) do if b[4]:match("stairs") then stairs = stairs + 1 end end
+    local stairs, torches = 0, 0
+    for _, b in ipairs(blocks) do
+        if b[4]:match("stairs") then stairs = stairs + 1 end
+        if b[4] == "torch" then torches = torches + 1 end
+    end
+    assert(torches > 0, "roads place torches")
     local m = map(blocks)
     for k, p in pairs(state.roads) do
         for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
@@ -70,8 +74,8 @@ state.groups = { builders = { "Bot1", "Bot2" } }
 assert(worker({ "Bot1", "Bot2" }) == "Bot2", "supply crew member is not reassigned to empire building")
 -- An idle, cancelled order is not a finished house. One unfinished neighbor does not block a shop.
 state.village = {
-    Bot1 = { done = true, road = true, homed = true, at = { x = 0, y = 71, z = 0 }, plan = 2, grounded = true },
-    Bot2 = { started = true, handed = os.time(), at = { x = 18, y = 71, z = 0 }, plan = 2, grounded = true },
+    Bot1 = { done = true, road = true, homed = true, at = { x = 0, y = 71, z = 0 }, plan = 4, grounded = true },
+    Bot2 = { started = true, handed = os.time(), at = { x = 18, y = 71, z = 0 }, plan = 4, grounded = true },
 }
 state.groups, state.cells, state.lots, state.shops = { bakers = { "Bot1" } }, {}, 2, {}
 support = {}
@@ -79,6 +83,10 @@ looks = { Bot1 = {}, Bot2 = { building = false, build_left = 0, build_done = fal
 homes({ "Bot1", "Bot2" }, os.time())
 assert(not state.village.Bot2.road, "cancelled order is not completion")
 assert(state.shops.bakers and state.shops.bakers.bot == "Bot1", "shop starts before every home finishes")
+local shop_map = map(state.shops.bakers.blocks)
+assert(shop_map[state.shops.bakers.at.x + 3 .. "," .. state.shops.bakers.at.y .. "," .. state.shops.bakers.at.z + 4] == "oak_door[facing=north,half=lower]", "shop doorway has lower door")
+assert(shop_map[state.shops.bakers.at.x + 3 .. "," .. state.shops.bakers.at.y + 1 .. "," .. state.shops.bakers.at.z + 4] == "oak_door[facing=north,half=upper]", "shop doorway has upper door")
+assert(shop_map[state.shops.bakers.at.x + 4 .. "," .. state.shops.bakers.at.y + 1 .. "," .. state.shops.bakers.at.z + 5] == "torch", "shop has exterior torch")
 local large = { bot = "Bot2", name = "long road", blocks = {} }
 for x = 1, 4100 do large.blocks[x] = { x, 70, 0, "stone" } end
 assert(hand(large) and #orders[#orders].blocks == 4096, "large plans use bounded batches")

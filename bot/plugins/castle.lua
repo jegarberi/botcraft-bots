@@ -182,6 +182,9 @@ local function house(list, x0, y, z0, item, door_side)
             end
         end
     end
+    local door_facing = ddz < 0 and "south" or ddz > 0 and "north" or ddx < 0 and "east" or "west"
+    add(list, x0 + 2 * ddx, y, z0 + 2 * ddz, ROOF .. "_door[facing=" .. door_facing .. ",half=lower]")
+    add(list, x0 + 2 * ddx, y + 1, z0 + 2 * ddz, ROOF .. "_door[facing=" .. door_facing .. ",half=upper]")
     for dx = -2, 2 do
         -- A stair's high side is the way it faces: toward the ridge, so north on the south slope
         add(list, x0 + dx, y + 3, z0 - 2, ROOF .. "_stairs[facing=south,half=bottom]")

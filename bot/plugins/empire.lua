@@ -99,7 +99,7 @@ do
         -- After a restart no bot has its build order any more, and "not building, nothing left" looked like a building
         -- finished: every unfinished one is handed out again, a house whose road was under way checked first
         for _, w in pairs(state.village or {}) do
-            if w.road and w.road_plan ~= 2 then w.done = nil end
+            if w.road and w.road_plan ~= 3 then w.done = nil end
             if not w.done then w.handed, w.started, w.recheck, w.offset = nil, false, w.road, nil end
         end
         for _, w in pairs(state.shops or {}) do if not w.done then w.handed, w.started = 0, false end end
@@ -273,12 +273,46 @@ local function hut(o, w, d, h, wall, post, roof, open)
             if x > 0 and x < w - 1 and z > 0 and z < d - 1 then put(x, h + 1, z, roof) end
         end
     end
+    if not open then
+        put(w // 2, 0, d - 1, "oak_door[facing=north,half=lower]")
+        put(w // 2, 1, d - 1, "oak_door[facing=north,half=upper]")
+        put(w // 2, 2, 1, "torch")
+        put(w // 2 + 1, 2, d - 2, "torch")
+    end
     return b, put
 end
 
 local function with(blocks, o, list)
     for _, e in ipairs(list) do blocks[#blocks + 1] = { o.x + e[1], o.y + e[2], o.z + e[3], e[4] } end
     return blocks
+end
+
+-- Every village lot gets a campfire with log seats and a walled garden plot (dirt with a composter and corner torches)
+local function farm_and_campfire(b, o, with_water)
+    local yard = {
+        { 1, -1, 9, "cobblestone" }, { 1, 0, 9, "campfire" },
+        { 1, -1, 8, "cobblestone" }, { 1, 0, 8, "oak_log" },
+        { 0, -1, 9, "cobblestone" }, { 0, 0, 9, "oak_log" },
+        { 1, -1, 10, "cobblestone" }, { 1, 0, 10, "oak_log" },
+        { 2, -1, 8, "cobblestone" }, { 2, 0, 8, "oak_fence" }, { 2, 1, 8, "torch" },
+    }
+    for x = 8, 14 do
+        for z = 0, 6 do
+            yard[#yard + 1] = { x, -1, z, "cobblestone" }
+            for y = 1, 3 do yard[#yard + 1] = { x, y, z, "air" } end
+            if x == 8 or x == 14 or z == 0 or z == 6 then
+                yard[#yard + 1] = { x, 0, z, "cobblestone" }
+            elseif with_water and x == 11 and z == 3 then
+                yard[#yard + 1] = { x, 0, z, "water" }
+            else
+                yard[#yard + 1] = { x, 0, z, "dirt" }
+            end
+        end
+    end
+    yard[#yard + 1] = { 8, 1, 3, "composter" }
+    yard[#yard + 1] = { 8, 1, 0, "torch" }; yard[#yard + 1] = { 14, 1, 0, "torch" }
+    yard[#yard + 1] = { 8, 1, 6, "torch" }; yard[#yard + 1] = { 14, 1, 6, "torch" }
+    return with(b, o, yard)
 end
 
 local BUILDINGS = {
@@ -288,7 +322,7 @@ local BUILDINGS = {
       make = function(o) return with(hut(o, 7, 5, 3, nil, "oak_log", "spruce_planks", true), o,
           { { 2, 0, 2, "oak_log" }, { 3, 0, 2, "oak_log" }, { 4, 0, 2, "oak_log" }, { 3, 1, 2, "oak_log" }, { 1, 0, 1, "chest" } }) end },
     { name = "Mill", age = 1, cost = { wood = 32 },
-      -- with sails: a cross of fences on the north face
+      -- with sails: a cross of fences on the north face, plus an irrigated farm plot and campfire
       make = function(o)
           local s = { { 2, 0, 2, "crafting_table" } }
           for i = 1, 3 do
@@ -296,7 +330,7 @@ local BUILDINGS = {
               s[#s + 1] = { 2 + i, 3, -1, "oak_fence" }; s[#s + 1] = { 2 - i, 3, -1, "oak_fence" }
           end
           s[#s + 1] = { 2, 3, -1, "oak_log" }
-          return with(hut(o, 5, 5, 4, "cobblestone", "oak_log", "oak_planks"), o, s) end },
+          return farm_and_campfire(with(hut(o, 5, 5, 4, "cobblestone", "oak_log", "oak_planks"), o, s), o, true) end },
     { name = "Mining Camp", age = 1, cost = { wood = 32 },
       make = function(o) return with(hut(o, 7, 5, 3, nil, "cobblestone", "cobblestone", true), o,
           { { 2, 0, 2, "cobblestone" }, { 3, 0, 2, "cobblestone" }, { 3, 1, 2, "cobblestone" }, { 1, 0, 1, "chest" } }) end },
@@ -525,7 +559,22 @@ end
 -- A plains villager's house: walls 4 high on a cobblestone base row, oak logs at the corners, and a pitched roof of
 -- oak stairs (any wood the bot carries does, see OtherWood) over the north and south sides, overhanging by one,
 -- with plank gables east and west. HOME_PLAN: houses planned before it are planned again
-local HOME_PLAN = 2
+-- Clear any trees (_log or _leaves) standing on the 18x18 village lot before building
+local function clear_lot(b, o)
+    for dx = 0, 17 do
+        for dz = 0, 17 do
+            local r = call("get_block", { bot = observer(o.x + dx, o.z + dz), x = o.x + dx, y = o.y + 18, z = o.z + dz, y_min = o.y })
+            local name = type(r) == "table" and tostring(r.block or "") or ""
+            if name:match("_log$") or name:match("_leaves$") then
+                for y = (tonumber(r.y) or o.y), o.y, -1 do
+                    table.insert(b, 1, { o.x + dx, y, o.z + dz, "air" })
+                end
+            end
+        end
+    end
+end
+
+local HOME_PLAN = 4
 local function home(o, owner)
     local H = 4
     local b, put = hut(o, 7, 7, H, "oak_planks", "oak_log", "air")
@@ -556,11 +605,14 @@ local function home(o, owner)
             end
         end
     end
-    return with(b, o, {
+    clear_lot(b, o)
+    b = with(b, o, {
         { 1, 0, 1, "white_bed[facing=north,part=head]" }, { 1, 0, 2, "white_bed[facing=north,part=foot]" },
         { 3, 0, 1, "furnace" }, { 4, 0, 1, "chest" }, { 5, 0, 1, "chest" },
         { 3, 0, 4, "oak_stairs[facing=west]" }, { 4, 0, 4, "oak_fence" }, { 4, 1, 4, "oak_pressure_plate" }, { 5, 0, 4, "oak_stairs[facing=east]" },
-        { 2, -1, 7, "cobblestone" }, { 2, 0, 7, "oak_sign|" .. owner .. "'s|house" } })
+        { 2, -1, 7, "cobblestone" }, { 2, 0, 7, "oak_sign|" .. owner .. "'s|house" },
+        { 4, -1, 7, "cobblestone" }, { 4, 0, 7, "oak_fence" }, { 4, 1, 7, "torch" } })
+    return farm_and_campfire(b, o, false)
 end
 
 -- Each trade's shop, in the village: a hut with its sign and what the trade works with
@@ -580,14 +632,9 @@ local SHOPS = {
     blacksmiths = { "Smithy", { { 1, 0, 1, "blast_furnace" }, { 2, 0, 1, "furnace" }, { 3, 0, 1, "anvil" }, { 4, 0, 1, "smithing_table" },
         { 5, 0, 1, "grindstone" }, { 1, 0, 3, "chest" }, { 5, 0, 3, "crafting_table" } } },
 }
-local function shop(o, trade)
-    local name, inside = SHOPS[trade][1], SHOPS[trade][2]
-    local b = with(hut(o, 7, 5, 3, "oak_planks", "stripped_oak_log", "spruce_planks"), o, inside)
-    return with(b, o, { { 2, -1, 5, "cobblestone" }, { 2, 0, 5, "oak_sign|" .. name .. "|" } }), name
-end
 
 -- Shared columns are saved with the town: every builder uses the same heights and stairs.
-local ROAD_PLAN = 2
+local ROAD_PLAN = 3
 local function road(o)
     local t = state.town
     local function plan(switchback)
@@ -687,6 +734,14 @@ local function road(o)
         local keys = {}
         for k in pairs(route) do keys[#keys + 1] = k end
         table.sort(keys)
+        local function add_lamp(lx, ly, lz)
+            local lamp = key(lx, lz)
+            if not route[lamp] and not (state.roads or {})[lamp] then
+                blocks[#blocks + 1] = { lx, ly - 1, lz, "stone" }
+                blocks[#blocks + 1] = { lx, ly, lz, "cobblestone_wall" }
+                blocks[#blocks + 1] = { lx, ly + 1, lz, "torch" }
+            end
+        end
         for _, k in ipairs(keys) do
             local p = nodes[k]
             local item = p.item or "air"
@@ -703,12 +758,13 @@ local function road(o)
             blocks[#blocks + 1] = { p.x, p.h, p.z, item }
             for y = p.h + 1, math.max(p.h + 2, p.ground + 1) do blocks[#blocks + 1] = { p.x, y, p.z, "air" } end
             if p.z >= o.z + 14 and (p.x - t.x) % 7 == 0 then
-                local lamp = key(p.x, p.z + 1)
-                if not route[lamp] and not (state.roads or {})[lamp] then
-                    blocks[#blocks + 1] = { p.x, p.h - 1, p.z + 1, "stone" }
-                    blocks[#blocks + 1] = { p.x, p.h, p.z + 1, "cobblestone_wall" }
-                    blocks[#blocks + 1] = { p.x, p.h + 1, p.z + 1, "torch" }
-                end
+                add_lamp(p.x, p.h, p.z + 1)
+            end
+            if p.x == t.x - 2 and (p.z - t.z) % 7 == 0 then
+                add_lamp(p.x - 1, p.h, p.z)
+            end
+            if p.x == o.x + 3 and p.z == o.z + 10 then
+                add_lamp(p.x - 1, p.h, p.z)
             end
             saved[k] = { h = p.h, ground = p.ground, item = item }
         end
@@ -720,6 +776,19 @@ local function road(o)
     state.roads = state.roads or {}
     for k, v in pairs(columns) do state.roads[k] = v end
     return blocks
+end
+
+local function shop(o, trade)
+    local name, inside = SHOPS[trade][1], SHOPS[trade][2]
+    local b = with(hut(o, 7, 5, 3, "oak_planks", "stripped_oak_log", "spruce_planks"), o, inside)
+    clear_lot(b, o)
+    b = with(b, o, {
+        { 2, -1, 5, "cobblestone" }, { 2, 0, 5, "oak_sign|" .. name .. "|" },
+        { 4, -1, 5, "cobblestone" }, { 4, 0, 5, "oak_fence" }, { 4, 1, 5, "torch" } })
+    if trade == "farmers" then b = farm_and_campfire(b, o, true) end
+    local r = state.town and road(o)
+    if r then for _, e in ipairs(r) do b[#b + 1] = e end end
+    return b, name
 end
 
 -- The village: a house for each bot (a lot of the town), handed as its own solo build order, watched like the

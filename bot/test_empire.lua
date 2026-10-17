@@ -91,7 +91,7 @@ local ok, err = pcall(function()
             assert(sign, "a sign with its name")
         end
     end
-    for _, k in ipairs({ "white_bed", "chest", "furnace", "oak_stairs", "oak_fence" }) do assert(furnished[k], "a house has a " .. k) end
+    for _, k in ipairs({ "white_bed", "chest", "furnace", "oak_stairs", "oak_fence", "oak_door", "campfire", "composter", "dirt", "torch" }) do assert(furnished[k], "a house has a " .. k) end
     for _ = 1, 30 do
         t = t + 60; tick()
         local ready = true

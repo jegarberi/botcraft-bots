@@ -30,7 +30,7 @@ namespace Construction
         {
             return item.size() >= suffix.size() && item.substr(item.size() - suffix.size()) == suffix;
         };
-        return ends_with("_bed") ? 2 : 1;
+        return (ends_with("_bed") || ends_with("_door") || ends_with(":campfire") || ends_with(":torch") || ends_with(":water")) ? 2 : 1;
     }
 }
 

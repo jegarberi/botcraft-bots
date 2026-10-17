@@ -1266,6 +1266,7 @@ static bool IsPenned(BehaviourClient& c, const Vector3<double>& animal);
 /// @brief Replace what is remembered in the 24 blocks around the bot with what is there now (monsters
 /// included), tell the team about the first new find of something it is after, and call the bots around
 /// to a fight when monsters gather
+static bool InStoredSite(const Position& p);
 static void ReportFinds(const std::string& by, const std::string& dimension, const Position& center, const int radius,
     const std::vector<std::pair<std::string, Position>>& finds);
 
@@ -1330,7 +1331,7 @@ static void Remember(McpBot& c)
     for (size_t i = 0; i < found.size() && !team_leader.empty() && !wanted.empty(); ++i)
     {
         const Blockstate* block = world->GetBlock(found[i]);
-        if (block == nullptr || !MatchesAny(block->GetName(), wanted))
+        if (block == nullptr || !MatchesAny(block->GetName(), wanted) || InStoredSite(found[i]))
         {
             continue;
         }
@@ -1419,6 +1420,11 @@ static void Remember(McpBot& c)
         }
         // "minecraft:oak_log" is remembered as "oak_log"
         const std::string kind = block->GetName().substr(block->GetName().find(':') + 1);
+        const auto ends = [&](const std::string& end) { return kind.size() >= end.size() && kind.compare(kind.size() - end.size(), end.size(), end) == 0; };
+        if ((ends("_log") || ends("_ore")) && InStoredSite(p))
+        {
+            continue;
+        }
         sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(statement, 3, p.x);
@@ -1462,7 +1468,7 @@ static void Remember(McpBot& c)
         const Blockstate* block = world->GetBlock(p);
         const std::string kind = block == nullptr ? "" : block->GetName().substr(block->GetName().find(':') + 1);
         const auto ends = [&](const std::string& end) { return kind.size() >= end.size() && kind.compare(kind.size() - end.size(), end.size(), end) == 0; };
-        if (!kind.empty() && !ends("_bed") && kind != "crafting_table" && kind != "furnace")
+        if (!kind.empty() && !ends("_bed") && kind != "crafting_table" && kind != "furnace" && !((ends("_log") || ends("_ore")) && InStoredSite(p)))
         {
             finds.push_back({ kind, p });
         }
@@ -1839,7 +1845,7 @@ static std::vector<Site> LoadSites()
 {
     std::vector<Site> sites;
     sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "SELECT x1, y1, z1, x2, y2, z2, name FROM sites ORDER BY rowid", -1, &statement, nullptr);
+    sqlite3_prepare_v2(SharedDb(), "SELECT x1, y1, z1, x2, y2, z2, name FROM sites WHERE name NOT LIKE '%_road' ORDER BY rowid", -1, &statement, nullptr);
     while (sqlite3_step(statement) == SQLITE_ROW)
     {
         sites.push_back({ Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2)),
@@ -1864,6 +1870,20 @@ static bool InStoredSite(const Position& p)
         read_at = now;
     }
     return sites.Contains(p);
+}
+
+static bool NearStoredSite(const Position& p, const int margin)
+{
+    std::lock_guard<std::mutex> lock(sites_mutex);
+    for (const Site& site : LoadSites())
+    {
+        if (p.x >= site.min.x - margin && p.x <= site.max.x + margin &&
+            p.z >= site.min.z - margin && p.z <= site.max.z + margin)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// @return false if a stored box already covers it
@@ -2165,17 +2185,35 @@ static int FellTree(BehaviourClient& c, const Position& first)
         Wait(c, 600);
         GoTo(c, base, 1);
         Wait(c, 300);
-        // oak_log grows from oak_sapling
-        std::string sapling = kind.substr(0, kind.size() - 4) + "_sapling";
-        const size_t stripped = sapling.find("stripped_");
-        if (stripped != std::string::npos)
+        if (NearStoredSite(base, 48))
         {
-            sapling.erase(stripped, 9);
+            for (int dx = -3; dx <= 3; ++dx)
+            {
+                for (int dz = -3; dz <= 3; ++dz)
+                {
+                    const Position s = base + Position(dx, 0, dz);
+                    const Blockstate* b = world->GetBlock(s);
+                    if (b != nullptr && EndsWith(b->GetName(), "_sapling"))
+                    {
+                        SafeDig(c, s, true, PlayerDiggingFace::Up, false);
+                    }
+                }
+            }
         }
-        const Blockstate* ground = world->GetBlock(base + Position(0, -1, 0));
-        if (CountItem(c, sapling) > 0 && ground != nullptr && (ground->GetName() == "minecraft:dirt" || ground->GetName() == "minecraft:grass_block" || ground->GetName() == "minecraft:podzol"))
+        else
         {
-            PlaceBlock(c, sapling, base, PlayerDiggingFace::Up, true);
+            // oak_log grows from oak_sapling
+            std::string sapling = kind.substr(0, kind.size() - 4) + "_sapling";
+            const size_t stripped = sapling.find("stripped_");
+            if (stripped != std::string::npos)
+            {
+                sapling.erase(stripped, 9);
+            }
+            const Blockstate* ground = world->GetBlock(base + Position(0, -1, 0));
+            if (CountItem(c, sapling) > 0 && ground != nullptr && (ground->GetName() == "minecraft:dirt" || ground->GetName() == "minecraft:grass_block" || ground->GetName() == "minecraft:podzol"))
+            {
+                PlaceBlock(c, sapling, base, PlayerDiggingFace::Up, true);
+            }
         }
     }
     return felled;
@@ -2229,8 +2267,16 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
     const std::function<bool(const Position&)> outside_the_site = [builder](const Position& p) { return !InStoredSite(p) && (builder == nullptr || !builder->InSite(p)); };
     while (done < count)
     {
-        const std::vector<Position> found = FindBlocks(c, match, radius, failed.size() + 1, outside_the_site);
-        const auto target = std::find_if(found.begin(), found.end(), [&](const Position& p) { return failed.count(p) == 0; });
+        std::vector<Position> found = FindBlocks(c, match, radius, failed.size() + 8, outside_the_site);
+        auto target = std::find_if(found.begin(), found.end(), [&](const Position& p)
+            {
+                const Blockstate* b = c.GetWorld()->GetBlock(p);
+                return failed.count(p) == 0 && b != nullptr && EndsWith(b->GetName(), "_log") && NearStoredSite(p, 48);
+            });
+        if (target == found.end())
+        {
+            target = std::find_if(found.begin(), found.end(), [&](const Position& p) { return failed.count(p) == 0; });
+        }
         if (target == found.end() || failures >= 8)
         {
             return done > 0 ? Status::Success : Status::Failure;
@@ -3456,20 +3502,29 @@ static bool Explore(McpBot& c, const std::string& what)
 /// @return true if the bot walked (or tried to): look around again before exploring
 static bool GoToRemembered(McpBot& c, const std::string& kind)
 {
-    const std::vector<std::pair<std::string, Position>> places = Recall(c, kind, 1);
-    if (places.empty() || c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(places[0].second.x, places[0].second.y, places[0].second.z)) > 200.0 * 200.0)
+    const std::vector<std::pair<std::string, Position>> places = Recall(c, kind, 8);
+    for (const auto& [found_kind, p] : places)
     {
-        return false;
+        const double sqr_dist = c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z));
+        if (sqr_dist <= 16.0 * 16.0 || ((EndsWith(found_kind, "_log") || EndsWith(found_kind, "_ore")) && InStoredSite(p)))
+        {
+            Forget(p);
+            continue;
+        }
+        if (sqr_dist > 200.0 * 200.0)
+        {
+            return false;
+        }
+        c.SetNote("going back to a remembered " + found_kind + " at " + std::to_string(p.x) + " " + std::to_string(p.y) + " " + std::to_string(p.z));
+        if (GoTo(c, p, 12) == Status::Failure && TunnelToward(c, p, 40, true) == Status::Failure &&
+            c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z)) > 12.0 * 12.0)
+        {
+            // Neither on foot nor by digging: don't try again
+            Forget(p);
+        }
+        return true;
     }
-    const Position& p = places[0].second;
-    c.SetNote("going back to a remembered " + places[0].first + " at " + std::to_string(p.x) + " " + std::to_string(p.y) + " " + std::to_string(p.z));
-    if (GoTo(c, p, 12) == Status::Failure && TunnelToward(c, p, 40, true) == Status::Failure &&
-        c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z)) > 12.0 * 12.0)
-    {
-        // Neither on foot nor by digging: don't try again
-        Forget(p);
-    }
-    return true;
+    return false;
 }
 
 static void SkipStage(McpBot& c, const std::string& stage, const std::string& why)
@@ -4926,12 +4981,19 @@ static Status BuildStep(McpBot& c)
             // The foot entry creates this half too; placing a second bed here would move it one block.
             continue;
         }
+        const auto half = wanted.state.find("half");
+        if (empty && EndsWith(wanted_block, "_door") && half != wanted.state.end() && half->second == "upper")
+        {
+            // The lower entry creates this half too.
+            continue;
+        }
         // Something stands where a block has to go: removing it is clearing too
         const bool clearing = !empty;
-        // A chest, furnace, crafting table, barrel or bed goes on a floor, never in the air: not before the block
+        // A chest, furnace, crafting table, barrel, bed or door goes on a floor, never in the air: not before the block
         // under it is there
         if (!clearing && (EndsWith(wanted_block, ":chest") || EndsWith(wanted_block, ":barrel") || EndsWith(wanted_block, "furnace") ||
-            EndsWith(wanted_block, ":smoker") || EndsWith(wanted_block, ":crafting_table") || EndsWith(wanted_block, "_bed")))
+            EndsWith(wanted_block, ":smoker") || EndsWith(wanted_block, ":crafting_table") || EndsWith(wanted_block, "_bed") ||
+            EndsWith(wanted_block, "_door") || EndsWith(wanted_block, ":campfire") || EndsWith(wanted_block, ":composter")))
         {
             const Blockstate* under = world->GetBlock(p + Position(0, -1, 0));
             if (under == nullptr || !under->IsSolid())
@@ -5112,7 +5174,8 @@ static Status BuildStep(McpBot& c)
             }
         }
     }
-    if (PlaceBlock(c, item, p, std::nullopt, true, false, facing == wanted_next.state.end()) == Status::Failure)
+    const std::optional<PlayerDiggingFace> face = EndsWith(item, "_door") ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
+    if (PlaceBlock(c, item, p, face, true, false, facing == wanted_next.state.end()) == Status::Failure)
     {
         give_up_on(p);
         return Status::Success;
@@ -5810,7 +5873,7 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
         }
     }
     const auto sources = smelt_inputs.find(item);
-    if (sources != smelt_inputs.end())
+    if (sources != smelt_inputs.end() && item != "minecraft:coal")
     {
         const auto in_hand = std::find_if(sources->second.begin(), sources->second.end(), [&](const std::string& source) { return CountItem(c, source) > 0; });
         Position furnace;
@@ -5828,7 +5891,8 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
         }
         if (depth < 3)
         {
-            return Obtain(c, sources->second.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+            const auto oak = std::find(sources->second.begin(), sources->second.end(), "minecraft:oak_log");
+            return Obtain(c, oak != sources->second.end() ? *oak : sources->second.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
         }
     }
     if (recipe != recipes.end() && depth < 3)
@@ -5870,8 +5934,14 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
                 EnsurePlanks(c, std::max(needed, 8), stage);
                 return c.GetGoal().second > 0 ? Supply::Gathering : Supply::Working;
             }
+            if (std::find(accepted.begin(), accepted.end(), "minecraft:charcoal") != accepted.end() &&
+                (!ItemLike(c, "_log").empty() || !ItemLike(c, "_planks").empty()))
+            {
+                return Obtain(c, "minecraft:charcoal", depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+            }
             const auto held = std::find_if(accepted.begin(), accepted.end(), [&](const std::string& a) { return CountItem(c, a) > 0; });
-            return Obtain(c, held != accepted.end() ? *held : accepted.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
+            const auto oak = std::find(accepted.begin(), accepted.end(), "minecraft:oak_log");
+            return Obtain(c, held != accepted.end() ? *held : oak != accepted.end() ? *oak : accepted.front(), depth + 1, true) == Supply::Gathering ? Supply::Gathering : Supply::Working;
         }
     }
     // A raw material: mine it
@@ -5879,7 +5949,7 @@ static Supply Obtain(McpBot& c, const std::string& item, const int depth, const 
     {
         const std::string block = item.substr(item.find(':') + 1);
         // Any tree will do for logs: the plan takes another wood (see OtherWood)
-        c.SetGoal(block == "cobblestone" ? "stone,cobblestone" : block == "dirt" ? "dirt,grass_block" :
+        c.SetGoal(block == "cobblestone" ? "stone,cobblestone" : block == "dirt" ? "dirt,grass_block" : block == "coal" ? "coal_ore,deepslate_coal_ore" :
             EndsWith(block, "_log") ? "oak_log,spruce_log,birch_log,jungle_log,acacia_log,dark_oak_log,mangrove_log,cherry_log,pale_oak_log" : block, 32);
         c.explorations = 0;
     }
@@ -9681,16 +9751,55 @@ static Value CallTool(const std::string& name, const Value& a)
                     {
                         return is_soil(p + Position(1, 0, 0)) || is_soil(p + Position(-1, 0, 0)) || is_soil(p + Position(0, 0, 1)) || is_soil(p + Position(0, 0, -1));
                     });
-                if (water == waters.end())
+                Position center;
+                if (water != waters.end())
                 {
-                    *error = "no water with dirt or grass beside it within 32 blocks: farmland has to be within 4 blocks of water";
-                    return Status::Failure;
+                    center = *water;
+                }
+                else
+                {
+                    // Village farm plots built next to homes have a composter on the rim and a 5x5 dirt bed beside it
+                    const std::vector<Position> composters = FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:composter"; }, 32, 64);
+                    const auto composter = std::find_if(composters.begin(), composters.end(), [&](const Position& p)
+                        {
+                            for (int dx = -4; dx <= 4; ++dx)
+                            {
+                                for (int dz = -4; dz <= 4; ++dz)
+                                {
+                                    if (is_soil(p + Position(dx, -1, dz)) || is_soil(p + Position(dx, 0, dz)))
+                                    {
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        });
+                    if (composter == composters.end())
+                    {
+                        *error = "no water with dirt or grass beside it within 32 blocks: farmland has to be within 4 blocks of water";
+                        return Status::Failure;
+                    }
+                    center = *composter + Position(3, -1, 0);
+                    if (!is_soil(center) && !is_soil(center + Position(1, 0, 0)))
+                    {
+                        center = *composter;
+                    }
+                    // If the bot has a water bucket, pour it in the middle of the plot so the farmland stays hydrated
+                    if (CountItem(c, "minecraft:water_bucket") > 0)
+                    {
+                        const Blockstate* mid = w->GetBlock(center);
+                        if (mid != nullptr && !mid->IsWater() && (mid->GetName() == "minecraft:dirt" || mid->GetName() == "minecraft:grass_block") &&
+                            GoTo(c, center, 3) == Status::Success && Dig(c, center, true) == Status::Success)
+                        {
+                            UseHeldAt(c, "minecraft:water_bucket", Vector3<double>(center.x + 0.5, center.y, center.z + 0.5));
+                        }
+                    }
                 }
                 for (int dx = -radius; dx <= radius; ++dx)
                 {
                     for (int dz = -radius; dz <= radius; ++dz)
                     {
-                        const Position soil = *water + Position(dx, 0, dz);
+                        const Position soil = center + Position(dx, 0, dz);
                         if (!is_soil(soil) || GoTo(c, soil, 3) == Status::Failure)
                         {
                             continue;
@@ -9722,6 +9831,7 @@ static Value CallTool(const std::string& name, const Value& a)
                         }
                     }
                 }
+                LightUp(c, center + Position(0, 1, 0), true);
                 return Status::Success;
             });
         if (!error->empty())
@@ -9888,13 +9998,14 @@ static Value CallTool(const std::string& name, const Value& a)
                     team.planned.insert(entry.first);
                 }
             }
+            const std::string site_name = SiteName(a, plan);
             if (team.has_site)
             {
-                AddSite(team.site_min, team.site_max, SiteName(a, plan));
+                AddSite(team.site_min, team.site_max, site_name);
             }
-            else if (team.blueprint.size() >= 8)
+            else if (team.blueprint.size() >= 8 && !EndsWith(site_name, "_road"))
             {
-                // (Not for a torch or two: that is no construction)
+                // (Not for a torch or two, nor an L-shaped road whose bounding box would fence off the village)
                 Position low = team.blueprint.front().first, high = low;
                 for (const auto& entry : team.blueprint)
                 {
@@ -9905,7 +10016,7 @@ static Value CallTool(const std::string& name, const Value& a)
                 // countryside; store one box per segment if roads get dug up
                 if (static_cast<long>(high.x - low.x + 1) * (high.z - low.z + 1) <= 4L * static_cast<long>(team.blueprint.size()))
                 {
-                    AddSite(low, high, SiteName(a, plan));
+                    AddSite(low, high, site_name);
                 }
             }
             team.building = true;
