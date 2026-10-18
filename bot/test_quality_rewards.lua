@@ -31,6 +31,26 @@ for _, role in ipairs({ "miners", "builders", "carpenters", "farmers" }) do
     assert(reward(role, old, bad) == normal - 100, role .. " action policy charges defects")
     assert(reward(role, bad, bad) == normal, "no repeated charge")
 end
+for _, role in ipairs({ "miners", "builders", "carpenters", "farmers" }) do
+    st.stats = {}
+    local old = snapshot(st, role)
+    local normal = reward(role, old, old)
+    st.stats.idle_seconds = 100
+    local idle = snapshot(st, role)
+    assert(reward(role, old, idle) == normal - 10, role .. " loses one point per ten idle seconds")
+    assert(reward(role, idle, idle) == normal, "unchanged idle time is not charged twice")
+    st.stats.idle_seconds = 10
+    assert(reward(role, idle, snapshot(st, role)) == normal - 1, "idle counter reset")
+end
+st.stats = {}
+local active_before = { stats = {}, living = NN.condition(st), deaths = 0, times_stuck = 0 }
+local active_score = own_score(st, active_before)
+st.stats.idle_seconds = 100
+assert(own_score(st, active_before) == active_score - 10, "trade policy penalizes elapsed idle time")
+active_before.stats.idle_seconds = 100
+assert(own_score(st, active_before) == active_score, "no repeated daily charge")
+st.stats.idle_seconds = 10
+assert(own_score(st, active_before) == active_score - 1, "daily idle counter reset")
 st.stats = {}
 tools.roles.run({ act = "Builder", role = "builders", members = { "Builder" } })
 st.building = true
@@ -40,4 +60,4 @@ assert(pending.action == "continue construction", "construction keeps its pendin
 st.building = false
 local done = tools.roles.run({ act = "Builder", role = "builders", members = { "Builder" } })
 assert(done.last_reward == -10, "completion penalty trains the action that started construction")
-print("construction rewards OK: both policies, no repeated charge, counter resets, delayed construction credit")
+print("construction rewards OK: both policies, no repeated charge, counter resets, delayed construction credit, idle time")

@@ -42,3 +42,7 @@ target_compile_options(test_site_index PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic
 add_executable(test_build_quality EXCLUDE_FROM_ALL test_build_quality.cpp)
 target_compile_features(test_build_quality PRIVATE cxx_std_17)
 target_compile_options(test_build_quality PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(test_idle_time EXCLUDE_FROM_ALL test_idle_time.cpp)
+target_compile_features(test_idle_time PRIVATE cxx_std_17)
+target_compile_options(test_idle_time PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)

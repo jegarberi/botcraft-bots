@@ -39,6 +39,7 @@
 #include <unistd.h>
 
 #include "build_quality.hpp"
+#include "idle_time.hpp"
 #include "construction_policy.hpp"
 #include "spawn_names.hpp"
 #include "site_index.hpp"
@@ -454,8 +455,9 @@ public:
     std::atomic<std::chrono::steady_clock::time_point> worked_in_place_at{};
     /// @brief How many times the watchdog found the bot stuck since it connected
     std::atomic<int> times_stuck = 0;
+    IdleTime idle_time; // Behaviour thread only; fractional seconds survive short idle periods.
     /// @brief What the bot has done since it joined, for its performance (the brain plugin learns from it):
-    /// built, collected, killed, harvested, bred, stored, given
+    /// built, collected, killed, harvested, bred, stored, given, idle_seconds
     std::map<std::string, int> stats;
     std::mutex stats_mutex;
     /// @brief Last place the watchdog saw the bot move from, and when (stepper thread only)
@@ -2285,6 +2287,21 @@ static void Count(BehaviourClient& c, const char* what, const int n)
         std::lock_guard<std::mutex> lock(bot->stats_mutex);
         bot->stats[what] += n;
     }
+}
+
+static Status IdleTask(McpBot& c)
+{
+    c.SetState("idle");
+    const bool enabled = c.autopilot.load();
+    const auto start = std::chrono::steady_clock::now();
+    const auto record = [&]()
+    {
+        Count(c, "idle_seconds", c.idle_time.Record(std::chrono::steady_clock::now() - start, enabled && c.autopilot.load()));
+    };
+    try { Wait(c, 1000); }
+    catch (...) { record(); throw; } // Tree swaps interrupt a wait by unwinding it.
+    record();
+    return Status::Success;
 }
 
 static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blockstate&)>& match, const int count, const int radius, std::atomic<int>& done, const bool tunnel = false)
@@ -7289,9 +7306,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .end()
             .leaf("idle", [](McpBot& c)
                 {
-                    c.SetState("idle");
-                    Wait(c, 1000);
-                    return Status::Success;
+                    return IdleTask(c);
                 })
         .end();
 }
@@ -7302,9 +7317,7 @@ void McpBot::ResumeDefault()
     static const std::shared_ptr<BehaviourTree<McpBot>> idle_tree = Builder<McpBot>("waiting for commands")
         .leaf("idle", [](McpBot& c)
             {
-                c.SetState("idle");
-                Wait(c, 1000);
-                return Status::Success;
+                return IdleTask(c);
             });
     SetBehaviourTree(autopilot ? autopilot_tree : idle_tree);
 }

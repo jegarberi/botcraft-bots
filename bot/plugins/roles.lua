@@ -756,6 +756,7 @@ local function reward(role, before, now)
     end
     local function grew(a, b) return a >= b and a - b or a end
     r = r - grew(now.stats.construction_penalty or 0, before.stats.construction_penalty or 0)
+        - 0.1 * grew(now.stats.idle_seconds or 0, before.stats.idle_seconds or 0)
     return r + NN.living_reward(before.living, now.living) - 40 * grew(now.deaths, before.deaths) - 2 * grew(now.stuck, before.stuck)
 end
 

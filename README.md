@@ -60,7 +60,9 @@ weights migrate with neutral added layers, and new actions are appended to prese
 Builders and miners can gather construction stone and logs, builders and blacksmiths can make storage
 chests, bakers can cook available food, and blacksmiths can make and distribute building axes.
 The web and terminal network views show all three layers. Peer learning requires the same architecture.
-Both policies subtract construction defects from their rewards: 10 points per one-block-wide
+Both policies subtract 1 point per 10 seconds spent idle with autopilot enabled, measured as
+`stats.idle_seconds`. Sleeping, working in place and manually paused bots do not count.
+Both policies also subtract construction defects from their rewards: 10 points per one-block-wide
 mine slice or road cell, 10 per newly placed chest facing differently from an adjacent chest,
 and twice the plan's block count for a completed roofed building with no walkable entrance.
 Access checks include stairs and doors; unloaded surroundings and plans beyond the audit's

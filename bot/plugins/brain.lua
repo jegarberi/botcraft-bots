@@ -434,7 +434,7 @@ end
 -- What a bot does for itself, and what it does for the others (cooperation: building the team's project,
 -- handing over food and items, coming when called to a fight and killing there, picking up a fallen
 -- teammate's things). Each its own part of the reward
-local WEIGHTS = { construction_penalty = -1, collected = 1, harvested = 1, killed = 3, bred = 5, stored = 0.05 }
+local WEIGHTS = { idle_seconds = -0.1, construction_penalty = -1, collected = 1, harvested = 1, killed = 3, bred = 5, stored = 0.05 }
 local COOP_WEIGHTS = { built = 1, given = 1, answered = 3, assisted = 5, salvaged = 2 }
 
 local function counted(now, before, weights)
