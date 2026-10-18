@@ -10,6 +10,7 @@
   h1 { font-size: 18px; margin: 0 0 12px; }
   h2 { font-size: 15px; margin: 0; }
   .bot, .top { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .row > * { min-width: 0; max-width: 100%; box-sizing: border-box; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
   .badge { border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px; }
   .badge.state { background: var(--on); color: #fff; border-color: var(--on); }
@@ -36,6 +37,21 @@
 <body>
 <h1>Botcraft control</h1>
 <div class="top">
+  <label><input type="checkbox" id="all-bots"> Send bot actions to all bots</label>
+  <form class="row" id="bot-action">
+    <label for="action-target">Bot</label>
+    <select id="action-target"><option value="">No bots connected</option></select>
+    <label for="action-name">Action</label>
+    <select id="action-name">
+      <option value="gather">Gather</option><option value="make">Make</option>
+      <option value="store">Store in chests</option><option value="farm">Farm</option>
+      <option value="autopilot-on">Enable autopilot</option><option value="autopilot-off">Disable autopilot</option>
+      <option value="locate">Find and go</option><option value="disconnect">Store all and disconnect</option>
+    </select>
+    <input type="text" id="action-resource" placeholder="block(s), item or structure id" aria-label="Action resource" list="goals">
+    <input type="number" id="action-count" min="1" max="64" value="16" aria-label="Action count">
+    <button>Send action</button>
+  </form>
   <form class="row" id="connect">
     <label for="name">Connect a bot</label>
     <input type="text" id="name" placeholder="player name" required>
@@ -86,11 +102,47 @@
 const $ = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
 const message = document.getElementById("message");
 async function call(name, args = {}) {
+  if (args.bot && document.getElementById("all-bots").checked) {
+    const state = await (await fetch("/state")).json();
+    const results = await Promise.all(state.bots.map(async bot => {
+      try {
+        const r = await (await fetch("/call", { method: "POST", headers: { "X-Bot": "1" }, body: JSON.stringify({ name, arguments: { ...args, bot: bot.name } }) })).json();
+        return bot.name + (r.ok ? ": " : " failed: ") + (typeof r.result === "string" ? r.result : JSON.stringify(r.result));
+      } catch (e) { return bot.name + " failed: " + e.message; }
+    }));
+    message.textContent = results.join("; ") || "No bot connected.";
+    refresh();
+    return;
+  }
   message.textContent = name + "…";
   const r = await (await fetch("/call", { method: "POST", headers: { "X-Bot": "1" }, body: JSON.stringify({ name, arguments: args }) })).json();
   message.textContent = name + (r.ok ? ": " : " failed: ") + (typeof r.result === "string" ? r.result : JSON.stringify(r.result));
   refresh();
 }
+document.getElementById("bot-action").onsubmit = async e => {
+  e.preventDefault();
+  const all = document.getElementById("all-bots").checked;
+  const bot = document.getElementById("action-target").value;
+  if (!all && !bot) { message.textContent = "Select a bot first."; return; }
+  const action = document.getElementById("action-name").value;
+  const resource = document.getElementById("action-resource").value.trim();
+  const args = { bot: all ? "*" : bot };
+  let tool = action;
+  if (action === "gather" || action === "make") {
+    if (!resource) { message.textContent = "Enter a block or item id."; return; }
+    const count = Number(document.getElementById("action-count").value);
+    if (!Number.isInteger(count) || count < 1 || count > 64) { message.textContent = "Count must be an integer from 1 to 64."; return; }
+    args.count = count;
+    args[action === "gather" ? "gather" : "item"] = resource;
+    if (action === "gather") { tool = "autopilot"; args.enabled = true; }
+  } else if (action.startsWith("autopilot-")) {
+    tool = "autopilot"; args.enabled = action === "autopilot-on";
+  } else if (action === "locate") {
+    if (!resource) { message.textContent = "Enter a structure id."; return; }
+    Object.assign(args, { kind: "structure", name: resource, go: true });
+  } else if (action === "disconnect" && !confirm("Store everything and disconnect " + (all ? "ALL BOTS" : bot) + "?")) return;
+  await call(tool, args);
+};
 document.getElementById("team").onsubmit = e => {
   e.preventDefault();
   const objective = document.getElementById("objective").value, what = document.getElementById("what").value;
@@ -162,6 +214,7 @@ function card(bot, tree) {
       $("div", {}, $("small", {}, "State flow (latest last)"), $("ol", {}, ...(bot.flow || []).map(f => $("li", {}, f))))));
 }
 
+let actionTargets = "";
 let editing = false;
 document.addEventListener("focusin", e => editing = e.target.matches("#bots input[type=text], #bots input[type=number], #bots select"));
 document.addEventListener("focusout", () => editing = false);
@@ -169,6 +222,13 @@ async function refresh() {
   if (editing) return;  // don't rebuild the cards under the user's cursor
   try {
     const state = await (await fetch("/state")).json();
+    const targetNames = JSON.stringify(state.bots.map(b => b.name));
+    if (targetNames !== actionTargets) {
+      actionTargets = targetNames;
+      const target = document.getElementById("action-target"), previous = target.value;
+      target.replaceChildren(...(state.bots.length ? state.bots.map(b => $("option", { value: b.name }, b.name)) : [$("option", { value: "" }, "No bots connected")]));
+      target.value = state.bots.some(b => b.name === previous) ? previous : state.bots[0]?.name || "";
+    }
     views = state.snapshot ? state.bots.map(b => b.name) : [];
     document.getElementById("bots").replaceChildren(...state.bots.map(b => card(b, state.tree)),
       ...(state.bots.length ? [] : [$("p", {}, "No bot connected.")]));

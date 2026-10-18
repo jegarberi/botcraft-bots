@@ -396,7 +396,7 @@ int main()
             }
         });
     // A tool call on its own thread: walking, crafting can take minutes
-    const auto run = [&](const std::string& bot, const std::string& tool, const Value& arguments)
+    const auto run_one = [&](const std::string& bot, const std::string& tool, const Value& arguments)
         {
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -419,6 +419,21 @@ int main()
                     std::lock_guard<std::mutex> lock(mutex);
                     message = text;
                 }).detach();
+        };
+    bool all_bots = false;
+    const auto run = [&](const std::string& bot, const std::string& tool, const Value& arguments)
+        {
+            if (!all_bots || bot.empty())
+            {
+                run_one(bot, tool, arguments);
+                return;
+            }
+            std::vector<std::string> targets;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                for (const auto& entry : statuses) targets.push_back(entry.first);
+            }
+            for (const auto& target : targets) run_one(target, tool, arguments);
         };
     const auto ask = [&](const std::string& prompt)
         {
@@ -471,22 +486,35 @@ int main()
                     wattroff(stdscr, attributes);
                 }
             };
-        line(0, Column("🤖 botcraft  " + std::to_string(bots.size()) + " bots   ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
-            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program", w - 1), A_REVERSE);
-        line(1, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
-        const int rows = std::max(3, h - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
+        const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
+            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
+        int menu_rows = 0;
+        for (size_t at = 0; at < menu.size();)
+        {
+            size_t count = Fit(menu.substr(at), std::max(1, w - 1));
+            if (count == 0) break;
+            if (at + count < menu.size())
+            {
+                const size_t space = menu.rfind(' ', at + count - 1);
+                if (space != std::string::npos && space > at) count = space - at + 1;
+            }
+            line(menu_rows++, menu.substr(at, count), A_REVERSE);
+            at += count;
+        }
+        line(menu_rows, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
+        const int rows = std::max(3, h - menu_rows + 1 - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
         for (size_t i = first; i < bots.size() && i < first + rows; ++i)
         {
             const Value& b = bots[i].second;
             const std::string flags = std::string(Flag(b, "autopilot") ? "🚀" : "  ") + (Flag(b, "gear") ? "🔧" : "  ");
             const bool answered = b.is_object() && b.contains("state");
-            line(2 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) + Column(Field(b, "trade"), 13) +
+            line(menu_rows + 1 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) + Column(Field(b, "trade"), 13) +
                 Column(b.is_object() && b.contains("health") && b["health"].is_number() ? std::to_string(static_cast<int>(std::round(b["health"].get_number<double>()))) : "", 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
         }
         if (!network.empty())
         {
-            int y = 2 + rows + 1;
+            int y = menu_rows + rows + 2;
             for (const std::string& text : network)
             {
                 line(y++, text);
@@ -495,7 +523,7 @@ int main()
         else if (!bots.empty())
         {
             const Value& b = bots[picked].second;
-            int y = 2 + rows + 1;
+            int y = menu_rows + rows + 2;
             std::string inventory;
             if (b.is_object() && b.contains("inventory") && b["inventory"].is_object())
             {
@@ -543,7 +571,34 @@ int main()
         line(h - 2, shown, A_BOLD);
         wrefresh(stdscr);
 
-        const int key = wgetch(stdscr);
+        int key = wgetch(stdscr);
+        if (key == '\n' || key == '\r' || key == KEY_ENTER)
+        {
+            const std::vector<std::pair<int, std::string>> actions = {
+                { 'a', "Toggle autopilot" }, { 'e', "Toggle gear up" }, { 'G', "Gather" },
+                { 'm', "Make" }, { 's', "Store in chests" }, { 'f', "Farm" },
+                { 'l', "Find and go" }, { 'd', "Store all and disconnect" }, { ':', "Custom tool" }
+            };
+            int selected = 0;
+            while (true)
+            {
+                werase(stdscr);
+                line(0, std::string("Action for ") + (all_bots ? "ALL BOTS" : bots.empty() ? "no bot" : bots[picked].first) + " (up/down, Enter; Esc cancels)", A_BOLD);
+                const int visible = std::max(1, h - 2);
+                const int first_action = std::max(0, selected - visible + 1);
+                for (int i = first_action; i < static_cast<int>(actions.size()) && i < first_action + visible; ++i)
+                {
+                    line(i - first_action + 1, actions[i].second, i == selected ? A_REVERSE : 0);
+                }
+                wrefresh(stdscr);
+                const int choice = wgetch(stdscr);
+                if (choice == 27 || choice == 'q') { key = ERR; break; }
+                if (choice == KEY_UP && selected > 0) --selected;
+                if (choice == KEY_DOWN && selected + 1 < static_cast<int>(actions.size())) ++selected;
+                if (choice == '\n' || choice == '\r' || choice == KEY_ENTER) { key = actions[selected].first; break; }
+                if (choice == KEY_RESIZE) { key = ERR; break; }
+            }
+        }
         if (key == ERR)
         {
             continue;
@@ -572,6 +627,10 @@ int main()
         else if (key == KEY_DOWN)
         {
             ++picked;
+        }
+        else if (key == 'A')
+        {
+            all_bots = !all_bots;
         }
         else if (key == 'c')
         {
@@ -712,17 +771,17 @@ int main()
         }
         else if (key == 'd')
         {
-            const std::string sure = ask("store everything and disconnect " + bot + "? (y/n) ");
+            const std::string sure = ask("store everything and disconnect " + (all_bots ? std::string("ALL BOTS") : bot) + "? (y/n) ");
             if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
             {
                 // Through the program: it owns the bot processes
                 args["bot"] = bot;
-                run("", "disconnect", args);
+                run("", all_bots ? "disconnect_all" : "disconnect", args);
             }
         }
         else if (key == ':')
         {
-            const std::string text = ask("tool {json args} (for " + bot + "): ");
+            const std::string text = ask("tool {json args} (for " + (all_bots ? std::string("ALL BOTS") : bot) + "): ");
             const size_t space = text.find(' ');
             if (!text.empty())
             {

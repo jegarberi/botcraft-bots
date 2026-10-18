@@ -3,7 +3,7 @@
 
     python3 tui.py [http://127.0.0.1:8090]
 
-Up/Down pick a bot. a autopilot on/off, e gear-up on/off, G gather, m make, s store in chests, f farm,
+Up/Down pick a bot. A toggles actions for all bots. a autopilot on/off, e gear-up on/off, G gather, m make, s store in chests, f farm,
 l find a structure and go, d store all and disconnect, D every bot stores all and disconnects, c connect a bot, t team order, x disband the team,
 : any tool call (name {json args}, the picked bot is added), q quit (the bots keep running)."""
 import curses, json, sys, textwrap, threading, time, urllib.request
@@ -31,6 +31,10 @@ shown = {"message": ""}
 
 def run(name, args):
     """A tool call in the background: some take minutes (walking, crafting), the panel keeps refreshing"""
+    if args.get("bot") == "*":
+        for bot in state().get("bots", []):
+            run(name, {**args, "bot": bot["name"]})
+        return
     shown["message"] = name + "…"
 
     def work():
@@ -66,11 +70,37 @@ def ask(screen, prompt):
     return text
 
 
+def choose_action(screen, target):
+    actions = [("a", "Toggle autopilot"), ("e", "Toggle gear up"), ("G", "Gather"),
+               ("m", "Make"), ("s", "Store in chests"), ("f", "Farm"),
+               ("l", "Find and go"), ("d", "Store all and disconnect"), (":", "Custom tool")]
+    selected = 0
+    while True:
+        h, w = screen.getmaxyx()
+        screen.erase()
+        screen.addnstr(0, 0, "Action for %s (up/down, Enter; Esc cancels)" % target, w - 1, curses.A_BOLD)
+        visible = max(1, h - 2)
+        first = max(0, selected - visible + 1)
+        for i in range(first, min(len(actions), first + visible)):
+            screen.addnstr(i - first + 1, 0, actions[i][1], w - 1, curses.A_REVERSE if i == selected else 0)
+        screen.refresh()
+        key = screen.getch()
+        if key in (27, ord("q")):
+            return -1
+        if key == curses.KEY_UP:
+            selected = max(0, selected - 1)
+        elif key == curses.KEY_DOWN:
+            selected = min(len(actions) - 1, selected + 1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            return ord(actions[selected][0])
+
+
 def main(screen):
     curses.curs_set(0)
     curses.use_default_colors()
     screen.timeout(250)
     data, picked, fetched = {"bots": []}, 0, 0.0
+    all_bots = False
     while True:
         if time.time() - fetched > 2:
             try:
@@ -83,11 +113,14 @@ def main(screen):
         h, w = screen.getmaxyx()
         screen.erase()
         line = lambda y, text, attr=0: y < h - 1 and screen.addnstr(y, 0, text, w - 1, attr)
-        line(0, "botcraft  %s  %d bots   ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  l find  d disconnect  D all  c connect  t team  x disband  : tool  q quit"
-             % (URL, len(bots)), curses.A_REVERSE)
-        line(1, "%-12s %-22s %6s %4s %-15s %s" % ("bot", "state", "health", "food", "position", "doing"), curses.A_BOLD)
-        top = 2
-        rows = max(3, h - 12)
+        menu = "botcraft  %s  %d bots   Enter action list  ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  l find  d disconnect  D all  A target all  c connect  t team  x disband  : tool  q quit" % (URL, len(bots))
+        menu = ("[ALL BOTS]  " if all_bots else "[picked bot]  ") + menu
+        menu_lines = textwrap.wrap(menu, max(1, w - 1))
+        for y, part in enumerate(menu_lines):
+            line(y, part, curses.A_REVERSE)
+        line(len(menu_lines), "%-12s %-22s %6s %4s %-15s %s" % ("bot", "state", "health", "food", "position", "doing"), curses.A_BOLD)
+        top = len(menu_lines) + 1
+        rows = max(3, h - 12 - len(menu_lines) + 1)
         first = max(0, picked - rows + 1)
         for i, b in enumerate(bots[first:first + rows]):
             flags = ("A" if b.get("autopilot") else "-") + ("G" if b.get("gear") else "-")
@@ -113,9 +146,11 @@ def main(screen):
         screen.refresh()
 
         key = screen.getch()
+        if key in (10, 13, curses.KEY_ENTER):
+            key = choose_action(screen, "ALL BOTS" if all_bots else bots[picked]["name"] if bots else "no bot")
         if key == -1:
             continue
-        name = bots[picked]["name"] if bots else None
+        name = ("*" if all_bots else bots[picked]["name"]) if bots else None
         try:
             if key in (ord("q"), 27):
                 return
@@ -123,6 +158,8 @@ def main(screen):
                 picked -= 1
             elif key == curses.KEY_DOWN:
                 picked += 1
+            elif key == ord("A"):
+                all_bots = not all_bots
             elif key == ord("c"):
                 who = ask(screen, "connect bot named: ")
                 who and run("connect", {"name": who})
