@@ -790,7 +790,7 @@ end
 local function hand_over()
     local s = job.stages[job.index]
     -- With the site as a box: the bots take their stone, dirt and wood outside it, not out of what is built
-    bot.call("team", { objective = "build", plan = "blocks", blocks = s.blocks, site = job.site, name = "castle" })
+    bot.call("team", { objective = "build", plan = "blocks", blocks = s.blocks, site = job.site, name = s.name:match("^road") and "road" or "castle" })
     pcall(bot.call, "chat", { message = "[castle] " .. s.name .. " (" .. job.index .. "/" .. #job.stages .. "): " .. #s.blocks .. " blocks" })
 end
 

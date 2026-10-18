@@ -755,6 +755,7 @@ local function reward(role, before, now)
         end
     end
     local function grew(a, b) return a >= b and a - b or a end
+    r = r - grew(now.stats.construction_penalty or 0, before.stats.construction_penalty or 0)
     return r + NN.living_reward(before.living, now.living) - 40 * grew(now.deaths, before.deaths) - 2 * grew(now.stuck, before.stuck)
 end
 
@@ -764,6 +765,9 @@ local function act(name, role, members, groups)
     local net = net_of(name, role)
     local st = call("status", { bot = name })
     if type(st) ~= "table" or not st.name then return { note = "no answer from " .. name } end
+    if st.building then
+        return { action = "continue construction", note = "keeping the active building order" }
+    end
     local now = snapshot(st, role)
     -- The last turn's lesson, if it was in the same trade
     local prev, learnt = state.prev[name], nil
@@ -777,11 +781,6 @@ local function act(name, role, members, groups)
         local name_of = spec.actions[prev.action].name
         state.rewards[role][name_of] = 0.8 * (state.rewards[role][name_of] or r) + 0.2 * r
         learnt = r
-    end
-    if st.building then
-        state.prev[name] = nil
-        save(state)
-        return { action = "continue construction", note = "keeping the active building order" }
     end
     local ctx = { bot = name, st = st, members = members, groups = groups, role = role }
     -- Feeding a starving team must not depend on a random policy draw.

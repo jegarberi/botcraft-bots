@@ -38,6 +38,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "build_quality.hpp"
 #include "construction_policy.hpp"
 #include "spawn_names.hpp"
 #include "site_index.hpp"
@@ -1939,6 +1940,53 @@ static bool LavaNear(const std::shared_ptr<World>& world, const Position& p)
     return false;
 }
 
+static void Count(BehaviourClient& c, const char* what, const int n = 1);
+
+static Status PlaceCheckedBlock(BehaviourClient& c, const std::string& item, const Position& p,
+    std::optional<PlayerDiggingFace> face = std::nullopt, const bool wait_confirmation = false,
+    const bool allow_midair_placing = false, const bool allow_pathfinding = true)
+{
+    const bool chest = item == "minecraft:chest" || item == "minecraft:trapped_chest";
+    const auto world = c.GetWorld();
+    const Blockstate* before = chest ? world->GetBlock(p) : nullptr;
+    const bool already_there = before != nullptr && before->GetName() == item;
+    const Status result = Botcraft::PlaceBlock(c, item, p, face, wait_confirmation || chest, allow_midair_placing, allow_pathfinding);
+    if (!chest || already_there || result != Status::Success) return result;
+    const Blockstate* placed = world->GetBlock(p);
+    if (placed == nullptr || placed->GetName() != item) return result;
+    const std::string facing = placed->GetVariableValue("facing");
+    int mismatched = 0;
+    for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+    {
+        const Blockstate* neighbor = world->GetBlock(p + d);
+        if (neighbor != nullptr && (neighbor->GetName() == "minecraft:chest" || neighbor->GetName() == "minecraft:trapped_chest") &&
+            Construction::MisalignedChests(facing, neighbor->GetVariableValue("facing"))) ++mismatched;
+    }
+    Count(c, "misaligned_chest_pairs", mismatched);
+    Count(c, "construction_penalty", 10 * mismatched);
+    return result;
+}
+
+static void PenalizeNarrowMine(BehaviourClient& c, const Position& feet, const Position& direction)
+{
+    const auto world = c.GetWorld();
+    const Position across(std::abs(direction.z), 0, std::abs(direction.x));
+    bool lanes[3] = {};
+    for (int lane = -1; lane <= 1; ++lane)
+    {
+        const Position p = feet + across * lane;
+        const Blockstate* a = world->GetBlock(p);
+        const Blockstate* b = world->GetBlock(p + Position(0, 1, 0));
+        if (a == nullptr || b == nullptr) return;
+        lanes[lane + 1] = a->IsAir() && b->IsAir();
+    }
+    if (Construction::NarrowMine(lanes[1], lanes[0], lanes[2]))
+    {
+        Count(c, "narrow_mine_slices");
+        Count(c, "construction_penalty", 10);
+    }
+}
+
 /// @param allow_hands Dig with bare hands if the bot has no pickaxe: very slow and nothing drops, only to get out of a hole
 static Status TunnelToward(BehaviourClient& c, const Position& target, const int max_steps, const bool allow_hands = false)
 {
@@ -2006,6 +2054,7 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
         {
             cells.insert(cells.begin(), me + Position(0, 2, 0));
         }
+        bool changed = false;
         for (const Position& cell : cells)
         {
             const Blockstate* block = world->GetBlock(cell);
@@ -2016,11 +2065,17 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             {
                 return Status::Failure;
             }
-            if (!block->IsAir() && SafeDig(c, cell, true, PlayerDiggingFace::Up, false) == Status::Failure)
+            if (!block->IsAir())
             {
-                return Status::Failure;
+                if (SafeDig(c, cell, true, PlayerDiggingFace::Up, false) == Status::Failure)
+                {
+                    if (changed) PenalizeNarrowMine(c, next, side);
+                    return Status::Failure;
+                }
+                changed = true;
             }
         }
+        if (changed) PenalizeNarrowMine(c, next, side);
         const Blockstate* floor = world->GetBlock(next + Position(0, -1, 0));
         if (floor == nullptr || floor->IsFluid() || GoTo(c, next) == Status::Failure)
         {
@@ -2058,7 +2113,7 @@ static bool PillarUp(BehaviourClient& c, const std::string& item)
     {
         return false;
     }
-    PlaceBlock(c, item, feet, std::nullopt, false, false, false);
+    PlaceCheckedBlock(c, item, feet, std::nullopt, false, false, false);
     Utilities::YieldForCondition([&]() { return player->GetOnGround(); }, c, 1500);
     return player->GetPosition().y > start + 0.9;
 }
@@ -2222,7 +2277,7 @@ static int FellTree(BehaviourClient& c, const Position& first)
 /// @brief Mine the nearest matching blocks and pick up the drops until count is reached. A log means its whole tree
 /// @param tunnel Dig a way to the ones that can't be walked to (needs a pickaxe)
 /// @brief One more of something done, in the bot's stats
-static void Count(BehaviourClient& c, const char* what, const int n = 1)
+static void Count(BehaviourClient& c, const char* what, const int n)
 {
     McpBot* bot = dynamic_cast<McpBot*>(&c);
     if (bot != nullptr && n > 0)
@@ -2922,13 +2977,13 @@ static bool PlaceNearby(BehaviourClient& c, const std::string& item, Position& p
                 continue;
             }
         }
-        if (PlaceBlock(c, item, p, std::nullopt, true) == Status::Success)
+        if (PlaceCheckedBlock(c, item, p, std::nullopt, true) == Status::Success)
         {
             placed = p;
             // ponytail: the second chest failing leaves a single one, still a chest to store in
             if (second && CountItem(c, item) > 0)
             {
-                PlaceBlock(c, item, *second, std::nullopt, true);
+                PlaceCheckedBlock(c, item, *second, std::nullopt, true);
             }
             return true;
         }
@@ -3695,17 +3750,21 @@ static int WideMine(McpBot& c, const Position& dir, const int steps, const bool 
                 }
             }
         }
+        bool changed = false;
         for (int h = high; h >= 0; --h)
         {
             for (int w = -1; w <= 1; ++w)
             {
                 const Position cell(base.x + perp.x * w, floor_y + h, base.z + perp.z * w);
                 const Blockstate* b = world->GetBlock(cell);
-                if (b != nullptr && !b->IsAir() && SafeDig(c, cell, true) == Status::Failure)
+                const bool needs_dig = b != nullptr && !b->IsAir();
+                if (needs_dig && SafeDig(c, cell, true) == Status::Failure)
                 {
+                    if (changed) PenalizeNarrowMine(c, Position(base.x, floor_y, base.z), dir);
                     c.SetNote("wide mine: could not dig at " + std::to_string(cell.x) + " " + std::to_string(cell.y) + " " + std::to_string(cell.z));
                     return dug;
                 }
+                if (needs_dig) changed = true;
             }
         }
         // Something to stand on
@@ -5061,10 +5120,32 @@ static Status BuildStep(McpBot& c)
     }
     if (next == nullptr)
     {
+        std::set<Construction::Cell> solid;
+        for (const auto& entry : team.blueprint)
+        {
+            const Blockstate* block = world->GetBlock(entry.first);
+            if (block != nullptr && block->IsSolid()) solid.insert({ entry.first.x, entry.first.y, entry.first.z });
+        }
+        const auto read = [&](const Construction::Cell& p)
+        {
+            const Blockstate* block = world->GetBlock(Position(p[0], p[1], p[2]));
+            if (block == nullptr) return Construction::Space::Unknown;
+            if (block->IsFluid()) return Construction::Space::Hazard;
+            const std::string& name = block->GetName();
+            const bool door = EndsWith(name, "_door");
+            return block->IsAir() || door || (!block->IsFluid() && block->GetCollidersAtPos(Position(p[0], p[1], p[2])).empty()) ? Construction::Space::Open : Construction::Space::Solid;
+        };
+        const bool road = team.build_name == "road" || team.build_name.rfind("road ", 0) == 0 ||
+            EndsWith(team.build_name, " road") || EndsWith(team.build_name, "_road");
+        const int narrow = road ? Construction::NarrowRoadCells(solid) : 0;
+        const bool sealed = !road && Construction::SealedBuilding(solid, read);
         std::lock_guard<std::mutex> lock(c.team_mutex);
         if (c.team.plan_id != team.plan_id) { return Status::Success; }
+        Count(c, "construction_penalty", sealed ? 2 * static_cast<int>(team.blueprint.size()) : 10 * narrow);
+        Count(c, "sealed_buildings", sealed ? 1 : 0);
+        Count(c, "narrow_road_cells", narrow);
         c.team.building = false;
-        c.SetNote("build finished");
+        c.SetNote(sealed ? "build finished: penalty for no entrance" : narrow > 0 ? "build finished: penalty for one-block road" : "build finished");
         return Status::Success;
     }
     const Position& p = next->first;
@@ -5175,7 +5256,7 @@ static Status BuildStep(McpBot& c)
         }
     }
     const std::optional<PlayerDiggingFace> face = (EndsWith(item, "_door") || EndsWith(item, "_fence_gate")) ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
-    if (PlaceBlock(c, item, p, face, true, false, facing == wanted_next.state.end()) == Status::Failure)
+    if (PlaceCheckedBlock(c, item, p, face, true, false, facing == wanted_next.state.end()) == Status::Failure)
     {
         give_up_on(p);
         return Status::Success;
@@ -9281,7 +9362,7 @@ static Value CallTool(const std::string& name, const Value& a)
     {
         const Position p = Pos(a);
         const std::string item = Id(Str(a, "item"));
-        return Act(bot, 120, "place_block", [=](McpBot& c) { return PlaceBlock(c, item, p, std::nullopt, true); });
+        return Act(bot, 120, "place_block", [=](McpBot& c) { return PlaceCheckedBlock(c, item, p, std::nullopt, true); });
     }
     if (name == "interact_block")
     {

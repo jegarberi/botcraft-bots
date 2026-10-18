@@ -55,6 +55,12 @@ weights migrate with neutral added layers, and new actions are appended to prese
 Builders and miners can gather construction stone and logs, builders and blacksmiths can make storage
 chests, bakers can cook available food, and blacksmiths can make and distribute building axes.
 The web and terminal network views show all three layers. Peer learning requires the same architecture.
+Both policies subtract construction defects from their rewards: 10 points per one-block-wide
+mine slice or road cell, 10 per newly placed chest facing differently from an adjacent chest,
+and twice the plan's block count for a completed roofed building with no walkable entrance.
+Access checks include stairs and doors; unloaded surroundings and plans beyond the audit's
+128×128×64 / 262,144-cell limit are skipped. Defect counters appear in each bot's `stats`.
+
 Every five game days, the two policies with the best average reward are kept unchanged; the others receive
 independent copies of either parent with small mutations (Gaussian noise, standard deviation 0.05).
 Action policies compete within the same trade, since different trades have different actions. Their evolution
