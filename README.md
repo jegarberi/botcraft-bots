@@ -27,6 +27,11 @@ fixes, pathfinding changes) and extracts recipes from the game jar Botcraft down
 
 The terminal panel (`bot_tui`): every bot's state, health, food, position and what it is doing; the picked bot's
 gear, inventory, goal and decision flow below. Keys on the top line (`n` shows the bot's neural network).
+Press Enter for actions: build the castle, roads to mines, crop farms or a shelter, plant castle farms,
+stock animal pens, or mine ores. Gather and Mine open a resource list with a custom-ID option.
+The web Action dropdown has the same jobs and a resource selector. Castle construction needs its centre
+and floor level (`x y z`); roads need a saved castle site and mine entrances. Castle and road jobs run once
+for the whole team; bot actions use the selected bot or the all-bots target.
 
 ![Terminal panel](docs/tui.png)
 

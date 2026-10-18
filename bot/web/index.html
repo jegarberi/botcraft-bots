@@ -43,13 +43,27 @@
     <select id="action-target"><option value="">No bots connected</option></select>
     <label for="action-name">Action</label>
     <select id="action-name">
-      <option value="gather">Gather</option><option value="make">Make</option>
+      <option value="gather">Gather</option><option value="mine">Mine ores / open mine as needed</option><option value="make">Make</option>
       <option value="store">Store in chests</option><option value="farm">Farm</option>
       <option value="autopilot-on">Enable autopilot</option><option value="autopilot-off">Disable autopilot</option>
       <option value="locate">Find and go</option><option value="disconnect">Store all and disconnect</option>
+      <option value="castle-start">Build castle (whole team)</option>
+      <option value="castle-roads">Build roads to mines (whole team)</option>
+      <option value="make_farm">Create crop farm (near water)</option>
+      <option value="shelter">Build shelter</option>
+      <option value="castle-farms">Plant castle farms</option>
+      <option value="castle-ranch">Stock castle animal pens</option>
+    </select>
+    <select id="action-resource-list" aria-label="Gather or mine resource">
+      <option value="">Custom resource...</option>
+      <option>coal_ore</option><option>iron_ore</option><option>copper_ore</option><option>gold_ore</option>
+      <option>diamond_ore</option><option>redstone_ore</option><option>lapis_ore</option><option>emerald_ore</option>
+      <option>iron_ore,coal_ore</option><option>oak_log</option><option>spruce_log</option><option>birch_log</option>
+      <option>cobblestone</option><option>stone</option><option>sand</option><option>gravel</option><option>dirt</option>
     </select>
     <input type="text" id="action-resource" placeholder="block(s), item or structure id" aria-label="Action resource" list="goals">
     <input type="number" id="action-count" min="1" max="64" value="16" aria-label="Action count">
+    <input type="text" id="action-position" placeholder="castle centre / shelter corner x y z" aria-label="Build coordinates">
     <button>Send action</button>
   </form>
   <form class="row" id="connect">
@@ -119,6 +133,7 @@ async function call(name, args = {}) {
   message.textContent = name + (r.ok ? ": " : " failed: ") + (typeof r.result === "string" ? r.result : JSON.stringify(r.result));
   refresh();
 }
+document.getElementById("action-resource-list").onchange = e => { document.getElementById("action-resource").value = e.target.value; };
 document.getElementById("bot-action").onsubmit = async e => {
   e.preventDefault();
   const all = document.getElementById("all-bots").checked;
@@ -128,13 +143,24 @@ document.getElementById("bot-action").onsubmit = async e => {
   const resource = document.getElementById("action-resource").value.trim();
   const args = { bot: all ? "*" : bot };
   let tool = action;
-  if (action === "gather" || action === "make") {
+  if (action === "gather" || action === "mine" || action === "make") {
     if (!resource) { message.textContent = "Enter a block or item id."; return; }
     const count = Number(document.getElementById("action-count").value);
     if (!Number.isInteger(count) || count < 1 || count > 64) { message.textContent = "Count must be an integer from 1 to 64."; return; }
     args.count = count;
-    args[action === "gather" ? "gather" : "item"] = resource;
-    if (action === "gather") { tool = "autopilot"; args.enabled = true; }
+    args[action !== "make" ? "gather" : "item"] = resource;
+    if (action !== "make") { tool = "autopilot"; args.enabled = true; }
+  } else if (action.startsWith("castle-") || action === "shelter") {
+    if (action.startsWith("castle-")) { delete args.bot; tool = "castle"; args.action = action.slice(7); }
+    if (action === "castle-start" || action === "shelter") {
+      const at = document.getElementById("action-position").value.trim().split(/\s+/).map(Number);
+      if (at.length !== 3 || !at.every(Number.isInteger)) { message.textContent = "Enter three integer build coordinates: x y z."; return; }
+      if (action === "shelter") {
+        tool = "team_member";
+        Object.assign(args, { objective: "build", plan: "shelter", item: "cobblestone", x1: at[0], y1: at[1], z1: at[2] });
+      } else Object.assign(args, { x: at[0], y: at[1], z: at[2] });
+    }
+  } else if (action === "make_farm") { args.radius = 4;
   } else if (action.startsWith("autopilot-")) {
     tool = "autopilot"; args.enabled = action === "autopilot-on";
   } else if (action === "locate") {

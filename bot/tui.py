@@ -70,19 +70,16 @@ def ask(screen, prompt):
     return text
 
 
-def choose_action(screen, target):
-    actions = [("a", "Toggle autopilot"), ("e", "Toggle gear up"), ("G", "Gather"),
-               ("m", "Make"), ("s", "Store in chests"), ("f", "Farm"),
-               ("l", "Find and go"), ("d", "Store all and disconnect"), (":", "Custom tool")]
+def choose_list(screen, title, options):
     selected = 0
     while True:
         h, w = screen.getmaxyx()
         screen.erase()
-        screen.addnstr(0, 0, "Action for %s (up/down, Enter; Esc cancels)" % target, w - 1, curses.A_BOLD)
+        screen.addnstr(0, 0, title + " (up/down, Enter; Esc cancels)", w - 1, curses.A_BOLD)
         visible = max(1, h - 2)
         first = max(0, selected - visible + 1)
-        for i in range(first, min(len(actions), first + visible)):
-            screen.addnstr(i - first + 1, 0, actions[i][1], w - 1, curses.A_REVERSE if i == selected else 0)
+        for i in range(first, min(len(options), first + visible)):
+            screen.addnstr(i - first + 1, 0, options[i], w - 1, curses.A_REVERSE if i == selected else 0)
         screen.refresh()
         key = screen.getch()
         if key in (27, ord("q")):
@@ -90,9 +87,20 @@ def choose_action(screen, target):
         if key == curses.KEY_UP:
             selected = max(0, selected - 1)
         elif key == curses.KEY_DOWN:
-            selected = min(len(actions) - 1, selected + 1)
+            selected = min(len(options) - 1, selected + 1)
         elif key in (10, 13, curses.KEY_ENTER):
-            return ord(actions[selected][0])
+            return selected
+
+
+def choose_action(screen, target):
+    actions = [("a", "Toggle autopilot"), ("e", "Toggle gear up"), ("G", "Gather"),
+               ("m", "Make"), ("s", "Store in chests"), ("f", "Farm"),
+               ("l", "Find and go"), ("d", "Store all and disconnect"), (":", "Custom tool"),
+               ("B", "Build castle (whole team)"), ("r", "Build roads to mines (whole team)"),
+               ("F", "Create crop farm (near water)"), ("M", "Mine ores / open mine as needed"),
+               ("H", "Build shelter"), ("V", "Plant castle farms"), ("P", "Stock castle animal pens")]
+    selected = choose_list(screen, "Action for " + target, [label for _, label in actions])
+    return -1 if selected < 0 else ord(actions[selected][0])
 
 
 def main(screen):
@@ -181,10 +189,35 @@ def main(screen):
                 run("autopilot", {"bot": name, "enabled": not bots[picked].get("autopilot")})
             elif key == ord("e"):
                 run("autopilot", {"bot": name, "enabled": bool(bots[picked].get("autopilot")), "gear": not bots[picked].get("gear")})
-            elif key == ord("G"):
-                what = ask(screen, "gather (block ids, comma separated) and count: ").split()
-                if what:
-                    run("autopilot", {"bot": name, "enabled": True, "gather": what[0], "count": int(what[1]) if len(what) > 1 else 16})
+            elif key in (ord("B"), ord("r"), ord("V"), ord("P")):
+                args = {"action": {ord("B"): "start", ord("r"): "roads", ord("V"): "farms", ord("P"): "ranch"}[key]}
+                if key == ord("B"):
+                    at = ask(screen, "castle centre x y z (floor level): ").split()
+                    if len(at) != 3:
+                        shown["message"] = "enter three integer coordinates"
+                        continue
+                    args.update(zip(["x", "y", "z"], map(int, at)))
+                run("castle", args)
+            elif key == ord("F"):
+                run("make_farm", {"bot": name, "radius": 4})
+            elif key == ord("H"):
+                at = bots[picked].get("position")
+                if at:
+                    run("team_member", {"bot": name, "objective": "build", "plan": "shelter", "item": "cobblestone",
+                                        "x1": int(at["x"]), "y1": int(at["y"]), "z1": int(at["z"])})
+            elif key in (ord("G"), ord("M")):
+                resources = ["coal_ore", "iron_ore", "copper_ore", "gold_ore", "diamond_ore", "redstone_ore", "lapis_ore", "emerald_ore", "iron_ore,coal_ore"]
+                if key == ord("G"):
+                    resources += ["oak_log", "spruce_log", "birch_log", "cobblestone", "stone", "sand", "gravel", "dirt"]
+                selected = choose_list(screen, "Resource", resources + ["Custom block ids..."])
+                if selected < 0:
+                    continue
+                resource = ask(screen, "block ids, comma separated: ") if selected == len(resources) else resources[selected]
+                if resource:
+                    count = int(ask(screen, "count (default 16): ") or "16")
+                    if count < 1:
+                        raise ValueError("count must be positive")
+                    run("autopilot", {"bot": name, "enabled": True, "gather": resource, "count": count})
             elif key == ord("m"):
                 what = ask(screen, "make (item) and count: ").split()
                 if what:

@@ -46,6 +46,29 @@ class TuiTests(unittest.TestCase):
         screen.keys = iter([tui.curses.KEY_DOWN, 27])
         self.assertEqual(tui.choose_action(screen, 'One'), -1)
 
+    def test_mine_resource_list(self):
+        screen = Screen()
+        screen.keys = iter([ord('M'), tui.curses.KEY_DOWN, 10, ord('q')])
+        with patch.multiple(tui.curses, curs_set=lambda n: None, use_default_colors=lambda: None), \
+                patch.object(tui, 'state', return_value={'bots': [{'name': 'One'}]}), \
+                patch.object(tui, 'ask', return_value='24'), patch.object(tui, 'run') as run:
+            tui.main(screen)
+        run.assert_called_once_with('autopilot', {'bot': 'One', 'enabled': True, 'gather': 'iron_ore', 'count': 24})
+
+    def test_build_castle_once_for_team(self):
+        screen = Screen()
+        screen.keys = iter([ord('A'), ord('B'), ord('q')])
+        with patch.multiple(tui.curses, curs_set=lambda n: None, use_default_colors=lambda: None), \
+                patch.object(tui, 'state', return_value={'bots': [{'name': 'One'}, {'name': 'Two'}]}), \
+                patch.object(tui, 'ask', return_value='0 64 -10'), patch.object(tui, 'run') as run:
+            tui.main(screen)
+        run.assert_called_once_with('castle', {'action': 'start', 'x': 0, 'y': 64, 'z': -10})
+
+    def test_build_choices(self):
+        screen = Screen()
+        screen.keys = iter([*([tui.curses.KEY_DOWN] * 9), 10])
+        self.assertEqual(tui.choose_action(screen, 'One'), ord('B'))
+
     def test_fanout(self):
         with patch.object(tui, 'state', return_value={'bots': [{'name': 'One'}, {'name': 'Two'}]}), \
                 patch.object(tui.threading, 'Thread') as thread:

@@ -267,6 +267,31 @@ namespace
         return lines;
     }
 
+    int PickList(const std::string& title, const std::vector<std::string>& options)
+    {
+        int selected = 0;
+        while (true)
+        {
+            const int h = getmaxy(stdscr), w = getmaxx(stdscr);
+            werase(stdscr);
+            mvwaddstr(stdscr, 0, 0, title.substr(0, Fit(title, w - 1)).c_str());
+            const int visible = std::max(1, h - 2);
+            const int first = std::max(0, selected - visible + 1);
+            for (int i = first; i < static_cast<int>(options.size()) && i < first + visible; ++i)
+            {
+                if (i == selected) wattron(stdscr, A_REVERSE);
+                mvwaddstr(stdscr, i - first + 1, 0, options[i].substr(0, Fit(options[i], w - 1)).c_str());
+                if (i == selected) wattroff(stdscr, A_REVERSE);
+            }
+            wrefresh(stdscr);
+            const int key = wgetch(stdscr);
+            if (key == 27 || key == 'q') return -1;
+            if (key == KEY_UP && selected > 0) --selected;
+            if (key == KEY_DOWN && selected + 1 < static_cast<int>(options.size())) ++selected;
+            if (key == '\n' || key == '\r' || key == KEY_ENTER) return selected;
+        }
+    }
+
     int Number(const std::vector<std::string>& words, const size_t i, const int otherwise)
     {
         try
@@ -577,27 +602,15 @@ int main()
             const std::vector<std::pair<int, std::string>> actions = {
                 { 'a', "Toggle autopilot" }, { 'e', "Toggle gear up" }, { 'G', "Gather" },
                 { 'm', "Make" }, { 's', "Store in chests" }, { 'f', "Farm" },
-                { 'l', "Find and go" }, { 'd', "Store all and disconnect" }, { ':', "Custom tool" }
+                { 'l', "Find and go" }, { 'd', "Store all and disconnect" }, { ':', "Custom tool" },
+                { 'B', "Build castle (whole team)" }, { 'r', "Build roads to mines (whole team)" },
+                { 'F', "Create crop farm (near water)" }, { 'M', "Mine ores / open mine as needed" },
+                { 'H', "Build shelter" }, { 'V', "Plant castle farms" }, { 'P', "Stock castle animal pens" }
             };
-            int selected = 0;
-            while (true)
-            {
-                werase(stdscr);
-                line(0, std::string("Action for ") + (all_bots ? "ALL BOTS" : bots.empty() ? "no bot" : bots[picked].first) + " (up/down, Enter; Esc cancels)", A_BOLD);
-                const int visible = std::max(1, h - 2);
-                const int first_action = std::max(0, selected - visible + 1);
-                for (int i = first_action; i < static_cast<int>(actions.size()) && i < first_action + visible; ++i)
-                {
-                    line(i - first_action + 1, actions[i].second, i == selected ? A_REVERSE : 0);
-                }
-                wrefresh(stdscr);
-                const int choice = wgetch(stdscr);
-                if (choice == 27 || choice == 'q') { key = ERR; break; }
-                if (choice == KEY_UP && selected > 0) --selected;
-                if (choice == KEY_DOWN && selected + 1 < static_cast<int>(actions.size())) ++selected;
-                if (choice == '\n' || choice == '\r' || choice == KEY_ENTER) { key = actions[selected].first; break; }
-                if (choice == KEY_RESIZE) { key = ERR; break; }
-            }
+            std::vector<std::string> labels;
+            for (const auto& action : actions) labels.push_back(action.second);
+            const int selected = PickList(std::string("Action for ") + (all_bots ? "ALL BOTS" : bots.empty() ? "no bot" : bots[picked].first) + " (arrows, Enter; Esc cancels)", labels);
+            key = selected < 0 ? ERR : actions[selected].first;
         }
         if (key == ERR)
         {
@@ -740,18 +753,73 @@ int main()
             args["gear"] = !Flag(b, "gear");
             run(bot, "autopilot", args);
         }
-        else if (key == 'G' || key == 'm')
+        else if (key == 'B' || key == 'r' || key == 'V' || key == 'P')
         {
-            const std::vector<std::string> what = Words(ask(key == 'G' ? "gather (block ids, comma separated) and count: " : "make (item) and count: "));
+            args["action"] = key == 'B' ? "start" : key == 'r' ? "roads" : key == 'V' ? "farms" : "ranch";
+            if (key == 'B')
+            {
+                const auto at = Words(ask("castle centre x y z (floor level): "));
+                if (at.size() != 3) continue;
+                bool valid = true;
+                for (size_t i = 0; i < 3; ++i)
+                {
+                    int value;
+                    const auto parsed = std::from_chars(at[i].data(), at[i].data() + at[i].size(), value);
+                    if (parsed.ec != std::errc() || parsed.ptr != at[i].data() + at[i].size()) { valid = false; break; }
+                    args[i == 0 ? "x" : i == 1 ? "y" : "z"] = value;
+                }
+                if (!valid) continue;
+            }
+            run("", "castle", args);
+        }
+        else if (key == 'F')
+        {
+            args["radius"] = 4;
+            run(bot, "make_farm", args);
+        }
+        else if (key == 'H')
+        {
+            if (!b.is_object() || !b.contains("position")) continue;
+            args["objective"] = "build"; args["plan"] = "shelter"; args["item"] = "cobblestone";
+            args["x1"] = b["position"]["x"]; args["y1"] = b["position"]["y"]; args["z1"] = b["position"]["z"];
+            run(bot, "team_member", args);
+        }
+        else if (key == 'G' || key == 'M' || key == 'm')
+        {
+            std::vector<std::string> what;
+            if (key != 'm')
+            {
+                std::vector<std::string> resources = { "coal_ore", "iron_ore", "copper_ore", "gold_ore", "diamond_ore", "redstone_ore", "lapis_ore", "emerald_ore", "iron_ore,coal_ore" };
+                if (key == 'G') resources.insert(resources.end(), { "oak_log", "spruce_log", "birch_log", "cobblestone", "stone", "sand", "gravel", "dirt" });
+                resources.push_back("Custom block ids...");
+                const int selected = PickList("Resource (arrows, Enter; Esc cancels)", resources);
+                if (selected < 0) continue;
+                const std::string resource = selected == static_cast<int>(resources.size()) - 1 ? ask("block ids, comma separated: ") : resources[selected];
+                const std::string count = ask("count (default 16): ");
+                if (resource.empty()) continue;
+                int amount = 16;
+                if (!count.empty())
+                {
+                    const auto parsed = std::from_chars(count.data(), count.data() + count.size(), amount);
+                    if (parsed.ec != std::errc() || parsed.ptr != count.data() + count.size() || amount < 1)
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        message = "count must be a positive integer";
+                        continue;
+                    }
+                }
+                what = { resource, std::to_string(amount) };
+            }
+            else what = Words(ask("make (item) and count: "));
             if (!what.empty())
             {
-                args[key == 'G' ? "gather" : "item"] = what[0];
-                args["count"] = Number(what, 1, key == 'G' ? 16 : 1);
-                if (key == 'G')
+                args[key != 'm' ? "gather" : "item"] = what[0];
+                args["count"] = Number(what, 1, key != 'm' ? 16 : 1);
+                if (key != 'm')
                 {
                     args["enabled"] = true;
                 }
-                run(bot, key == 'G' ? "autopilot" : "make", args);
+                run(bot, key != 'm' ? "autopilot" : "make", args);
             }
         }
         else if (key == 's' || key == 'f')
