@@ -1,4 +1,4 @@
--- The bots' brain: a small neural network that picks each bot's trade every Minecraft day, trained by
+-- The bots' brain: a small neural network that assigns each bot a lasting trade, trained by
 -- reinforcement on what the bot and the whole team achieved, and a vote for the leader every 10 days.
 --
 -- Every bot has its own network; every 5 days the best two seed mutated copies for the others.
@@ -7,8 +7,7 @@
 --   ->   three hidden layers of 10 units (tanh with residual connections)
 --   out  11 trades: baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer (softmax: how much it
 --        wants each); within its trade, the trade's own network picks what it does (the roles plugin)
--- Every day: each bot draws a trade from its wants (that is the exploring), groups stay of two (the
--- most decided bots get their choice first), and the groups plugin puts them to work.
+-- New bots draw a trade from their wants; assigned bots keep their trades across days and leader votes.
 -- At the end of the day, the reward of each bot is half its own work and half the team's:
 --   own   built + collected + harvested + 3 x killed + 5 x bred + given / 2 + stored / 20
 --         - 20 x deaths - 2 x times stuck                  (from the "stats" in its status)
@@ -17,7 +16,7 @@
 -- average as baseline).
 -- Every 10 days each bot votes for a leader: the candidates' own results over those days, how the team did
 -- while each of them led, a bonus to the current leader if the team did better under it, and a little of
--- each voter's own judgement (noise). The winner leads the team (leader tool), is a builder, and is
+-- each voter's own judgement (noise). The winner leads the team (leader tool), keeps its trade, and is
 -- announced in the chat. All of it is kept in a file: the learning goes on after a restart.
 --   brain {}                  what it knows: day, leader, last vote, each bot's wants and rewards
 --   brain { vote = true }     vote now
@@ -557,7 +556,8 @@ local function assign(list, team)
         taken[w.name] = true
     end
     for _, w in ipairs(wants) do
-        if w.name == state.leader then place(w, 5)
+        if state.trades[w.name] then place(w, state.trades[w.name])
+        elseif w.name == state.leader then place(w, 5)
         elseif w.name == picker then place(w, 2) end
     end
     for _, w in ipairs(wants) do
@@ -801,7 +801,7 @@ end
 
 bot.tool{
     name = "brain",
-    description = "The bots' brain: a small neural network (23 inputs about the bot and the team, three hidden layers of 10 units, 11 outputs) of its own (every 5 days the two best-scoring bots seed slightly mutated copies for the others) picks each bot's trade every Minecraft day (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer, fisher; groups of two; each bot's own policy for its trade then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
+    description = "The bots' brain: a small neural network (23 inputs about the bot and the team, three hidden layers of 10 units, 11 outputs) of its own (every 5 days the two best-scoring bots seed slightly mutated copies for the others) assigns each bot a lasting trade (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer, fisher; groups of two; each bot's own policy for its trade then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
     params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number", network = "string" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in

@@ -192,8 +192,8 @@ local function fit(st, trade)
     return score
 end
 
--- The leader decides every bot's trade: the targets of the age, filled with the bots that fit each best (staying
--- in its trade counts for 1: a move costs the work under way). It is a builder itself, the berry picker a farmer, the explorer
+-- Assigned bots keep their trades; new bots fill the targets of the age by fit.
+-- For new assignments the leader is a builder, the berry picker a farmer, the explorer
 -- (castle { action = "explore" }) an explorer.
 -- No leader yet: the first bot leads.
 local support = {}
@@ -215,7 +215,9 @@ local function split(names)
     local g, placed, pairs_ = {}, {}, {}
     for _, t in ipairs(TRADES) do g[t] = {} end
     for _, n in ipairs(names) do
-        if keep[n] then
+        if was[n] then
+            g[was[n]][#g[was[n]] + 1] = n; placed[n] = true
+        elseif keep[n] then
             g[keep[n]][#g[keep[n]] + 1] = n; placed[n] = true
         else
             for _, t in ipairs(TRADES) do

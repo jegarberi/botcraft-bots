@@ -50,13 +50,15 @@ local ok, err = pcall(function()
     for k, list in pairs(g) do for _, b in ipairs(list) do n = n + 1; where[b] = k end end
     assert(n == 15, "every bot in one trade, got " .. n)
     assert(where.Bot4 == "builders" and where.Bot15 == "farmers", "leader a builder, picker a farmer")
-    assert(#g.farmers >= 3 and #g.fishers >= 1 and #g.soldiers == 0, "Dark Age, food short first: farmers and a fisher, no soldiers, got " .. #g.farmers .. " " .. #g.soldiers)
+    assert(#g.farmers == 2 and #g.soldiers == 2, "existing trades survive resource shortages")
     assert(where.Bot12 == "bakers" and where.Bot8 == "miners", "few bots moved")
-    assert(chat[1]:match("^%[empire%] Bot") and chat[1]:match("->"), "the leader tells the moves")
     for _ = 1, 400 do
         t = t + 60
         for b in pairs(carry) do carry[b] = carry[b] + 1 end
         tick()
+        for trade, list in pairs(assigned[#assigned]) do
+            for _, b in ipairs(list) do assert(where[b] == trade, "existing trades survive age changes") end
+        end
     end
     -- The village: a house for every bot first, no trade meanwhile, then every bot in a trade again
     local before, splits = #builds, #assigned

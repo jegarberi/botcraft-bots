@@ -27,6 +27,8 @@ end, tool = function(t) tool = t end, every = function(_, f) ticks[#ticks + 1] =
 load(io.open(arg[1]):read("a"), "brain")()
 local function tick() for _, f in ipairs(ticks) do f() end end
 clock = clock + 200; tick()                                       -- first assignment
+local original_trades = {}
+for n, trade in pairs(trade_of) do original_trades[n] = trade end
 local function wanting(trade)
     local s, n = 0, 0
     for _, b in pairs(tool.run({}).bots) do s = s + b.wants_percent[trade]; n = n + 1 end
@@ -38,6 +40,7 @@ for day = 1, 60 do
     for n, s in pairs(stats) do s.collected = s.collected + ((trade_of[n] == "miners") and 40 or 10) end
     now_time = 20000; clock = clock + 600; tick()
     now_time = 100; clock = clock + 600; tick()                    -- the morning: a new day
+    for n, trade in pairs(original_trades) do assert(trade_of[n] == trade, "bots keep their trades across days and votes") end
 end
 local after = wanting("miners")
 local st = tool.run({})
