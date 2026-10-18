@@ -38,7 +38,7 @@ local after = want("mine iron")
 assert(after > before + 15, string.format("learnt to mine iron: %.1f%% -> %.1f%%", before, after))
 assert(last_ore and last_ore ~= "", "the miner's order went out")
 local view = roles.run({ network = "miners", bot = "Bot1" })
-assert(#view.inputs == 32 and #view.outputs == 19 and #view.activations == 5 and view.last_action, "the network for the panels")
+assert(#view.inputs == 104 and #view.outputs == 19 and #view.activations == 5 and view.last_action, "the network for the panels")
 local action_names = {}
 for _, o in ipairs(view.outputs) do action_names[o.name] = true end
 for _, name in ipairs({ "move", "hunt", "mine", "eat", "craft", "rest", "sleep", "help other players" }) do

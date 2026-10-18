@@ -2,9 +2,9 @@
 -- reinforcement on what the bot and the whole team achieved, and a vote for the leader every 10 days.
 --
 -- Every bot has its own network; every 5 days the best two seed mutated copies for the others.
---   in   23 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
+--   in   116 numbers about the bot and the team: health, hunger, which tools it has, food, wood and stone it
 --        carries, how many bots are hungry, how the castle advanced, the trade it had (one-hot), a bias
---   ->   three hidden layers of 10 units (tanh with residual connections)
+--   ->   five hidden layers of 10 units (tanh with residual connections)
 --   out  11 trades: baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer (softmax: how much it
 --        wants each); within its trade, the trade's own network picks what it does (the roles plugin)
 -- New bots draw a trade from their wants; assigned bots keep their trades across days and leader votes.
@@ -25,13 +25,13 @@ local FILE = "../brain_state.lua"
 -- The trades (in the places of the cooks, breeders and crafters before them: the networks' outputs keep their
 -- meaning; each trade has its own network for its actions, see the roles plugin)
 local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
-local IN, HID, OUT, EXTRA_LAYERS = 44, 10, 11, 4
+local IN, HID, OUT, EXTRA_LAYERS = 116, 10, 11, 4
 local LEARNING_RATE = 0.1
 local ENTROPY = 0.2            -- keeps some doubt: a bot sure of one trade would never try another
 local VOTE_EVERY = 10
 local VALUE_RATE = 0.2        -- how fast the critic follows the rewards
 -- What a network is made of, sent with it: one of another shape is never merged into this one
-local ARCH = "brain:44x10x10x10x10x10x11+critic:community:v6"
+local ARCH = "brain:116x10x10x10x10x10x11+critic:environment:v7"
 local GENERATION_DAYS = 5      -- every 5 days the best two seed the others
 local MUTATION = 0.05          -- with this much noise (a normal spread) on every weight of the copies
 
@@ -363,6 +363,38 @@ NN.armor_worn, NN.stored_resources, NN.stations_known, NN.world_resources, NN.ha
 local FOOD = { bread = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, beef = true, porkchop = true, mutton = true, golden_carrot = true, sweet_berries = true, potato = true }
 
+-- Append-only order from the bundled Java 26.3 biome data; unknown covers unloaded/custom biomes.
+local BIOMES = {
+    "badlands", "bamboo_jungle", "basalt_deltas", "beach", "birch_forest",
+    "cherry_grove", "cold_ocean", "crimson_forest", "dappled_forest", "dark_forest",
+    "deep_cold_ocean", "deep_dark", "deep_frozen_ocean", "deep_lukewarm_ocean", "deep_ocean",
+    "desert", "dripstone_caves", "end_barrens", "end_highlands", "end_midlands",
+    "eroded_badlands", "flower_forest", "forest", "frozen_ocean", "frozen_peaks",
+    "frozen_river", "grove", "ice_spikes", "jagged_peaks", "jungle",
+    "lukewarm_ocean", "lush_caves", "mangrove_swamp", "meadow", "mushroom_fields",
+    "nether_wastes", "ocean", "old_growth_birch_forest", "old_growth_pine_taiga", "old_growth_spruce_taiga",
+    "pale_garden", "plains", "river", "savanna", "savanna_plateau",
+    "small_end_islands", "snowy_beach", "snowy_plains", "snowy_slopes", "snowy_taiga",
+    "soul_sand_valley", "sparse_jungle", "stony_peaks", "stony_shore", "sulfur_caves",
+    "sunflower_plains", "swamp", "taiga", "the_end", "the_void",
+    "warm_ocean", "warped_forest", "windswept_forest", "windswept_gravelly_hills", "windswept_hills",
+    "windswept_savanna", "wooded_badlands",
+}
+NN.environment_inputs = { "time of day sine", "time of day cosine", "rain strength", "thunder strength", "biome unknown" }
+for _, biome in ipairs(BIOMES) do NN.environment_inputs[#NN.environment_inputs + 1] = "biome " .. biome end
+function NN.environment(st)
+    local phase = ((tonumber(st.day_time) or 0) % 24000) * 2 * math.pi / 24000
+    local function level(v) return math.max(0, math.min(1, tonumber(v) or 0)) end
+    local x = { math.sin(phase), math.cos(phase), level(st.rain_level), level(st.thunder_level), 1 }
+    local biome = tostring(st.biome or ""):gsub("^minecraft:", "")
+    for _, name in ipairs(BIOMES) do
+        local match = biome == name
+        x[#x + 1] = match and 1 or 0
+        if match then x[5] = 0 end
+    end
+    return x
+end
+
 local INPUT_NAMES = {
     "bias", "health", "food level", "air", "pos x", "pos y", "pos z", "night",
     "needs unmet", "team hungry", "castle progress",
@@ -374,6 +406,8 @@ local INPUT_NAMES = {
     "was baker", "was farmer", "was butcher", "was miner", "was builder", "was soldier",
     "was blacksmith", "was explorer", "was fisher", "was lumberjack", "was carpenter",
 }
+
+for _, name in ipairs(NN.environment_inputs) do INPUT_NAMES[#INPUT_NAMES + 1] = name end
 
 local function features(st, trade, team)
     local function has(suffix) return inventory_count(st, function(i) return i:sub(-#suffix) == suffix end) > 0 and 1 or 0 end
@@ -428,6 +462,7 @@ local function features(st, trade, team)
         world_resources(st),
     }
     for t = 1, OUT do x[#x + 1] = (t == trade) and 1 or 0 end
+    for _, value in ipairs(NN.environment(st)) do x[#x + 1] = value end
     return x
 end
 
@@ -801,7 +836,7 @@ end
 
 bot.tool{
     name = "brain",
-    description = "The bots' brain: a small neural network (23 inputs about the bot and the team, three hidden layers of 10 units, 11 outputs) of its own (every 5 days the two best-scoring bots seed slightly mutated copies for the others) assigns each bot a lasting trade (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer, fisher; groups of two; each bot's own policy for its trade then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
+    description = "The bots' brain: a small neural network (116 inputs about the bot, environment and team, five hidden layers of 10 units, 11 outputs) of its own (every 5 days the two best-scoring bots seed slightly mutated copies for the others) assigns each bot a lasting trade (baker, farmer, butcher, miner, builder, soldier, blacksmith, explorer, fisher; groups of two; each bot's own policy for its trade then picks its actions, see the roles tool), and learns by reinforcement from what each bot and the whole team achieved that day (the stats in their status, the castle's progress, how fed they are). Every 10 days the bots vote for a leader from each one's results and how the team did under each leader. With no argument: the day, the leader, the last vote, and each bot's wants, trade and last reward. vote=true votes now; stop/start.",
     params = { vote = "boolean", stop = "boolean", start = "boolean", export = "boolean", merge = "object", rollback = "number", network = "string" },
     run = function(args)
         -- For the netlink plugin: the network out, a peer's network in

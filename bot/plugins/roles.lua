@@ -29,6 +29,7 @@ local INPUTS = {
     "hostiles near", "animals near", "players near",
     "chest resources", "furnaces known", "world resources",
 }
+for _, name in ipairs(NN.environment_inputs) do INPUTS[#INPUTS + 1] = name end
 local ORES = { coal = "coal_ore", iron = "iron_ore", copper_gold = "copper_ore,gold_ore", deep = "redstone_ore,lapis_ore,diamond_ore" }
 local FOOD = NN.edible or { bread = true, pumpkin_pie = true, cake = true, cooked_beef = true, cooked_porkchop = true, cooked_mutton = true, cooked_chicken = true, baked_potato = true,
     carrot = true, apple = true, golden_carrot = true, sweet_berries = true, cooked_cod = true, cooked_salmon = true }
@@ -692,7 +693,7 @@ local function features(st, ctx)
         for _, o in ipairs(ctx.team) do if (o.food or 20) <= 12 then h = h + 1 end end
         hungry_team = math.max(hungry_team, h / #ctx.team)
     end
-    return {
+    local x = {
         1,
         (st.health or 20) / 20,
         (st.food or 20) / 20,
@@ -726,6 +727,8 @@ local function features(st, ctx)
         NN.stations_known(st),
         NN.world_resources(st),
     }
+    for _, value in ipairs(NN.environment(st)) do x[#x + 1] = value end
+    return x
 end
 
 -- What a bot's figures are now, to judge its next turn by
@@ -837,7 +840,7 @@ end
 
 bot.tool{
     name = "roles",
-    description = "Each bot has its own independently trained policy for each trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers): within its trade, it picks what a bot does next from 20 numbers about the bot (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). Every 5 game days the two best evaluated policies in each trade seed lightly mutated copies for the others; both parents are preserved. With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
+    description = "Each bot has its own independently trained policy for each trade (bakers, farmers, butchers, miners, builders, soldiers, blacksmiths, explorers, fishers): within its trade, it picks what a bot does next from 104 numbers about the bot and environment (health, hunger, what it carries, its tools, night, hostiles and animals near, how much of what its trade needs it lacks), the trades handing each other what they make (wheat, eggs, milk, pumpkins, bread, leather, ore, tools, buckets, torches), and learns from what the bot achieved by its next turn (actor-critic). Every 5 game days the two best evaluated policies in each trade seed lightly mutated copies for the others; both parents are preserved. With no argument: each trade's actions, how often drawn and their average reward. act=bot with role: the bot's turn (the groups plugin). network=trade (bot=name optional): the network's weights and what it makes of that bot now.",
     params = { act = "string", role = "string", members = "array", groups = "object", network = "string", bot = "string" },
     run = function(args)
         if type(args.act) == "string" then return act(args.act, args.role, args.members, args.groups) end

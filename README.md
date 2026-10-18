@@ -53,10 +53,13 @@ remembers seeing, and its decision tree with the branch it is on.
 
 ## Neural policies
 
-Each bot has its own trade-selection network (23 inputs, three hidden layers of 10 units) and its own
-action policy for each trade (20 inputs and three hidden layers of 8 units), including whether a build is active, its remaining blocks,
+Each bot has its own trade-selection network (116 inputs, five hidden layers of 10 units) and its own
+action policy for each trade (104 inputs and five hidden layers of 8 units), including whether a build is active, its remaining blocks,
 and how long it has been idle. Both use actor-critic learning and residual hidden layers; old saved
 weights migrate with neutral added layers, and new actions are appended to preserve existing action indices.
+Both input layers include cyclical time of day, rain/thunder strength and one-hot biome categories from
+Java 26.3 (67 biomes plus unknown for unloaded/custom biomes). These inputs are appended with zero weights
+when loading old policies, so existing learned behavior is preserved. Weather and biome are also in `status`.
 Builders and miners can gather construction stone and logs, builders and blacksmiths can make storage
 chests, bakers can cook available food, and blacksmiths can make and distribute building axes.
 The web and terminal network views show all three layers. Peer learning requires the same architecture.

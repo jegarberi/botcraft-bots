@@ -26,7 +26,27 @@ bot = { call = function(name, a)
 end, tool = function(t) tool = t end, every = function(_, f) ticks[#ticks + 1] = f end, on_chat = function() end, log = print }
 load(io.open(arg[1]):read("a"), "brain")()
 local function tick() for _, f in ipairs(ticks) do f() end end
+-- Ensure this learning fixture actually samples mining; a new input shape can otherwise draw no miners.
+local first = tool.run({ network = "Bot1" })
+local x, biases = {}, {}
+for i, input in ipairs(first.inputs) do x[i] = input.value end
+for i, output in ipairs(first.outputs) do biases[i] = output.bias end
+local probabilities = NN.forward({ w1 = first.w1, b1 = first.hidden_bias, w2 = first.w2, b2 = biases,
+    v = first.v, vb = first.vb, layers = first.layers }, x)
+local random, seeded = math.random, false
+math.random = function(...)
+    local value = random(...)
+    if not seeded and select("#", ...) == 0 then
+        seeded = true
+        return probabilities[1] + probabilities[2] + probabilities[3] + probabilities[4] / 2
+    end
+    return value
+end
 clock = clock + 200; tick()                                       -- first assignment
+math.random = random
+local sampled_mining = false
+for _, trade in pairs(trade_of) do sampled_mining = sampled_mining or trade == "miners" end
+assert(sampled_mining, "the learning fixture needs mining experience")
 local original_trades = {}
 for n, trade in pairs(trade_of) do original_trades[n] = trade end
 local function wanting(trade)
@@ -54,7 +74,7 @@ assert(io.open("../brain_state.lua"), "the brain is kept for a restart")
 
 -- Merging another program's network: checked, merged once, given to the bot doing worst as a challenger
 local mine = tool.run({ export = true })
-assert(mine.arch and #mine.w == 44 * 10 + 10 + 10 * 11 + 11 + 10 + 1 + 4 * (10 * 10 + 10), "the network goes out with its critic and its architecture")
+assert(mine.arch and #mine.w == 116 * 10 + 10 + 10 * 11 + 11 + 10 + 1 + 4 * (10 * 10 + 10), "the network goes out with its critic and its architecture")
 local w = {}
 for i, v in ipairs(mine.w) do w[i] = v + 0.5 end
 local function rejected(m) local ok, err = pcall(tool.run, { merge = m }) return not ok and tostring(err) end
@@ -77,7 +97,7 @@ for h, row in ipairs(n1.w1) do
 end
 assert(differ, "evolved networks differ even when rounded probabilities agree")
 local view = tool.run({ network = "Bot3" })
-assert(#view.inputs == 44 and #view.hidden == 10 and #view.outputs == 11 and #view.w1 == 10 and #view.w2 == 11 and #view.activations == 5 and #view.layers == 4, "one bot's network for the panels")
+assert(#view.inputs == 116 and #view.hidden == 10 and #view.outputs == 11 and #view.w1 == 10 and #view.w2 == 11 and #view.activations == 5 and #view.layers == 4, "one bot's network for the panels")
 -- Rollback by hand to the network of an earlier morning
 assert(tool.run({ rollback = 1 }):match("back to the network of day"))
 os.remove("../brain_state.lua")

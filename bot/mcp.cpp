@@ -40,6 +40,7 @@
 
 #include "build_quality.hpp"
 #include "idle_time.hpp"
+#include "weather.hpp"
 #include "construction_policy.hpp"
 #include "spawn_names.hpp"
 #include "site_index.hpp"
@@ -55,6 +56,7 @@
 #include "botcraft/Game/Inventory/Item.hpp"
 #include "botcraft/Game/Inventory/Window.hpp"
 #include "botcraft/Game/World/World.hpp"
+#include "botcraft/Game/World/Biome.hpp"
 #include "botcraft/Network/NetworkManager.hpp"
 #include "botcraft/Renderer/Settings.hpp"
 #include "botcraft/Utilities/Logger.hpp"
@@ -455,6 +457,7 @@ public:
     std::atomic<std::chrono::steady_clock::time_point> worked_in_place_at{};
     /// @brief How many times the watchdog found the bot stuck since it connected
     std::atomic<int> times_stuck = 0;
+    Weather weather;
     IdleTime idle_time; // Behaviour thread only; fractional seconds survive short idle periods.
     /// @brief What the bot has done since it joined, for its performance (the brain plugin learns from it):
     /// built, collected, killed, harvested, bred, stored, given, idle_seconds
@@ -527,6 +530,21 @@ public:
 
 protected:
     using ProtocolCraft::Handler::Handle;
+    virtual void Handle(ProtocolCraft::ClientboundGameEventPacket& packet) override
+    {
+        weather.Update(packet.GetType(), packet.GetParam());
+        ManagersClient::Handle(packet);
+    }
+    virtual void Handle(ProtocolCraft::ClientboundLoginPacket& packet) override
+    {
+        weather.Reset();
+        ManagersClient::Handle(packet);
+    }
+    virtual void Handle(ProtocolCraft::ClientboundRespawnPacket& packet) override
+    {
+        weather.Reset();
+        ManagersClient::Handle(packet);
+    }
     virtual void Handle(ProtocolCraft::ClientboundPlayerChatPacket& packet) override
     {
         PushChat("<" + GetPlayerName(packet.GetSender()) + "> " + packet.GetBody().GetContent());
@@ -9170,6 +9188,10 @@ static Value CallTool(const std::string& name, const Value& a)
         o["game_mode"] = mode >= 0 && mode < 4 ? modes[mode] : "unknown";
         o["dimension"] = world->GetCurrentDimension();
         o["day_time"] = bot.GetDayTime();
+        o["rain_level"] = bot.weather.rain.load();
+        o["thunder_level"] = bot.weather.thunder.load();
+        const Biome* biome = world->GetBiome(BlockPos(me->GetPosition()));
+        o["biome"] = biome == nullptr ? "" : biome->GetName();
         const ProtocolCraft::Slot held = bot.GetInventoryManager()->GetHotbarSelected();
         o["held_item"] = held.IsEmptySlot() ? "" : AssetsManager::getInstance().GetItem(held.GetItemId())->GetName();
         Value players = Json::Array();

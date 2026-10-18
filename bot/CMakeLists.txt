@@ -46,3 +46,7 @@ target_compile_options(test_build_quality PRIVATE -UNDEBUG -Wall -Wextra -Wpedan
 add_executable(test_idle_time EXCLUDE_FROM_ALL test_idle_time.cpp)
 target_compile_features(test_idle_time PRIVATE cxx_std_17)
 target_compile_options(test_idle_time PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(test_weather EXCLUDE_FROM_ALL test_weather.cpp)
+target_compile_features(test_weather PRIVATE cxx_std_17)
+target_compile_options(test_weather PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
