@@ -21,6 +21,12 @@ if [ ! -d Botcraft ]; then
     git -C Botcraft checkout -q 3e54657a3ccd250657c887baa46a0e43cb0515bf
     git -C Botcraft apply ../patches/botcraft.diff
 fi
+# A checkout from before the last change to the patch (another machine, an older clone): the fixes as they are now
+if ! git -C Botcraft diff | cmp -s - patches/botcraft.diff; then
+    echo "Botcraft does not match patches/botcraft.diff: applying it again" >&2
+    git -C Botcraft checkout -q 3e54657a3ccd250657c887baa46a0e43cb0515bf -- .
+    git -C Botcraft apply ../patches/botcraft.diff
+fi
 cd bot
 
 [ -f build/build.ninja ] || cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release >&2
