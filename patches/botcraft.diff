@@ -51,6 +51,20 @@ index a669863..63a3c4e 100644
  
          /// @brief Names of all connected players
          std::map<ProtocolCraft::UUID, std::string> player_names;
+diff --git a/botcraft/include/botcraft/Game/World/Blockstate.hpp b/botcraft/include/botcraft/Game/World/Blockstate.hpp
+index 3f2f481..b102715 100644
+--- a/botcraft/include/botcraft/Game/World/Blockstate.hpp
++++ b/botcraft/include/botcraft/Game/World/Blockstate.hpp
+@@ -185,6 +185,9 @@ namespace Botcraft
+ 
+ #if USE_GUI
+         static void UpdateModelsWithAtlasData(const Renderer::Atlas* atlas);
++        /// @brief False before the assets load, in a program that never renders: the models keep no faces (render
++        /// data, ~700 MB) and the same colliders share one model
++        static bool keep_render_data;
+ #endif
+ 
+     private:
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 index 958521f..552eef1 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
@@ -435,6 +449,42 @@ index 9380d9d..7d36ad6 100644
              }
          }
  #endif
+diff --git a/botcraft/src/Game/World/Blockstate.cpp b/botcraft/src/Game/World/Blockstate.cpp
+index 2e0f761..daa0ad8 100644
+--- a/botcraft/src/Game/World/Blockstate.cpp
++++ b/botcraft/src/Game/World/Blockstate.cpp
+@@ -244,6 +244,9 @@ namespace Botcraft
+     std::map<std::string, Json::Value> Blockstate::cached_jsons;
+     std::set<std::string> Blockstate::unique_strings;
+     std::deque<Model> Blockstate::unique_models;
++#if USE_GUI
++    bool Blockstate::keep_render_data = true;
++#endif
+ 
+     Blockstate::Blockstate(const BlockstateProperties& properties)
+     {
+@@ -1165,6 +1168,21 @@ namespace Botcraft
+ 
+     size_t Blockstate::GetUniqueModelIndex(const Model& model)
+     {
++#if USE_GUI
++        if (!keep_render_data)
++        {
++            for (size_t i = 0; i < unique_models.size(); ++i)
++            {
++                if (model.GetColliders() == unique_models[i].GetColliders())
++                {
++                    return i;
++                }
++            }
++            unique_models.push_back(model);
++            std::vector<FaceDescriptor>().swap(unique_models.back().GetFaces());
++            return unique_models.size() - 1;
++        }
++#endif
+         // Don't bother searching for a preexisting model if USE_GUI
+         // as IsSame always returns false anyway
+ #if !USE_GUI
 diff --git a/botcraft/src/Network/NetworkManager.cpp b/botcraft/src/Network/NetworkManager.cpp
 index 6c5c487..ec5bea5 100644
 --- a/botcraft/src/Network/NetworkManager.cpp

@@ -12,6 +12,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <malloc.h>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -11304,6 +11305,12 @@ int main(int argc, char* argv[])
             Renderer::Settings::Headless(!show_gui);
             Renderer::Settings::SetResolution(854, 480);
         }
+        // The game assets, built here. Every block's model has faces (~700 MB per process) needed only to draw: a
+        // process without a window or views keeps none (and blocks with the same colliders share a model), ~60 MB
+        // instead of ~840. What loading freed goes back to the system
+        Blockstate::keep_render_data = show_gui || !snapshot_path.empty();
+        Botcraft::AssetsManager::getInstance();
+        malloc_trim(0);
         spawn_delay_seconds = delay;
         // The bots of last time (bot/bots.txt), unless the command line says which
         std::vector<std::string> names;
