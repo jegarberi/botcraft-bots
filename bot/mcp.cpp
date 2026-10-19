@@ -944,16 +944,33 @@ static std::vector<Position> FindBlocks(BehaviourClient& c, const std::function<
 
 // One database per bot, memory/NAME.sqlite. Every 10 seconds the blocks worth remembering around the bot
 // are written to it, so it can walk back to a known tree, ore, crafting table, chest or bed instead of
-// searching again, across restarts too.
-static sqlite3* memory_db = nullptr;
-// The scan (stepper thread), the tasks (behaviour thread) and the tools (MCP, web threads) all use it
+// searching again, across restarts too. All the bots can live in one process: each one's own, by bot
+static std::map<const BehaviourClient*, sqlite3*> memory_dbs;
+// The scan (stepper thread), the tasks (behaviour thread) and the tools (MCP, web threads) all use them.
+// ponytail: one lock for every bot's database, per-bot locks if the scans ever queue up behind it
 static std::mutex memory_mutex;
 
-static void OpenMemory(const std::string& bot_name)
+/// @brief This bot's memory database, nullptr if none is open
+static sqlite3* MemoryOf(const BehaviourClient& c)
+{
+    static std::mutex dbs_mutex;
+    std::lock_guard<std::mutex> lock(dbs_mutex);
+    const auto it = memory_dbs.find(&c);
+    return it == memory_dbs.end() ? nullptr : it->second;
+}
+
+static void CloseMemory(const BehaviourClient& c)
 {
     std::lock_guard<std::mutex> lock(memory_mutex);
-    sqlite3_close(memory_db);
-    memory_db = nullptr;
+    sqlite3_close(MemoryOf(c));
+    memory_dbs.erase(&c);
+}
+
+static void OpenMemory(const BehaviourClient& c, const std::string& bot_name)
+{
+    CloseMemory(c);
+    std::lock_guard<std::mutex> lock(memory_mutex);
+    sqlite3* memory_db = nullptr;
     std::filesystem::create_directories("../memory");
     if (sqlite3_open(("../memory/" + bot_name + ".sqlite").c_str(), &memory_db) != SQLITE_OK ||
         sqlite3_exec(memory_db,
@@ -971,13 +988,15 @@ static void OpenMemory(const std::string& bot_name)
     {
         LOG_ERROR("Memory: can't open the database of " << bot_name << ": " << (memory_db ? sqlite3_errmsg(memory_db) : "out of memory"));
         sqlite3_close(memory_db);
-        memory_db = nullptr;
+        return;
     }
+    memory_dbs[&c] = memory_db;
 }
 
 /// @brief One line of what the bot is doing, in its memory; an empty value forgets it
-static void SaveDoing(const std::string& key, const std::string& value)
+static void SaveDoing(const BehaviourClient& c, const std::string& key, const std::string& value)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::lock_guard<std::mutex> lock(memory_mutex);
     if (memory_db == nullptr)
     {
@@ -994,8 +1013,9 @@ static void SaveDoing(const std::string& key, const std::string& value)
     sqlite3_finalize(statement);
 }
 
-static std::map<std::string, std::string> LoadDoing()
+static std::map<std::string, std::string> LoadDoing(const BehaviourClient& c)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::map<std::string, std::string> doing;
     std::lock_guard<std::mutex> lock(memory_mutex);
     sqlite3_stmt* statement = nullptr;
@@ -1052,8 +1072,9 @@ static sqlite3* SharedDb()
 }
 
 /// @brief Remember a place that belongs to the bot ("bed")
-static void SetOwn(const std::string& what, const Position& p)
+static void SetOwn(const BehaviourClient& c, const std::string& what, const Position& p)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::lock_guard<std::mutex> lock(memory_mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "INSERT OR REPLACE INTO own (what, x, y, z) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr) != SQLITE_OK)
@@ -1068,8 +1089,9 @@ static void SetOwn(const std::string& what, const Position& p)
     sqlite3_finalize(statement);
 }
 
-static void ForgetOwn(const std::string& what)
+static void ForgetOwn(const BehaviourClient& c, const std::string& what)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::lock_guard<std::mutex> lock(memory_mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "DELETE FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
@@ -1081,8 +1103,9 @@ static void ForgetOwn(const std::string& what)
     sqlite3_finalize(statement);
 }
 
-static bool GetOwn(const std::string& what, Position& p)
+static bool GetOwn(const BehaviourClient& c, const std::string& what, Position& p)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::lock_guard<std::mutex> lock(memory_mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "SELECT x, y, z FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
@@ -1121,6 +1144,7 @@ static bool MatchesAny(const std::string& block_name, const std::vector<std::str
 /// @brief Add one place to the memory (told by a teammate)
 static void RememberPlace(BehaviourClient& c, const std::string& kind, const Position& p)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
     std::lock_guard<std::mutex> lock(memory_mutex);
     if (memory_db == nullptr)
@@ -1342,6 +1366,7 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 
 static void Remember(McpBot& c)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     constexpr int radius = 24;
     const std::shared_ptr<World> world = c.GetWorld();
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
@@ -1636,6 +1661,7 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 /// "bed" any bed), nearest to the bot first
 static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, std::string kind, const int max_results)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     kind = kind.substr(kind.find(':') == std::string::npos ? 0 : kind.find(':') + 1);
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
@@ -1689,8 +1715,9 @@ static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, 
     return places;
 }
 
-static void Forget(const Position& p)
+static void Forget(const BehaviourClient& c, const Position& p)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     std::lock_guard<std::mutex> lock(memory_mutex);
     if (memory_db == nullptr)
     {
@@ -1715,8 +1742,9 @@ static void Forget(const Position& p)
 }
 
 /// @brief How many places of each kind are remembered, most numerous first
-static Value MemorySummary()
+static Value MemorySummary(const BehaviourClient& c)
 {
+    sqlite3* const memory_db = MemoryOf(c);
     Value summary = Json::Object();
     std::lock_guard<std::mutex> lock(memory_mutex);
     if (memory_db == nullptr)
@@ -3663,7 +3691,7 @@ static bool GoToRemembered(McpBot& c, const std::string& kind)
         const double sqr_dist = c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z));
         if (sqr_dist <= 16.0 * 16.0 || ((EndsWith(found_kind, "_log") || EndsWith(found_kind, "_ore")) && InStoredSite(p)))
         {
-            Forget(p);
+            Forget(c, p);
             continue;
         }
         if (sqr_dist > 200.0 * 200.0)
@@ -3675,7 +3703,7 @@ static bool GoToRemembered(McpBot& c, const std::string& kind)
             c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(p.x, p.y, p.z)) > 12.0 * 12.0)
         {
             // Neither on foot nor by digging: don't try again
-            Forget(p);
+            Forget(c, p);
         }
         return true;
     }
@@ -3963,7 +3991,7 @@ static bool SeekOre(McpBot& c, const std::vector<std::string>& items)
         if (TunnelToward(c, p, 40) == Status::Failure && distance_to(p) > before - 2.0)
         {
             // No way there (water, lava, bedrock): don't try again
-            Forget(p);
+            Forget(c, p);
         }
         return true;
     }
@@ -4403,7 +4431,7 @@ static Status GetFoodStep(McpBot& c)
                 c.SetNote(std::string("no food: going where a ") + animal + " was seen, at " + std::to_string(p.x) + " " + std::to_string(p.z));
                 if (TravelTask(c, p.x, p.z) == Status::Failure)
                 {
-                    Forget(p);
+                    Forget(c, p);
                 }
                 return Status::Success;
             }
@@ -4538,7 +4566,7 @@ static bool EnsureFurnace(McpBot& c, const std::string& stage, Position& furnace
     // Each bot its own furnace: one smelts a block every 10 seconds, a team sharing one would queue at it.
     // The bot's own if it is still standing and not too far; a new one where it works now otherwise
     Position mine;
-    if (GetOwn("furnace", mine) && c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(mine.x, mine.y, mine.z)) < 48.0 * 48.0)
+    if (GetOwn(c, "furnace", mine) && c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(mine.x, mine.y, mine.z)) < 48.0 * 48.0)
     {
         const Blockstate* block = c.GetWorld()->GetBlock(mine);
         if (block != nullptr && block->GetName() == "minecraft:furnace")
@@ -4554,7 +4582,7 @@ static bool EnsureFurnace(McpBot& c, const std::string& stage, Position& furnace
         const bool done = PlaceNearby(c, "minecraft:furnace", placed);
         if (done)
         {
-            SetOwn("furnace", placed);
+            SetOwn(c, "furnace", placed);
         }
         Check(c, done ? Status::Success : Status::Failure);
     }
@@ -4843,7 +4871,7 @@ static Status HuntStep(McpBot& c)
             c.SetNote("hunting " + type + ": going where one was seen, at " + std::to_string(seen[0].second.x) + " " + std::to_string(seen[0].second.z));
             if (TravelTask(c, seen[0].second.x, seen[0].second.z) == Status::Failure || GoTo(c, seen[0].second, 4) == Status::Failure)
             {
-                Forget(seen[0].second);
+                Forget(c, seen[0].second);
             }
             return Status::Success;
         }
@@ -5895,7 +5923,7 @@ static Status PourStep(McpBot& c, const Position& p)
         c.SetNote("building: going to the water at " + std::to_string(known[0].second.x) + " " + std::to_string(known[0].second.z) + " to fill the bucket");
         if (TravelTask(c, known[0].second.x, known[0].second.z) == Status::Failure)
         {
-            Forget(known[0].second);
+            Forget(c, known[0].second);
         }
         return Status::Success;
     }
@@ -6204,15 +6232,15 @@ static bool HasBed(McpBot& c)
     // Its own bed (its house's, in the village) counts wherever it is: it goes home to sleep. Unless it is in
     // sight and no bed stands there (a house not built yet): forgotten, and the bot works on through the night
     Position mine;
-    if (GetOwn("bed", mine))
+    if (GetOwn(c, "bed", mine))
     {
         const Blockstate* block = c.GetWorld()->GetBlock(mine);
         if (block != nullptr && !IsBed(*block))
         {
-            ForgetOwn("bed");
+            ForgetOwn(c, "bed");
         }
     }
-    if (!ItemLike(c, "_bed").empty() || GetOwn("bed", mine) || !FindBlocks(c, IsBed, 32, 1).empty())
+    if (!ItemLike(c, "_bed").empty() || GetOwn(c, "bed", mine) || !FindBlocks(c, IsBed, 32, 1).empty())
     {
         return true;
     }
@@ -6229,7 +6257,7 @@ static bool OwnsBed(McpBot& c)
         return true;
     }
     Position mine;
-    if (!GetOwn("bed", mine))
+    if (!GetOwn(c, "bed", mine))
     {
         return false;
     }
@@ -6246,7 +6274,7 @@ static bool PlaceOwnBed(McpBot& c)
     {
         return false;
     }
-    SetOwn("bed", placed);
+    SetOwn(c, "bed", placed);
     return true;
 }
 
@@ -6379,7 +6407,7 @@ static Status SleepStep(McpBot& c)
     std::vector<Position> beds = FindBlocks(c, [](const Blockstate& b) { return IsBed(b) && b.GetVariableValue("occupied") == "false"; }, 32, 64);
     // Its own bed first, wherever it is; any free one otherwise
     Position mine;
-    if (GetOwn("bed", mine))
+    if (GetOwn(c, "bed", mine))
     {
         if (std::find(beds.begin(), beds.end(), mine) == beds.end() && c.GetLocalPlayer()->GetPosition().SqrDist(Vector3<double>(mine.x, mine.y, mine.z)) > 24.0 * 24.0)
         {
@@ -7597,10 +7625,50 @@ struct Child
         last_status = status;
     }
 };
-// The local bot (at most one), then the children, oldest first
+// The local bots, then the children, oldest first. With a window or views each bot needs its own process (one
+// renderer per process): one local bot, the others children. Headless, every bot is local and they all share
+// one world (Botcraft's shared world, behind its own lock): one copy of the chunks and of the game assets
 static std::vector<BotSlot> bots;
 static std::vector<std::shared_ptr<Child>> children;
 static std::mutex bots_mutex;
+static std::shared_ptr<World> shared_world;
+
+/// @brief The local bot of this name, nullptr if none. The caller holds bots_mutex
+static std::shared_ptr<McpBot> LocalBot(const std::string& name)
+{
+    for (const BotSlot& slot : bots)
+    {
+        if (slot.bot->GetNetworkManager() && slot.bot->GetNetworkManager()->GetMyName() == name)
+        {
+            return slot.bot;
+        }
+    }
+    return nullptr;
+}
+
+/// @brief Take a local bot out of the game: its threads stopped, its memory closed, its chunks let go of
+static void LeaveGame(BotSlot& slot)
+{
+    const std::thread::id loader = slot.bot->GetNetworkManager() ? slot.bot->GetNetworkManager()->GetProcessingThreadId() : std::thread::id();
+    slot.bot->SetShouldBeClosed(true);
+    if (slot.stepper.joinable())
+    {
+        slot.stepper.join();
+    }
+    slot.bot->Disconnect();
+    CloseMemory(*slot.bot);
+    if (shared_world)
+    {
+        // The chunks only this bot had loaded: a shared world keeps every other bot's
+        shared_world->UnloadAllChunks(loader);
+    }
+}
+
+/// @brief Chat is read from one local bot: another one when it leaves. The caller holds bots_mutex
+static void NewChatSource()
+{
+    chat_source = bots.empty() ? nullptr : bots.back().bot.get();
+}
 static std::string server_address = "192.168.100.78:25565";
 static bool start_autopilot = false;
 static bool show_gui = false;
@@ -7752,11 +7820,12 @@ static std::shared_ptr<McpBot> TargetBot(const Value& a)
 {
     std::lock_guard<std::mutex> lock(bots_mutex);
     const bool named = a.is_object() && a.contains("bot") && a["bot"].is_string() && !a["bot"].get_string().empty();
-    if (bots.empty() || (named && bots.front().bot->GetNetworkManager()->GetMyName() != a["bot"].get_string()))
+    const std::shared_ptr<McpBot> found = named ? LocalBot(a["bot"].get_string()) : (bots.empty() ? nullptr : bots.front().bot);
+    if (!found)
     {
         throw std::runtime_error(named ? "no bot named " + a["bot"].get_string() + ", see the bots tool" : "no bot is connected, use the connect tool");
     }
-    return bots.front().bot;
+    return found;
 }
 
 /// @brief A tree leaf (walking, mining, hunting...) runs until it is done, so the decision tree can't react meanwhile.
@@ -7961,12 +8030,12 @@ static void SpawnBot(const std::string& login)
     std::lock_guard<std::mutex> spawning(spawn_mutex);
     {
         std::lock_guard<std::mutex> lock(bots_mutex);
-        const bool local_name = !bots.empty() && bots.front().bot->GetNetworkManager()->GetMyName() == login;
+        const bool local_name = LocalBot(login) != nullptr;
         const bool child_name = std::any_of(children.begin(), children.end(), [&](const auto& child) { return child->name == login; });
         if (local_name || child_name) { throw std::runtime_error(login + " is already connected"); }
     }
     {
-        // Only the first bot lives in this process
+        // A child process holds a single bot
         std::lock_guard<std::mutex> lock(bots_mutex);
         if (!bots.empty())
         {
@@ -7979,7 +8048,7 @@ static void SpawnBot(const std::string& login)
     bool local;
     {
         std::lock_guard<std::mutex> lock(bots_mutex);
-        local = bots.empty();
+        local = bots.empty() || shared_world;
     }
     if (!local)
     {
@@ -7987,6 +8056,10 @@ static void SpawnBot(const std::string& login)
         return;
     }
     std::shared_ptr<McpBot> bot = std::make_shared<McpBot>();
+    if (shared_world)
+    {
+        bot->SetSharedWorld(shared_world);
+    }
     bot->SetAutoRespawn(true);
     bot->autopilot = start_autopilot;
     bot->Connect(server_address, login);
@@ -8004,12 +8077,12 @@ static void SpawnBot(const std::string& login)
             return bot->GetLocalPlayer() && bot->GetWorld() && bot->GetEntityManager() && bot->GetInventoryManager() && bot->GetInventoryManager()->GetPlayerInventory() != nullptr;
         }, 10000);
     bot->ResumeDefault();
-    OpenMemory(login.empty() ? bot->GetNetworkManager()->GetMyName() : login);
+    OpenMemory(*bot, login.empty() ? bot->GetNetworkManager()->GetMyName() : login);
     ServeSocket("../run/" + bot->GetNetworkManager()->GetMyName() + ".sock", bot->GetNetworkManager()->GetMyName());
     // Back to what it was doing when it left (its memory): autopilot and gear-up, what it was gathering or
     // making, its team order (a job of its own, a hunt). A castle build is handed over again by the castle
     {
-        const std::map<std::string, std::string> doing = LoadDoing();
+        const std::map<std::string, std::string> doing = LoadDoing(*bot);
         if (doing.count("state"))
         {
             bot->was_doing = doing.at("state");
@@ -8101,24 +8174,24 @@ static void SpawnBot(const std::string& login)
                         const auto [make, make_count] = bot->GetMake();
                         {
                             std::lock_guard<std::mutex> lock(memory_mutex);
-                            if (memory_db != nullptr)
+                            if (MemoryOf(*bot) != nullptr)
                             {
-                                sqlite3_exec(memory_db, "BEGIN", nullptr, nullptr, nullptr);
+                                sqlite3_exec(MemoryOf(*bot), "BEGIN", nullptr, nullptr, nullptr);
                             }
                         }
                         // (Not a passing tool action, like storing before leaving: what it was doing on its own)
                         if (bot->GetState().rfind("tool:", 0) != 0)
                         {
-                            SaveDoing("state", bot->GetState() + ": " + bot->GetNote());
+                            SaveDoing(*bot, "state", bot->GetState() + ": " + bot->GetNote());
                         }
-                        SaveDoing("autopilot", std::string(bot->autopilot ? "1" : "0") + (bot->gear ? "1" : "0"));
-                        SaveDoing("goal", goal_left > 0 ? goal + " " + std::to_string(goal_left) : "");
-                        SaveDoing("make", make_count > 0 ? make + " " + std::to_string(make_count) : "");
+                        SaveDoing(*bot, "autopilot", std::string(bot->autopilot ? "1" : "0") + (bot->gear ? "1" : "0"));
+                        SaveDoing(*bot, "goal", goal_left > 0 ? goal + " " + std::to_string(goal_left) : "");
+                        SaveDoing(*bot, "make", make_count > 0 ? make + " " + std::to_string(make_count) : "");
                         {
                             std::lock_guard<std::mutex> lock(memory_mutex);
-                            if (memory_db != nullptr)
+                            if (MemoryOf(*bot) != nullptr)
                             {
-                                sqlite3_exec(memory_db, "COMMIT", nullptr, nullptr, nullptr);
+                                sqlite3_exec(MemoryOf(*bot), "COMMIT", nullptr, nullptr, nullptr);
                             }
                         }
                     }
@@ -8243,13 +8316,11 @@ static Value DisconnectBot(const std::shared_ptr<McpBot>& bot)
         }
         slot = std::move(*it);
         bots.erase(it);
-        chat_source = nullptr;
+        NewChatSource();
     }
     // Disconnect() frees the network manager, and the name with it
     const std::string name = slot.bot->GetNetworkManager()->GetMyName();
-    slot.bot->SetShouldBeClosed(true);
-    slot.stepper.join();
-    slot.bot->Disconnect();
+    LeaveGame(slot);
     Value o;
     o["disconnected"] = name;
     o["stored"] = stored->load();
@@ -9265,7 +9336,7 @@ static Value CallTool(const std::string& name, const Value& a)
             // which then rejoins and kicks the second, for ever
             std::lock_guard<std::mutex> lock(bots_mutex);
             const std::string wanted = Str(a, "name");
-            const bool local = !bots.empty() && bots.front().bot->GetNetworkManager() && bots.front().bot->GetNetworkManager()->GetMyName() == wanted;
+            const bool local = LocalBot(wanted) != nullptr;
             const bool child = std::any_of(children.begin(), children.end(), [&](const std::shared_ptr<Child>& c) { return c->name == wanted; });
             if (local || child)
             {
@@ -9363,7 +9434,7 @@ static Value CallTool(const std::string& name, const Value& a)
             }
         }
         // Remembered places: kind -> how many, and items remembered in chests
-        o["memory"] = MemorySummary();
+        o["memory"] = MemorySummary(bot);
         o["stored"] = StoredSummary(world->GetCurrentDimension());
         {
             std::lock_guard<std::mutex> lock(bot.team_mutex);
@@ -9573,11 +9644,11 @@ static Value CallTool(const std::string& name, const Value& a)
         // The bed in the bot's house: its own, slept in every night (the sleep branch walks back to it)
         if (a.is_object() && a.contains("forget") && a["forget"].is_bool() && a["forget"].get<bool>())
         {
-            ForgetOwn("bed");
+            ForgetOwn(bot, "bed");
             return std::string("its bed is forgotten");
         }
         const Position bed(static_cast<int>(Num(a, "x")), static_cast<int>(Num(a, "y")), static_cast<int>(Num(a, "z")));
-        SetOwn("bed", bed);
+        SetOwn(bot, "bed", bed);
         return "its bed is at " + std::to_string(bed.x) + " " + std::to_string(bed.y) + " " + std::to_string(bed.z);
     }
     if (name == "eat")
@@ -10172,13 +10243,13 @@ static Value CallTool(const std::string& name, const Value& a)
             const bool solo = a.contains("solo") && a["solo"].is_bool() && a["solo"].get<bool>();
             if (objective == "build" || (objective == "disband" && !solo))
             {
-                SaveDoing("team", "");
+                SaveDoing(bot, "team", "");
             }
             else
             {
                 Value order = a;
                 order.get_object().erase("bot");
-                SaveDoing("team", order.Dump());
+                SaveDoing(bot, "team", order.Dump());
             }
         }
         if (a.is_object() && a.contains("leader_x"))
@@ -11023,31 +11094,40 @@ static void HandleHttpRequest(const int fd)
         state["snapshot"] = !snapshot_path.empty();
         state["chests"] = auto_store;
         state["bots"] = Json::Array();
-        std::shared_ptr<McpBot> local;
+        std::vector<std::string> local;
         std::vector<std::shared_ptr<Child>> remote;
         {
             std::lock_guard<std::mutex> lock(bots_mutex);
-            local = bots.empty() ? nullptr : bots.front().bot;
+            for (const BotSlot& slot : bots)
+            {
+                if (slot.bot->GetNetworkManager())
+                {
+                    local.push_back(slot.bot->GetNetworkManager()->GetMyName());
+                }
+            }
             remote = children;
-        }
-        if (local)
-        {
-            try
-            {
-                Value arguments;
-                arguments["bot"] = local->GetNetworkManager()->GetMyName();
-                state["bots"].push_back(CallTool("status", arguments));
-            }
-            catch (const std::exception&)
-            {
-                Value dropped;
-                dropped["name"] = local->GetNetworkManager()->GetMyName();
-                dropped["state"] = "dropped by the server";
-                state["bots"].push_back(dropped);
-            }
         }
         // All at once: one by one, 40 bots took two minutes
         std::vector<std::future<Value>> answers;
+        for (const std::string& name : local)
+        {
+            answers.push_back(std::async(std::launch::async, [name]()
+                {
+                    Value arguments;
+                    arguments["bot"] = name;
+                    try
+                    {
+                        return CallTool("status", arguments);
+                    }
+                    catch (const std::exception&)
+                    {
+                        Value dropped;
+                        dropped["name"] = name;
+                        dropped["state"] = "dropped by the server";
+                        return dropped;
+                    }
+                }));
+        }
         for (const std::shared_ptr<Child>& child : remote)
         {
             answers.push_back(std::async(std::launch::async, [child]() { return ChildStatus(*child); }));
@@ -11309,6 +11389,10 @@ int main(int argc, char* argv[])
         // process without a window or views keeps none (and blocks with the same colliders share a model), ~60 MB
         // instead of ~840. What loading freed goes back to the system
         Blockstate::keep_render_data = show_gui || !snapshot_path.empty();
+        if (!is_child && !Blockstate::keep_render_data)
+        {
+            shared_world = std::make_shared<World>(true);
+        }
         Botcraft::AssetsManager::getInstance();
         malloc_trim(0);
         spawn_delay_seconds = delay;
@@ -11522,16 +11606,17 @@ int main(int argc, char* argv[])
                         break;
                     }
                     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-                    // The bot of this process, dropped by the server: take it down
+                    // A bot of this process dropped by the server (one a turn, every 2 seconds): take it down
                     BotSlot dropped;
                     std::vector<std::shared_ptr<Child>> dead;
                     {
                         std::lock_guard<std::mutex> lock(bots_mutex);
-                        if (!bots.empty() && bots.front().bot->GetShouldBeClosed())
+                        const auto gone = std::find_if(bots.begin(), bots.end(), [](const BotSlot& slot) { return slot.bot->GetShouldBeClosed(); });
+                        if (gone != bots.end())
                         {
-                            dropped = std::move(bots.front());
-                            bots.erase(bots.begin());
-                            chat_source = nullptr;
+                            dropped = std::move(*gone);
+                            bots.erase(gone);
+                            NewChatSource();
                         }
                         // The bots whose process ended without being asked to
                         for (auto it = children.begin(); it != children.end();)
@@ -11559,8 +11644,7 @@ int main(int argc, char* argv[])
                             rejoin.restore["gather"] = dropped.bot->GetGoal().first;
                             rejoin.restore["count"] = dropped.bot->GetGoal().second;
                         }
-                        dropped.stepper.join();
-                        dropped.bot->Disconnect();
+                        LeaveGame(dropped);
                         // Frees its renderer: there can be only one per process
                         dropped.bot.reset();
                         LOG_WARNING(name << " was dropped by the server, joining again in 60 seconds");
