@@ -945,31 +945,45 @@ static std::vector<Position> FindBlocks(BehaviourClient& c, const std::function<
 // One database per bot, memory/NAME.sqlite. Every 10 seconds the blocks worth remembering around the bot
 // are written to it, so it can walk back to a known tree, ore, crafting table, chest or bed instead of
 // searching again, across restarts too. All the bots can live in one process: each one's own, by bot
-static std::map<const BehaviourClient*, sqlite3*> memory_dbs;
-// The scan (stepper thread), the tasks (behaviour thread) and the tools (MCP, web threads) all use them.
-// ponytail: one lock for every bot's database, per-bot locks if the scans ever queue up behind it
-static std::mutex memory_mutex;
-
-/// @brief This bot's memory database, nullptr if none is open
-static sqlite3* MemoryOf(const BehaviourClient& c)
+// The scan (stepper thread), the tasks (behaviour thread) and the tools (MCP, web threads) all use it: each
+// database has its own lock (a scan writes for a while; one lock for all the bots had them queue for seconds)
+struct Memory
 {
-    static std::mutex dbs_mutex;
-    std::lock_guard<std::mutex> lock(dbs_mutex);
-    const auto it = memory_dbs.find(&c);
-    return it == memory_dbs.end() ? nullptr : it->second;
+    sqlite3* db = nullptr;
+    std::mutex mutex;
+};
+static std::map<const BehaviourClient*, std::shared_ptr<Memory>> memories;
+static std::mutex memories_mutex;
+
+/// @brief This bot's memory (db nullptr if none is open); kept alive by the caller while it uses it
+static std::shared_ptr<Memory> MemoryOf(const BehaviourClient& c)
+{
+    std::lock_guard<std::mutex> lock(memories_mutex);
+    const auto it = memories.find(&c);
+    return it == memories.end() ? std::make_shared<Memory>() : it->second;
 }
 
 static void CloseMemory(const BehaviourClient& c)
 {
-    std::lock_guard<std::mutex> lock(memory_mutex);
-    sqlite3_close(MemoryOf(c));
-    memory_dbs.erase(&c);
+    std::shared_ptr<Memory> memory;
+    {
+        std::lock_guard<std::mutex> lock(memories_mutex);
+        const auto it = memories.find(&c);
+        if (it == memories.end())
+        {
+            return;
+        }
+        memory = it->second;
+        memories.erase(it);
+    }
+    std::lock_guard<std::mutex> lock(memory->mutex);
+    sqlite3_close(memory->db);
+    memory->db = nullptr;
 }
 
 static void OpenMemory(const BehaviourClient& c, const std::string& bot_name)
 {
     CloseMemory(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
     sqlite3* memory_db = nullptr;
     std::filesystem::create_directories("../memory");
     if (sqlite3_open(("../memory/" + bot_name + ".sqlite").c_str(), &memory_db) != SQLITE_OK ||
@@ -990,14 +1004,18 @@ static void OpenMemory(const BehaviourClient& c, const std::string& bot_name)
         sqlite3_close(memory_db);
         return;
     }
-    memory_dbs[&c] = memory_db;
+    const auto memory = std::make_shared<Memory>();
+    memory->db = memory_db;
+    std::lock_guard<std::mutex> lock(memories_mutex);
+    memories[&c] = memory;
 }
 
 /// @brief One line of what the bot is doing, in its memory; an empty value forgets it
 static void SaveDoing(const BehaviourClient& c, const std::string& key, const std::string& value)
 {
-    sqlite3* const memory_db = MemoryOf(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return;
@@ -1015,9 +1033,10 @@ static void SaveDoing(const BehaviourClient& c, const std::string& key, const st
 
 static std::map<std::string, std::string> LoadDoing(const BehaviourClient& c)
 {
-    sqlite3* const memory_db = MemoryOf(c);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
     std::map<std::string, std::string> doing;
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    std::lock_guard<std::mutex> lock(memory->mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "SELECT key, value FROM doing", -1, &statement, nullptr) != SQLITE_OK)
     {
@@ -1074,8 +1093,9 @@ static sqlite3* SharedDb()
 /// @brief Remember a place that belongs to the bot ("bed")
 static void SetOwn(const BehaviourClient& c, const std::string& what, const Position& p)
 {
-    sqlite3* const memory_db = MemoryOf(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
+    std::lock_guard<std::mutex> lock(memory->mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "INSERT OR REPLACE INTO own (what, x, y, z) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr) != SQLITE_OK)
     {
@@ -1091,8 +1111,9 @@ static void SetOwn(const BehaviourClient& c, const std::string& what, const Posi
 
 static void ForgetOwn(const BehaviourClient& c, const std::string& what)
 {
-    sqlite3* const memory_db = MemoryOf(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
+    std::lock_guard<std::mutex> lock(memory->mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "DELETE FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
     {
@@ -1105,8 +1126,9 @@ static void ForgetOwn(const BehaviourClient& c, const std::string& what)
 
 static bool GetOwn(const BehaviourClient& c, const std::string& what, Position& p)
 {
-    sqlite3* const memory_db = MemoryOf(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
+    std::lock_guard<std::mutex> lock(memory->mutex);
     sqlite3_stmt* statement = nullptr;
     if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "SELECT x, y, z FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
     {
@@ -1144,9 +1166,10 @@ static bool MatchesAny(const std::string& block_name, const std::vector<std::str
 /// @brief Add one place to the memory (told by a teammate)
 static void RememberPlace(BehaviourClient& c, const std::string& kind, const Position& p)
 {
-    sqlite3* const memory_db = MemoryOf(c);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return;
@@ -1366,7 +1389,8 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 
 static void Remember(McpBot& c)
 {
-    sqlite3* const memory_db = MemoryOf(c);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
     constexpr int radius = 24;
     const std::shared_ptr<World> world = c.GetWorld();
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
@@ -1444,7 +1468,7 @@ static void Remember(McpBot& c)
         }
         bool known = false;
         {
-            std::lock_guard<std::mutex> lock(memory_mutex);
+            std::lock_guard<std::mutex> lock(memory->mutex);
             sqlite3_stmt* statement = nullptr;
             if (memory_db != nullptr && sqlite3_prepare_v2(memory_db,
                 "SELECT 1 FROM places WHERE dimension = ?1 AND kind = ?2 AND x BETWEEN ?3 AND ?3 + 15 AND y BETWEEN ?4 AND ?4 + 15 AND z BETWEEN ?5 AND ?5 + 15 LIMIT 1",
@@ -1488,7 +1512,7 @@ static void Remember(McpBot& c)
         }
     }
 
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return;
@@ -1661,12 +1685,13 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 /// "bed" any bed), nearest to the bot first
 static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, std::string kind, const int max_results)
 {
-    sqlite3* const memory_db = MemoryOf(c);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
     kind = kind.substr(kind.find(':') == std::string::npos ? 0 : kind.find(':') + 1);
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
     std::vector<std::pair<std::string, Position>> places;
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return places;
@@ -1717,8 +1742,9 @@ static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, 
 
 static void Forget(const BehaviourClient& c, const Position& p)
 {
-    sqlite3* const memory_db = MemoryOf(c);
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return;
@@ -1744,9 +1770,10 @@ static void Forget(const BehaviourClient& c, const Position& p)
 /// @brief How many places of each kind are remembered, most numerous first
 static Value MemorySummary(const BehaviourClient& c)
 {
-    sqlite3* const memory_db = MemoryOf(c);
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    sqlite3* const memory_db = memory->db;
     Value summary = Json::Object();
-    std::lock_guard<std::mutex> lock(memory_mutex);
+    std::lock_guard<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return summary;
@@ -8172,11 +8199,12 @@ static void SpawnBot(const std::string& login)
                         // What it is doing, for the next time it joins
                         const auto [goal, goal_left] = bot->GetGoal();
                         const auto [make, make_count] = bot->GetMake();
+                        const std::shared_ptr<Memory> memory = MemoryOf(*bot);
                         {
-                            std::lock_guard<std::mutex> lock(memory_mutex);
-                            if (MemoryOf(*bot) != nullptr)
+                            std::lock_guard<std::mutex> lock(memory->mutex);
+                            if (memory->db != nullptr)
                             {
-                                sqlite3_exec(MemoryOf(*bot), "BEGIN", nullptr, nullptr, nullptr);
+                                sqlite3_exec(memory->db, "BEGIN", nullptr, nullptr, nullptr);
                             }
                         }
                         // (Not a passing tool action, like storing before leaving: what it was doing on its own)
@@ -8188,10 +8216,10 @@ static void SpawnBot(const std::string& login)
                         SaveDoing(*bot, "goal", goal_left > 0 ? goal + " " + std::to_string(goal_left) : "");
                         SaveDoing(*bot, "make", make_count > 0 ? make + " " + std::to_string(make_count) : "");
                         {
-                            std::lock_guard<std::mutex> lock(memory_mutex);
-                            if (MemoryOf(*bot) != nullptr)
+                            std::lock_guard<std::mutex> lock(memory->mutex);
+                            if (memory->db != nullptr)
                             {
-                                sqlite3_exec(MemoryOf(*bot), "COMMIT", nullptr, nullptr, nullptr);
+                                sqlite3_exec(memory->db, "COMMIT", nullptr, nullptr, nullptr);
                             }
                         }
                     }
