@@ -551,13 +551,14 @@ for _, item in ipairs({ "baked_potato", "beetroot_soup", "mushroom_stew", "rabbi
 end
 table.insert(ROLES.farmers.actions, { name = "gather planting seeds", goal = true,
     run = function(ctx) return gather(ctx, "short_grass,tall_grass", 24) end })
+-- Its lot's pen spot, south of the garden plot (the empire plugin keeps it clear of the road)
 local function pen(ctx)
-    local o = residence(ctx)
-    return o and { x = o.x + 9, y = o.y, z = o.z + 1 } or nil
+    local h = call("empire", { residence = ctx.bot })
+    return type(h) == "table" and h.ready and h.pen or nil
 end
 table.insert(ROLES.farmers.actions, { name = "build animal pen", run = function(ctx)
     local o = pen(ctx)
-    if not o then return "needs a finished home lot" end
+    if not o then return "needs a finished home lot with room for a pen" end
     local blocks = {}
     for x = 0, 5 do for z = 0, 5 do
         blocks[#blocks + 1] = { o.x + x, o.y - 1, o.z + z, "cobblestone" }

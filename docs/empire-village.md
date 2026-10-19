@@ -82,8 +82,16 @@ split due straight away instead of in 5 minutes.
 
 ## 3. Resources
 
-Four resources, counted from the bots' **inventories**. Each minute, whatever a bot carries above what it
-carried at the previous look is added to the stock. Nothing is subtracted when items leave the inventory.
+Four resources, counted from everything the team **holds**: every bot's inventory plus what the known
+chests hold (`stored` in the status, the same for every bot). Each minute, how much those totals grew
+since the previous look is added to the stock:
+
+- **Moving things adds nothing.** Cooking (raw to cooked: food either way), handing items to another bot and
+  storing them in a chest leave the total as it was.
+- **New bots wait a minute.** A bot not seen at the previous look counts from its next look, so joining
+  with a full inventory adds nothing.
+- **Never below zero.** Eating, building with blocks or smelting in the same minute as gathering offsets
+  the gathering, but a minute never takes anything off the stock.
 
 | Resource | Items |
 |---|---|
@@ -257,7 +265,10 @@ z 0  ┌───────┐   ┌──────────────
   7    S │ T                             S: sign "<bot>'s house" (2,7)    T: fence and torch (4,7)
   8   ⋄C │                               campfire (1,9) with log seats (1,8), (0,9), (1,10); fence and torch (2,8)
   9  ⋄F⋄ │                               path from the door south to the street
- 10   ⋄  │
+ 10   ⋄  │        ┌──────────┐
+     │  │        │ animal   │        animal pen (farmers): 6×6 at x 9..14, z 8..13, gate south
+     │  │        │ pen 6×6  │
+ 13   ⋄  │        └────┬─────┘
  14 ═════╪══════════════════════════      street: two lanes (z 14 and 15), west to the main street
  15 ═════╧══════════════════════════
 ```
@@ -373,7 +384,10 @@ The roles plugin's actions find a bot's lot through `empire { residence = bot }`
 ready):
 
 - **decorate home:** a bookshelf, a white carpet and a lantern inside.
-- **build animal pen:** a 6×6 fenced pen with a gate, at 9 east and 1 south of the lot's corner.
+- **build animal pen:** a 6×6 fenced pen on a cobblestone floor, south of the garden plot (lot x 9..14,
+  z 8..13), with its gate on the south side facing the lot street. The empire plugin gives the spot
+  (`pen` in the residence) only if the road does not cross it. On a steep lot whose road zigzags across that
+  part, there is no pen.
 - **gather cow, sheep, pig or chicken:** opens the pen gate, leads animals in with their food, closes it.
 - **breed:** the animals near the bot.
 
@@ -434,7 +448,7 @@ nothing.
 | `start = true` | play |
 | `stop = true` | stop (the groups stay, the brain works again) |
 | `village = true` | village mode on (starts playing if needed) |
-| `residence = "Bot3"` | that bot's house: `{ at, ready }` (ready once its road is under way or done) |
+| `residence = "Bot3"` | that bot's house: `{ at, ready, pen }`. Ready once its road is under way or done; `pen` is the free spot for an animal pen, if there is one |
 | `town = { x, y, z }` | move the town (migration) |
 
 ---
@@ -459,11 +473,11 @@ nothing.
 
 ## 16. Known limits and quirks
 
-- **The stock overcounts.** Resources are inventories rising, so cooking (raw to cooked) or one bot handing
-  items to another counts them again. Counting the chests instead would be exact.
-- **Nothing leaves the stock but spending.** Eating, building with blocks and storing them don't reduce it.
-- **The animal pen overlaps the garden.** The pen is at lot (9..14, 1..6) and the garden plot at
-  (8..14, 0..6), so a farmer's pen is built over its own garden.
+- **The stock can undercount a little.** Eating, building or smelting in the same minute as gathering
+  offsets it. Nothing leaves the stock but spending.
+- **Chests the bots don't know.** Items in a chest no bot has opened since are not in `stored`. Storing into
+  such a chest looks like the items vanished, which counts as nothing (never below zero).
+- **Pens built before this change** stand over their lot's garden plot (at lot x 9..14, z 1..6).
 - **The header comment is out of date.** It says shops and walls go up once every house stands; the code
   starts a trade's shop as soon as one of its homeowners is free, and the wall as soon as any homeowner is.
 - **Village mode can't be switched off** except by editing `empire_job.lua`; `stop` stops play but keeps

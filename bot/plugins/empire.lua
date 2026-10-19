@@ -53,8 +53,6 @@ local FOOD = { bread = 1, apple = 1, carrot = 1, potato = 1, beetroot = 1, wheat
     beef = 1, porkchop = 1, mutton = 1, chicken = 1, rabbit = 1, cod = 1, salmon = 1 }
 local STONE = { cobblestone = 1, cobbled_deepslate = 1, stone = 1, deepslate = 1, granite = 1, diorite = 1, andesite = 1 }
 local ORE = { coal = 1, raw_iron = 1, raw_copper = 1, raw_gold = 1, diamond = 1, redstone = 1, lapis_lazuli = 1, emerald = 1 }
--- ponytail: gathered = inventories rising, so cooking or a bot handing items to another counts them twice; a count
--- of the chests would be exact, add one if the ages come too fast
 local function kind(item)
     if FOOD[item] or item:match("^cooked_") then return "food" end
     if item:match("_log$") or item:match("_stem$") then return "wood" end
@@ -70,6 +68,7 @@ end
 local state = { enabled = false, age = 1, stock = { food = 0, wood = 0, stone = 0, ore = 0 }, techs = {}, groups = nil, log = {},
     built = {}, work = nil, town = nil, lots = 0 }
 local seen = {}             -- bot -> resource -> what it carried at the last look
+local seen_stored = nil     -- resource -> what the known chests held at the last look
 local looks = {}            -- bot -> its status at the last look (what the leader judges it by)
 local last_split, last_attack, loaded_at = 0, 0, os.time()
 
@@ -126,24 +125,43 @@ end
 
 local function pay(cost) for r, n in pairs(cost) do state.stock[r] = state.stock[r] - n end end
 
--- The bots' inventories now: what rose since the last look goes to the stock
+-- What the team holds of each resource, by item counts ("minecraft:" or not)
+local function totals(items)
+    local t = { food = 0, wood = 0, stone = 0, ore = 0 }
+    for item, c in pairs(type(items) == "table" and items or {}) do
+        local k = kind((tostring(item):gsub("^minecraft:", "")))
+        if k then t[k] = t[k] + (tonumber(c) or 0) end
+    end
+    return t
+end
+
+-- What the team gathered since the last look goes to the stock: how much all that it holds grew (every bot's
+-- inventory and what the known chests hold), so cooking, handing items to another bot or storing them moves things
+-- without adding any. A bot not seen at the last look counts from the next one. Eating or building in the same
+-- minute as gathering offsets it (never below nothing)
 local function gather(names)
     looks = {}
+    local gained, stored = { food = 0, wood = 0, stone = 0, ore = 0 }, nil
     for _, name in ipairs(names) do
         local st = call("status", { bot = name })
         if type(st) == "table" and type(st.inventory) == "table" then
             looks[name] = st
-            local now = { food = 0, wood = 0, stone = 0, ore = 0 }
-            for item, c in pairs(st.inventory) do
-                local k = kind(item)
-                if k then now[k] = now[k] + (tonumber(c) or 0) end
-            end
+            local now = totals(st.inventory)
             if seen[name] then
-                for _, r in ipairs(RESOURCES) do state.stock[r] = state.stock[r] + math.max(0, now[r] - seen[name][r]) end
+                for _, r in ipairs(RESOURCES) do gained[r] = gained[r] + now[r] - seen[name][r] end
             end
             seen[name] = now
+            -- The chests the bots know of are the same in every bot's status
+            if not stored and type(st.stored) == "table" then stored = totals(st.stored) end
         end
     end
+    if stored then
+        if seen_stored then
+            for _, r in ipairs(RESOURCES) do gained[r] = gained[r] + stored[r] - seen_stored[r] end
+        end
+        seen_stored = stored
+    end
+    for _, r in ipairs(RESOURCES) do state.stock[r] = state.stock[r] + math.max(0, gained[r]) end
 end
 
 -- How many bots in each trade: the age's mix, weighted toward what the next age lacks most, over the bots there are
@@ -795,6 +813,17 @@ local function shop(o, trade)
     return b, name
 end
 
+-- Where a farmer's animal pen goes on its lot: 6x6, south of the garden plot (lot x 9..14, z 8..13), clear of
+-- the road. On a steep lot the road's switchback crosses that part: then there is no room for one
+local function pen_spot(o)
+    for dx = 9, 14 do
+        for dz = 8, 13 do
+            if (state.roads or {})[(o.x + dx) .. "," .. (o.z + dz)] then return nil end
+        end
+    end
+    return { x = o.x + 9, y = o.y, z = o.z + 8 }
+end
+
 local WALLS = { "North Wall", "South Wall", "West Wall", "East Wall" }
 
 local function village_bounds()
@@ -1199,7 +1228,8 @@ bot.tool{
         end
         if args.residence then
             local h = state.village and state.village[args.residence]
-            return h and { at = h.at, ready = h.road or h.done or false } or {}
+            local ready = h and (h.road or h.done) or false
+            return h and { at = h.at, ready = ready, pen = ready and pen_spot(h.at) or nil } or {}
         end
         if args.village then
             state.village = state.village or {}
