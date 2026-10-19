@@ -53,6 +53,9 @@ remembers seeing, and its decision tree with the branch it is on.
 
 ## Neural policies
 
+The full description (architecture, inputs, rewards and penalties, learning, evolution, sharing) is in
+[docs/neural-network.md](docs/neural-network.md).
+
 Each bot has its own trade-selection network (116 inputs, five hidden layers of 10 units) and its own
 action policy for each trade (104 inputs and five hidden layers of 8 units), including whether a build is active, its remaining blocks,
 and how long it has been idle. Both use actor-critic learning and residual hidden layers; old saved
