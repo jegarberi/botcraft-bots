@@ -80,6 +80,7 @@ Action policies compete within the same trade, since different trades have diffe
 continues in village/empire mode, which controls trade assignments while enabled. Old shared action policies
 seed individual policies without discarding their learned weights.
 
+The empire and village modes are described in full in [docs/empire-village.md](docs/empire-village.md).
 Village construction reserves supply workers, prioritizes feeding hungry teammates, and allows shops to start
 as their own builders finish their homes. Roads share saved elevations and use stone stairs on slopes, with a
 longer approach when needed. Unloaded terrain waits for a survey; failed placements remain pending and retry.
