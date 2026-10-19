@@ -297,15 +297,21 @@ local function condition(st)
     for _, item in pairs(type(st.equipment) == "table" and st.equipment or {}) do if type(item) == "string" then gear(item) end end
     local quality = 0
     for _, tier in pairs(best) do quality = quality + tier end
+    -- The four essentials, equally important: food, a tool to mine or dig, a weapon, armor
+    local essentials = (foods > 0 and 1 or 0) + ((best.pickaxe or best.shovel) and 1 or 0) + ((best.sword or best.axe) and 1 or 0)
+        + ((best.helmet or best.chestplate or best.leggings or best.boots) and 1 or 0)
     return { variety = foods, quality = quality, health = st.health or 20, food = st.food or 20,
-        at = os.time(), deaths = st.deaths or 0 }
+        has_food = foods > 0 and 1 or 0, missing = 4 - essentials, at = os.time(), deaths = st.deaths or 0 }
 end
 local function living_reward(before, now)
     if not before then return 0 end
     local survived = now.deaths == before.deaths
     local duration = math.max(0, math.min(300, now.at - before.at)) / 300
+    -- Getting or running out of food weighs like a stone tool (3 per tier, stone is 2); every essential
+    -- lacking costs 0.5 per 5 minutes, as long as it lacks
     return (survived and duration * math.min(now.health, now.food) / 20 or 0)
         + 2 * (now.variety - before.variety) + 3 * (now.quality - before.quality)
+        + 6 * (now.has_food - (before.has_food or now.has_food)) - 0.5 * duration * now.missing
         + (now.health - before.health) / 4 + (now.food - before.food) / 4
 end
 NN.condition, NN.living_reward, NN.edible = condition, living_reward, EDIBLE

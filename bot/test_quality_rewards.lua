@@ -60,4 +60,16 @@ assert(pending.action == "continue construction", "construction keeps its pendin
 st.building = false
 local done = tools.roles.run({ act = "Builder", role = "builders", members = { "Builder" } })
 assert(done.last_reward == -10, "completion penalty trains the action that started construction")
+-- Food weighs like a stone tool, and every missing essential costs as long as it lacks
+local empty = NN.condition({ health = 20, food = 20, inventory = {} })
+local fed = NN.condition({ health = 20, food = 20, inventory = { bread = 4 } })
+local tooled = NN.condition({ health = 20, food = 20, inventory = { stone_pickaxe = 1 } })
+assert(empty.missing == 4 and fed.missing == 3 and tooled.missing == 3, "four essentials")
+assert(NN.living_reward(empty, fed) - 2 == NN.living_reward(empty, tooled), "food gained = a stone tool gained (+2 for variety)")
+local later = NN.condition({ health = 20, food = 20, inventory = {} })
+later.at = empty.at + 300
+assert(math.abs(NN.living_reward(empty, later) - (1 - 2)) < 1e-9, "5 minutes with nothing: -0.5 per missing essential")
+local old = NN.condition({ health = 20, food = 20, inventory = { bread = 1 } })
+old.has_food = nil
+assert(NN.living_reward(old, fed) == 2 * (fed.variety - old.variety), "a snapshot from before the change gives no free bonus")
 print("construction rewards OK: both policies, no repeated charge, counter resets, delayed construction credit, idle time")
