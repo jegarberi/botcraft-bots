@@ -511,7 +511,7 @@ int main()
                     wattroff(stdscr, attributes);
                 }
             };
-        const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  "
+        const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  T 🗑️ drop items  w 🚶 follow player  W ⏹️ stop following  "
             "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
         int menu_rows = 0;
         for (size_t at = 0; at < menu.size();)
@@ -605,7 +605,8 @@ int main()
                 { 'l', "Find and go" }, { 'd', "Store all and disconnect" }, { ':', "Custom tool" },
                 { 'B', "Build castle (whole team)" }, { 'r', "Build roads to mines (whole team)" },
                 { 'F', "Create crop farm (near water)" }, { 'M', "Mine ores / open mine as needed" },
-                { 'H', "Build shelter" }, { 'V', "Plant castle farms" }, { 'P', "Stock castle animal pens" }
+                { 'H', "Build shelter" }, { 'V', "Plant castle farms" }, { 'P', "Stock castle animal pens" },
+                { 'T', "Drop items (keep armor and tools), wait 10 s" }, { 'w', "Follow a player" }, { 'W', "Stop following, back to work" }
             };
             std::vector<std::string> labels;
             for (const auto& action : actions) labels.push_back(action.second);
@@ -836,6 +837,26 @@ int main()
                 args["go"] = true;
                 run(bot, "locate", args);
             }
+        }
+        else if (key == 'T')
+        {
+            run(bot, "drop", args);
+        }
+        else if (key == 'w')
+        {
+            const std::string player = ask("follow player named: ");
+            if (!player.empty())
+            {
+                args["objective"] = "follow"; args["leader"] = player; args["count"] = 1; args["solo"] = true;
+                args["members"] = ProtocolCraft::Json::Array();
+                run(bot, "team_member", args);
+            }
+        }
+        else if (key == 'W')
+        {
+            args["objective"] = "disband"; args["leader"] = ""; args["count"] = 1; args["solo"] = false;
+            args["members"] = ProtocolCraft::Json::Array();
+            run(bot, "team_member", args);
         }
         else if (key == 'd')
         {

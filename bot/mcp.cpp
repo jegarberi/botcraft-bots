@@ -6460,6 +6460,41 @@ static Status GiveTask(McpBot& c, const std::string& to, const Position& to_at, 
     return given > 0 ? Status::Success : Status::Failure;
 }
 
+/// @brief Throw everything but armor and tools (toward the player `to` if in sight), then stand still for 10 s
+static Status DropTask(McpBot& c, const std::string& to, std::atomic<int>& dropped)
+{
+    static const std::set<std::string> keep = { "minecraft:shears", "minecraft:fishing_rod", "minecraft:flint_and_steel", "minecraft:bow",
+        "minecraft:crossbow", "minecraft:trident", "minecraft:mace", "minecraft:elytra" };
+    c.SetState("dropping items");
+    const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
+    Vector3<double> aim = me + Vector3<double>(0.0, 3.0, 2.0);
+    auto entities = c.GetEntityManager()->GetEntities();
+    for (const auto& [id, e] : *entities)
+    {
+        if (e && e->IsRemotePlayer() && c.GetPlayerName(e->GetUUID()) == to)
+        {
+            aim = e->GetPosition() + Vector3<double>(0.0, 1.0, 0.0);
+        }
+    }
+    // Upward and away, or it picks its own items back up
+    LookAt(c, aim);
+    for (const auto& [index, slot] : PlayerSlots(c))
+    {
+        if (index < Window::INVENTORY_STORAGE_START || index > Window::INVENTORY_OFFHAND_INDEX || slot.IsEmptySlot())
+        {
+            continue;
+        }
+        const std::string item = AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName();
+        if (!IsGear(item) && keep.count(item) == 0 && DropItemsFromContainer(c, Window::PLAYER_INVENTORY_INDEX, index, 0) == Status::Success)
+        {
+            ++dropped;
+        }
+    }
+    c.SetNote("dropped " + std::to_string(dropped.load()) + " stacks, standing still for 10 s");
+    Wait(c, 10000);
+    return Status::Success;
+}
+
 /// @brief Answer a call to fight: go where the mobs were seen and take them on, the others doing the same
 static Status AssistStep(McpBot& c)
 {
@@ -7427,6 +7462,7 @@ static const char* tools_json = R"JSON([
 {"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds, crops, berry bushes and animals (mob:cow), with what the other bots reported (ores, logs, crops, berry bushes, animals). kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
 {"name":"schematic","description":"Materials and building plan of a structure from createmod.com. url: the link of a schematic page (https://createmod.com/schematics/<name>): returns its title, size, required mods and material list, and which materials this game does not have (blocks of other mods). The site gives the block-by-block file to players only, so the user downloads the .nbt from that page into bot/schematics/; then file=<name>.nbt returns the materials and the number of parts, and with x y z (the corner with the lowest coordinates) the team builds part `part` (default 1, 4000 blocks each, bottom up) there, gathering and crafting what it needs; blocks of other mods are left out.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"file":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"part":{"type":"number"}}}},
 {"name":"give","description":"The bot walks up to another player (a bot) and drops items at its feet, which it picks up. to: the player's name; item: an item id, food (anything edible) or wood (logs and planks), default food; count (default 16); x y z: where the player is, if out of sight.","inputSchema":{"type":"object","properties":{"to":{"type":"string"},"item":{"type":"string"},"count":{"type":"number"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["to"]}},
+{"name":"drop","description":"Throw every item on the ground except armor and tools (weapons, shears, rods...), toward the player `to` if in sight, then stand still for 10 seconds before going back to its work. Returns how many stacks were dropped.","inputSchema":{"type":"object","properties":{"to":{"type":"string"}}}},
 {"name":"reconnect_all","description":"Every bot stores everything and disconnects, then the same bots join again 10 seconds apart, each from the binary on disk (a new build without stopping the program). Returns at once; it runs in the background.","inputSchema":{"type":"object","properties":{}}},
 {"name":"disconnect_all","description":"Every bot stores everything in the chests and disconnects, all at once. The program keeps running: connect brings bots back. None rejoins by itself.","inputSchema":{"type":"object","properties":{}}},
 {"name":"leader","description":"The leader the bots elected (every 10 Minecraft days, see the brain tool): it leads the team (the team tool's leader when none is given). With name, sets it.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
@@ -10188,6 +10224,15 @@ static Value CallTool(const std::string& name, const Value& a)
         o["given"] = given->load();
         o["to"] = to;
         o["item"] = item;
+        return o;
+    }
+    if (name == "drop")
+    {
+        const auto dropped = std::make_shared<std::atomic<int>>(0);
+        const std::string to = a.is_object() && a.contains("to") && a["to"].is_string() ? a["to"].get_string() : "";
+        Run(bot, 30, name, [=](McpBot& c) { return DropTask(c, to, *dropped); });
+        Value o;
+        o["dropped"] = dropped->load();
         return o;
     }
     if (name == "recall")

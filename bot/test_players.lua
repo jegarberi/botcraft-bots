@@ -26,4 +26,7 @@ visible = false
 handler("<jon> Bot1 come")
 assert(find("chat", function(a) return a.message == "/tpa jon" end), "out of sight: asks to teleport to the player")
 assert(not find("goto"))
+calls = {}
+handler("<jon> Bot1 drop")
+assert(find("drop", function(a) return a.bot == "Bot1" and a.to == "jon" end), "drop: throws toward the player")
 print("players plugin OK")

@@ -45,6 +45,8 @@
     <select id="action-name">
       <option value="gather">Gather</option><option value="mine">Mine ores / open mine as needed</option><option value="make">Make</option>
       <option value="store">Store in chests</option><option value="farm">Farm</option>
+      <option value="drop">Drop items (keep armor and tools), wait 10 s</option>
+      <option value="follow">Follow a player</option><option value="unfollow">Stop following, back to work</option>
       <option value="autopilot-on">Enable autopilot</option><option value="autopilot-off">Disable autopilot</option>
       <option value="locate">Find and go</option><option value="disconnect">Store all and disconnect</option>
       <option value="castle-start">Build castle (whole team)</option>
@@ -61,7 +63,7 @@
       <option>iron_ore,coal_ore</option><option>oak_log</option><option>spruce_log</option><option>birch_log</option>
       <option>cobblestone</option><option>stone</option><option>sand</option><option>gravel</option><option>dirt</option>
     </select>
-    <input type="text" id="action-resource" placeholder="block(s), item or structure id" aria-label="Action resource" list="goals">
+    <input type="text" id="action-resource" placeholder="block(s), item, structure id or player name" aria-label="Action resource" list="goals">
     <input type="number" id="action-count" min="1" max="64" value="16" aria-label="Action count">
     <input type="text" id="action-position" placeholder="castle centre / shelter corner x y z" aria-label="Build coordinates">
     <button>Send action</button>
@@ -160,6 +162,11 @@ document.getElementById("bot-action").onsubmit = async e => {
         Object.assign(args, { objective: "build", plan: "shelter", item: "cobblestone", x1: at[0], y1: at[1], z1: at[2] });
       } else Object.assign(args, { x: at[0], y: at[1], z: at[2] });
     }
+  } else if (action === "follow") {
+    if (!resource) { message.textContent = "Enter the name of the player to follow."; return; }
+    tool = "team_member"; Object.assign(args, { objective: "follow", members: [], leader: resource, count: 1, solo: true });
+  } else if (action === "unfollow") {
+    tool = "team_member"; Object.assign(args, { objective: "disband", members: [], leader: "", count: 1, solo: false });
   } else if (action === "make_farm") { args.radius = 4;
   } else if (action.startsWith("autopilot-")) {
     tool = "autopilot"; args.enabled = action === "autopilot-on";
@@ -217,6 +224,7 @@ function card(bot, tree) {
       $("button", { onclick: () => gather.value && call("make", { bot: bot.name, item: gather.value, count: +count.value }) }, "Make"),
       $("button", { onclick: () => call("store", { bot: bot.name }) }, "Store in chests"),
       $("button", { onclick: () => call("farm", { bot: bot.name }) }, "Farm"),
+      $("button", { onclick: () => call("drop", { bot: bot.name }) }, "Drop items"),
       $("button", { onclick: () => call("disconnect", { bot: bot.name }) }, "Store all & disconnect"),
       $("button", { onclick: () => showNetwork(bot.name) }, "Neural network")),
     $("div", { className: "row" }, $("b", {}, "Find and go to the nearest"), placeKind, place,

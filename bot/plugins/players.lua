@@ -6,6 +6,7 @@
 --   farm             harvest and replant the crops around it
 --   mine [ore]       go mining (default iron), in a wide lit mine with stairs
 --   gather <block> [n], make <item> [n]
+--   drop             throw everything but armor and tools toward the player, then stand still 10 s
 --   store            put what it collected and its valuables in the chests (valuables go to the vault)
 --   status           health, food, where it is and what it is doing
 --   help             this list
@@ -43,7 +44,7 @@ end
 local commands = {}
 
 commands.help = function(name, player)
-    say(name, "orders: <bot or all> follow | stay | come | attack [mob] | farm | mine [ore] | gather <block> [n] | make <item> [n] | store | status")
+    say(name, "orders: <bot or all> follow | stay | come | attack [mob] | farm | mine [ore] | gather <block> [n] | make <item> [n] | drop | store | status")
 end
 
 commands.follow = function(name, player)
@@ -93,6 +94,11 @@ commands.make = function(name, player, words)
     if not words[1] then say(name, "make what? e.g. '" .. name .. " make bread 4'") return end
     local r, err = call("make", { bot = name, item = words[1], count = tonumber(words[2]) or 1 })
     say(name, r and ("making " .. words[1]) or ("can't: " .. tostring(err)))
+end
+
+commands.drop = function(name, player)
+    local r, err = call("drop", { bot = name, to = player })
+    say(name, r and ("dropped " .. (r.dropped or 0) .. " stacks, waiting 10 s") or ("can't drop: " .. tostring(err)))
 end
 
 commands.store = function(name, player)

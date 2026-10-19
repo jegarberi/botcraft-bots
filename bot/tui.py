@@ -4,6 +4,7 @@
     python3 tui.py [http://127.0.0.1:8090]
 
 Up/Down pick a bot. A toggles actions for all bots. a autopilot on/off, e gear-up on/off, G gather, m make, s store in chests, f farm,
+T drop items (keep armor and tools) and wait 10 s, w follow a player, W stop following,
 l find a structure and go, d store all and disconnect, D every bot stores all and disconnects, c connect a bot, t team order, x disband the team,
 : any tool call (name {json args}, the picked bot is added), q quit (the bots keep running)."""
 import curses, json, sys, textwrap, threading, time, urllib.request
@@ -98,7 +99,8 @@ def choose_action(screen, target):
                ("l", "Find and go"), ("d", "Store all and disconnect"), (":", "Custom tool"),
                ("B", "Build castle (whole team)"), ("r", "Build roads to mines (whole team)"),
                ("F", "Create crop farm (near water)"), ("M", "Mine ores / open mine as needed"),
-               ("H", "Build shelter"), ("V", "Plant castle farms"), ("P", "Stock castle animal pens")]
+               ("H", "Build shelter"), ("V", "Plant castle farms"), ("P", "Stock castle animal pens"),
+               ("T", "Drop items (keep armor and tools), wait 10 s"), ("w", "Follow a player"), ("W", "Stop following, back to work")]
     selected = choose_list(screen, "Action for " + target, [label for _, label in actions])
     return -1 if selected < 0 else ord(actions[selected][0])
 
@@ -121,7 +123,7 @@ def main(screen):
         h, w = screen.getmaxyx()
         screen.erase()
         line = lambda y, text, attr=0: y < h - 1 and screen.addnstr(y, 0, text, w - 1, attr)
-        menu = "botcraft  %s  %d bots   Enter action list  ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  l find  d disconnect  D all  A target all  c connect  t team  x disband  : tool  q quit" % (URL, len(bots))
+        menu = "botcraft  %s  %d bots   Enter action list  ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  T drop  w follow  W unfollow  l find  d disconnect  D all  A target all  c connect  t team  x disband  : tool  q quit" % (URL, len(bots))
         menu = ("[ALL BOTS]  " if all_bots else "[picked bot]  ") + menu
         menu_lines = textwrap.wrap(menu, max(1, w - 1))
         for y, part in enumerate(menu_lines):
@@ -230,6 +232,14 @@ def main(screen):
                 what = ask(screen, "find and go to (structure, e.g. village_plains, mineshaft): ")
                 if what:
                     run("locate", {"bot": name, "kind": "structure", "name": what, "go": True})
+            elif key == ord("T"):
+                run("drop", {"bot": name})
+            elif key == ord("w"):
+                player = ask(screen, "follow player named: ")
+                if player:
+                    run("team_member", {"bot": name, "objective": "follow", "members": [], "leader": player, "count": 1, "solo": True})
+            elif key == ord("W"):
+                run("team_member", {"bot": name, "objective": "disband", "members": [], "leader": "", "count": 1, "solo": False})
             elif key == ord("d"):
                 if ask(screen, "store everything and disconnect %s? (y/n) " % name).lower().startswith("y"):
                     run("disconnect", {"bot": name})
