@@ -7920,6 +7920,40 @@ static void SpawnChild(const std::string& login)
 static void ServeSocket(const std::string& path, const std::string& bot);
 static Value CallTool(const std::string& name, const Value& a);
 
+// The bots to start next time when no --bots or --login is given: bot/bots.txt, one name a line. Bots added
+// (spawn, connect) go in, a bot disconnected on its own goes out; leaving all at once (quitting, disconnect_all,
+// reconnect_all) keeps the list
+static std::mutex roster_mutex;
+static const char* const ROSTER_FILE = "../bots.txt";
+
+static std::vector<std::string> LoadRoster()
+{
+    std::vector<std::string> names;
+    std::ifstream file(ROSTER_FILE);
+    for (std::string line; std::getline(file, line);)
+    {
+        if (!line.empty()) { names.push_back(line); }
+    }
+    return names;
+}
+
+static void SaveRoster(const std::vector<std::string>& names)
+{
+    std::ofstream file(ROSTER_FILE, std::ios::trunc);
+    for (const std::string& n : names) { file << n << '\n'; }
+}
+
+static void RosterChange(const std::string& name, const bool add)
+{
+    if (is_child || name.empty()) { return; }
+    std::lock_guard<std::mutex> lock(roster_mutex);
+    std::vector<std::string> names = LoadRoster();
+    const auto it = std::find(names.begin(), names.end(), name);
+    if (add == (it != names.end())) { return; }
+    if (add) { names.push_back(name); } else { names.erase(it); }
+    SaveRoster(names);
+}
+
 static void SpawnBot(const std::string& login)
 {
     static std::mutex spawn_mutex;
@@ -8383,6 +8417,7 @@ static Value CallTool(const std::string& name, const Value& a)
     // A bot waiting to rejoin: disconnect means don't
     if (name == "disconnect" && a.is_object() && a.contains("bot") && a["bot"].is_string())
     {
+        if (!a.contains("everyone")) { RosterChange(a["bot"].get_string(), false); }
         std::lock_guard<std::mutex> lock(bots_mutex);
         if (rejoining.erase(a["bot"].get_string()) != 0)
         {
@@ -8418,6 +8453,7 @@ static Value CallTool(const std::string& name, const Value& a)
                         {
                             Value args;
                             args["bot"] = who;
+                            args["everyone"] = true;
                             try
                             {
                                 CallTool("disconnect", args);
@@ -8481,6 +8517,7 @@ static Value CallTool(const std::string& name, const Value& a)
                 {
                     Value args;
                     args["bot"] = names[i];
+                    args["everyone"] = true;
                     try
                     {
                         results[i] = CallTool("disconnect", args);
@@ -9215,6 +9252,7 @@ static Value CallTool(const std::string& name, const Value& a)
             queued.restore["bot"] = names[i];
             queued.restore["enabled"] = start_autopilot;
             rejoining[names[i]] = queued;
+            RosterChange(names[i], true);
             result.push_back(names[i]);
         }
         return result;
@@ -9237,6 +9275,7 @@ static Value CallTool(const std::string& name, const Value& a)
             reserved.at = std::chrono::steady_clock::time_point::max();
             rejoining[wanted] = reserved;
         }
+        RosterChange(Str(a, "name"), true);
         try { SpawnBot(Str(a, "name")); }
         catch (...)
         {
@@ -11170,6 +11209,7 @@ int main(int argc, char* argv[])
         std::string login = "Bot";
         std::string plugins = "../plugins";
         int count = 1;
+        bool chosen = false;        // --bots or --login: those, not the saved list
         int delay = 5;
         int web_port = 0;
         std::string web_bind = "127.0.0.1";
@@ -11185,8 +11225,8 @@ int main(int argc, char* argv[])
                     return argv[++i];
                 };
             if (arg == "--address") { server_address = value(); }
-            else if (arg == "--login") { login = value(); }
-            else if (arg == "--bots") { count = std::clamp(std::stoi(value()), 1, 100); }
+            else if (arg == "--login") { login = value(); chosen = true; }
+            else if (arg == "--bots") { count = std::clamp(std::stoi(value()), 1, 100); chosen = true; }
             else if (arg == "--delay") { delay = std::max(std::stoi(value()), 0); }
             else if (arg == "--autopilot") { start_autopilot = true; }
             else if (arg == "--chests") { auto_store = true; }
@@ -11265,19 +11305,26 @@ int main(int argc, char* argv[])
             Renderer::Settings::SetResolution(854, 480);
         }
         spawn_delay_seconds = delay;
+        // The bots of last time (bot/bots.txt), unless the command line says which
+        std::vector<std::string> names;
+        if (!is_child && !chosen) { names = LoadRoster(); }
+        if (names.empty())
+        {
+            for (int i = 1; i <= count; ++i) { names.push_back(count > 1 && !login.empty() ? login + std::to_string(i) : login); }
+            if (!is_child) { SaveRoster(names); }
+        }
         {
             std::lock_guard<std::mutex> lock(bots_mutex);
-            for (int i = 2; i <= count; ++i)
+            for (size_t i = 1; i < names.size(); ++i)
             {
-                const std::string name = login.empty() ? login : login + std::to_string(i);
                 Rejoin queued;
-                queued.at = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(delay, 5) * (i - 1));
-                queued.restore["bot"] = name;
+                queued.at = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(delay, 5) * static_cast<int>(i));
+                queued.restore["bot"] = names[i];
                 queued.restore["enabled"] = start_autopilot;
-                rejoining[name] = queued;
+                rejoining[names[i]] = queued;
             }
         }
-        SpawnBot(count > 1 && !login.empty() ? login + "1" : login);
+        SpawnBot(names[0]);
 
         std::thread snapshots([&]()
             {

@@ -16,6 +16,7 @@
 /castle_site.txt
 /bot/sites.txt
 /bot/chests.txt
+/bot/bots.txt
 # Logs, views, caches
 *.log
 /bot/snapshot*.png
