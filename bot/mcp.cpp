@@ -549,8 +549,42 @@ protected:
     {
         PushChat("<" + GetPlayerName(packet.GetSender()) + "> " + packet.GetBody().GetContent());
     }
+    virtual void Handle(ProtocolCraft::ClientboundRegistryDataPacket& packet) override
+    {
+        if (packet.GetRegistry().GetFull() == "minecraft:damage_type")
+        {
+            damage_types.clear();
+            for (const auto& entry : packet.GetEntries())
+            {
+                damage_types.push_back(entry.GetId().GetFull());
+            }
+            LOG_INFO("Damage types known: " << damage_types.size());
+        }
+        ManagersClient::Handle(packet);
+    }
+
     virtual void Handle(ProtocolCraft::ClientboundSetHealthPacket& packet) override
     {
+        // Health lost, by cause (the reward counts it): all of it as damage_taken, and drowning, falls and
+        // fire or lava apart, with the deaths they caused
+        if (GetLocalPlayer() && !dead)
+        {
+            const int lost = static_cast<int>(std::ceil(GetLocalPlayer()->GetHealth() - std::max(0.0f, packet.GetHealth())));
+            const bool recent = std::chrono::steady_clock::now() - last_hurt_when < std::chrono::seconds(2);
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            if (lost > 0)
+            {
+                stats["damage_taken"] += lost;
+                if (recent && !last_hurt.empty())
+                {
+                    stats[last_hurt + "_damage"] += lost;
+                }
+            }
+            if (packet.GetHealth() <= 0.0f && recent && !last_hurt.empty())
+            {
+                stats[last_hurt + "_deaths"] += 1;
+            }
+        }
         // Health at zero: the bot just died. Where, and what it was carrying, is noted before the client
         // respawns it somewhere else: its things lie there for five minutes
         if (packet.GetHealth() <= 0.0f && !dead && GetLocalPlayer() && GetInventoryManager() && GetInventoryManager()->GetPlayerInventory())
@@ -584,6 +618,16 @@ protected:
     {
         // Hit by a player who is not one of the bots: every bot is called on them (the cause is the entity id + 1)
         const std::shared_ptr<LocalPlayer> me = GetLocalPlayer();
+        if (me && packet.GetEntityId() == me->GetEntityID())
+        {
+            const int type = packet.GetSourceTypeId();
+            const std::string name = type >= 0 && type < static_cast<int>(damage_types.size()) ? damage_types[type] : "";
+            last_hurt = name == "minecraft:drown" ? "drown"
+                : name == "minecraft:fall" || name == "minecraft:stalagmite" ? "fall"
+                : name == "minecraft:lava" || name == "minecraft:in_fire" || name == "minecraft:on_fire" || name == "minecraft:hot_floor" ||
+                    name == "minecraft:campfire" ? "burn" : "";
+            last_hurt_when = std::chrono::steady_clock::now();
+        }
         if (me && packet.GetEntityId() == me->GetEntityID() && packet.GetSourceCauseId() > 0)
         {
             const std::shared_ptr<Entity> attacker = GetEntityManager()->GetEntity(packet.GetSourceCauseId() - 1);
@@ -698,6 +742,10 @@ private:
     std::chrono::steady_clock::time_point died_when;
     int died_carrying = 0;
     int deaths = 0;
+    // Damage types by registry index, as the server lists them, and what last hurt the bot: drown, fall, burn
+    std::vector<std::string> damage_types;
+    std::string last_hurt;
+    std::chrono::steady_clock::time_point last_hurt_when;
 
     std::mutex state_mutex;
     std::string state = "starting";

@@ -312,9 +312,16 @@ local function living_reward(before, now)
     return (survived and duration * math.min(now.health, now.food) / 20 or 0)
         + 2 * (now.variety - before.variety) + 3 * (now.quality - before.quality)
         + 6 * (now.has_food - (before.has_food or now.has_food)) - 0.5 * duration * now.missing
+        -- Low health and hunger cost as long as they last: each up to 2 per 5 minutes near empty
+        - 2 * duration * (1 - math.max(0, math.min(20, now.health)) / 20)
+        - 2 * duration * (1 - math.max(0, math.min(20, now.food)) / 20)
         + (now.health - before.health) / 4 + (now.food - before.food) / 4
 end
-NN.condition, NN.living_reward, NN.edible = condition, living_reward, EDIBLE
+-- Health lost, per point (the bot's counters): any damage, and more for drowning, falls and fire or lava;
+-- dying of one of these costs 40 more than the 40 any death costs
+local HAZARDS = { damage_taken = -0.5, drown_damage = -1, fall_damage = -1, burn_damage = -1,
+    drown_deaths = -40, fall_deaths = -40, burn_deaths = -40 }
+NN.condition, NN.living_reward, NN.edible, NN.hazards = condition, living_reward, EDIBLE, HAZARDS
 
 -- ---------------------------------------------------------------- what the bots see
 local function inventory_count(st, test)
@@ -476,6 +483,7 @@ end
 -- handing over food and items, coming when called to a fight and killing there, picking up a fallen
 -- teammate's things). Each its own part of the reward
 local WEIGHTS = { idle_seconds = -0.1, construction_penalty = -1, collected = 1, harvested = 1, killed = 3, bred = 5, stored = 0.05 }
+for what, w in pairs(HAZARDS) do WEIGHTS[what] = w end
 local COOP_WEIGHTS = { built = 1, given = 1, answered = 3, assisted = 5, salvaged = 2 }
 
 local function counted(now, before, weights)

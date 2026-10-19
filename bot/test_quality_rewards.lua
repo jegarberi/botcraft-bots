@@ -72,4 +72,30 @@ assert(math.abs(NN.living_reward(empty, later) - (1 - 2)) < 1e-9, "5 minutes wit
 local old = NN.condition({ health = 20, food = 20, inventory = { bread = 1 } })
 old.has_food = nil
 assert(NN.living_reward(old, fed) == 2 * (fed.variety - old.variety), "a snapshot from before the change gives no free bonus")
+-- Low health costs over time; damage, and drowning, falls, fire and lava cost more, in both policies
+local hurt = NN.condition({ health = 10, food = 20, inventory = { bread = 1, stone_pickaxe = 1, stone_sword = 1, leather_boots = 1 } })
+local whole = NN.condition({ health = 20, food = 20, inventory = { bread = 1, stone_pickaxe = 1, stone_sword = 1, leather_boots = 1 } })
+local hurt_later, whole_later = {}, {}
+for k, v in pairs(hurt) do hurt_later[k] = v end
+for k, v in pairs(whole) do whole_later[k] = v end
+hurt_later.at, whole_later.at = hurt.at + 300, whole.at + 300
+assert(NN.living_reward(whole, whole_later) - NN.living_reward(hurt, hurt_later) > 1, "5 minutes at half health cost more than the lost survival bonus")
+local hungry = NN.condition({ health = 20, food = 10, inventory = { bread = 1, stone_pickaxe = 1, stone_sword = 1, leather_boots = 1 } })
+local hungry_later = {}
+for k, v in pairs(hungry) do hungry_later[k] = v end
+hungry_later.at = hungry.at + 300
+assert(NN.living_reward(whole, whole_later) - NN.living_reward(hungry, hungry_later) > 1, "5 minutes half hungry cost more than the lost survival bonus")
+st.stats = {}
+local calm = snapshot(st, "miners")
+st.stats = { damage_taken = 6, drown_damage = 6 }
+local drowned = snapshot(st, "miners")
+st.stats = { damage_taken = 6 }
+local scratched = snapshot(st, "miners")
+assert(reward("miners", calm, scratched) == reward("miners", calm, calm) - 3, "action policy: 0.5 per point of damage")
+assert(reward("miners", calm, drowned) == reward("miners", calm, scratched) - 6, "drowning damage costs 1 more per point")
+st.stats = { burn_deaths = 1 }
+assert(own_score(st, { stats = {}, living = NN.condition(st), deaths = 0, times_stuck = 0 }) <=
+    own_score({ health = 20, food = 18, inventory = {}, stats = {}, deaths = 0, times_stuck = 0 }, { stats = {}, living = NN.condition(st), deaths = 0, times_stuck = 0 }) - 40,
+    "trade brain: burning to death costs 40 on top of the death")
+st.stats = {}
 print("construction rewards OK: both policies, no repeated charge, counter resets, delayed construction credit, idle time")
