@@ -101,7 +101,7 @@ bot.every(15, function()
     turn = turn % #workers + 1
     local name, trade = workers[turn][1], workers[turn][2]
     local ok, r = pcall(bot.call, "roles", { act = name, role = trade, members = groups[trade], groups = groups })
-    notes[name] = ok and type(r) == "table" and (r.action .. ": " .. tostring(r.note)) or ("turn failed: " .. tostring(r))
+    notes[name] = ok and type(r) == "table" and (tostring(r.action or "skipped") .. ": " .. tostring(r.note)) or ("turn failed: " .. tostring(r))
     busy = false
 end)
 
