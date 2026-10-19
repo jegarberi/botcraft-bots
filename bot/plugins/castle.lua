@@ -1056,6 +1056,7 @@ end
 
 -- Every 20 seconds: when no bot has anything left of the stage, start the next one
 bot.every(20, function()
+    if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     local ok, err = pcall(road_tick)
     if not ok then io.stderr:write("[roads] ", tostring(err), "\n") end
     pcall(grow_vault)
@@ -1330,6 +1331,7 @@ bot.tool(castle_tool)
 -- After a restart: the castle job again, at the stage it had reached, once the bots are back (2 minutes,
 -- for them to join and for the one planning it to see the ground)
 bot.every(20, function()
+    if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if not castle_saved or job or os.time() - loaded_at < 120 then return end
     local saved = castle_saved
     -- The ground is looked at through the eyes of the bot nearest the centre: wait (10 minutes at most) for one

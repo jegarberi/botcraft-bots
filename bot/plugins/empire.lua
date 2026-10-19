@@ -1176,6 +1176,7 @@ end
 -- ./run.sh --empire (BOTCRAFT_EMPIRE=1): plays from the start, once the bots are in; --village (=village) in village mode
 local auto = os.getenv("BOTCRAFT_EMPIRE")
 bot.every(60, function()
+    if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if (auto == "1" or auto == "village") and not state.enabled and os.time() - loaded_at >= 150 then start() end
     if auto == "village" and state.enabled and not state.village then state.village, last_split = {}, 0 end
     if not state.enabled or os.time() - loaded_at < 150 then return end
@@ -1185,8 +1186,17 @@ end)
 bot.tool{
     name = "empire",
     description = "An Age of Empires II style computer player for the team, off unless started. It counts the food, wood, stone and ore the bots gather, pays for ages (Dark, Feudal, Castle, Imperial: each announced in the chat) and techs (better tools and armor, made by the blacksmiths and soldiers), has the leader decide each bot's trade by the age's split, what the next age lacks and the tools and things each bot carries (the groups tool carries it out; the brain rests meanwhile), has a builder put up Age of Empires buildings in a town east of the castle (houses, lumber camp, mill, mining camp, barracks, blacksmith, market, monastery, university, a wonder; each age needs two of the age before), village=true has every bot build a house of its own in the town first (bed, double chest, furnace, table and chairs, a sign with its name; it sleeps there every night), then a road joining it to the others, and then take a trade; once every house stands, each trade's shop goes up (bakery, farm store, butcher's, mining office, smithy) and the village border wall and gates (north, south, west, east) are built (starting play if off), and from the Castle Age sends the soldiers out together after hostile mobs every 10 minutes. With no argument: age, resources, next age's cost, the split, the last events. start=true plays (kept after a restart), stop=true stops (the groups stay, the brain works again).",
-    params = { start = "boolean", stop = "boolean", village = "boolean", residence = "string" },
+    params = { start = "boolean", stop = "boolean", village = "boolean", residence = "string", town = "object" },
     run = function(args)
+        -- The bots moved away (migrate plugin): a new town there, everything built in the old one left behind
+        if type(args.town) == "table" and tonumber(args.town.x) and tonumber(args.town.z) then
+            state.town = { x = math.floor(args.town.x), y = math.floor(tonumber(args.town.y) or 64), z = math.floor(args.town.z) }
+            state.cells, state.lots, state.built, state.work, state.shops, state.walls, state.roads = {}, 0, {}, nil, nil, nil, nil
+            if state.village then state.village = {} end
+            last_split = 0
+            note("the town moves to " .. state.town.x .. " " .. state.town.z)
+            save()
+        end
         if args.residence then
             local h = state.village and state.village[args.residence]
             return h and { at = h.at, ready = h.road or h.done or false } or {}

@@ -90,6 +90,7 @@ end
 -- everyone in a row held it for minutes, the castle's stages, the brain's days and netlink waiting meanwhile)
 local turn = 0
 bot.every(15, function()
+    if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if not groups or busy then return end
     local workers = {}
     for _, t in ipairs(TRADES) do

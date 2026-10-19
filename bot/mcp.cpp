@@ -7493,7 +7493,7 @@ static const char* tools_json = R"JSON([
 {"name":"inventory","description":"List the bot's inventory slots (item name and count).","inputSchema":{"type":"object","properties":{}}},
 {"name":"entities","description":"List nearby entities, nearest first. type: empty for all, an entity name like zombie or cow, or a group: hostile, animal, player.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"radius":{"type":"number","default":32}}}},
 {"name":"get_block","description":"Name and state of the block at a position. Optional y_min scans down to the first solid block, returning its y.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"y_min":{"type":"number"}},"required":["x","y","z"]}},
-{"name":"find_blocks","description":"Find the nearest loaded blocks with an exact block id (e.g. oak_log, diamond_ore, crafting_table). Radius is capped at 32.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"radius":{"type":"number","default":32},"max":{"type":"number","default":10}},"required":["block"]}},
+{"name":"find_blocks","description":"Find the nearest loaded blocks with an exact block id (e.g. oak_log, diamond_ore, crafting_table), or every id ending in a suffix that starts with an underscore (e.g. _log for all logs). Radius is capped at 32.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"radius":{"type":"number","default":32},"max":{"type":"number","default":10}},"required":["block"]}},
 {"name":"goto","description":"Pathfind and walk to a block position. tolerance = how many blocks away is close enough.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"tolerance":{"type":"number","default":0}},"required":["x","y","z"]}},
 {"name":"look_at","description":"Turn the bot's head toward a position.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
 {"name":"dig","description":"Break the block at a position (walks there if needed).","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
@@ -7502,7 +7502,7 @@ static const char* tools_json = R"JSON([
 {"name":"use_item","description":"Use an item while looking at a point (walks within reach first): how a bucket is filled (x y z of a still water block, y its surface) and emptied (x z of the spot, y the top of the block the water goes on). item: what to use, default what is in hand. For buttons, doors and chests use interact_block instead.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"item":{"type":"string"}},"required":["x","y","z"]}},
 {"name":"equip","description":"Put an inventory item in the bot's main hand, or wear it with slot=armor.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"slot":{"type":"string","enum":["hand","armor"]}},"required":["item"]}},
 {"name":"chests","description":"What the bots know is in the chests: every bot that opens a chest (to store, take or look for room) tells the others what it holds, and chests and barrels seen while scanning are reported as finds (recall kind chest). With item: the chests holding it, fullest first; without: every known chest, newest first, with its contents and who saw it last. The bots themselves go to a chest known to hold what they need.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"max":{"type":"number","default":20}}}},
-{"name":"home","description":"Give the bot a bed of its own (the one in its house): at night it goes back there to sleep, from wherever it is.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"}},"required":["x","y","z"]}},
+{"name":"home","description":"Give the bot a bed of its own (the one in its house): at night it goes back there to sleep, from wherever it is. forget=true drops it (the bot is moving away).","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"forget":{"type":"boolean"}}}},
 {"name":"eat","description":"Eat a food item from the inventory.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
 {"name":"collect","description":"Collect resources: repeatedly find the nearest block with this exact id, mine it and pick up the drop, until count is reached. Equip a suitable tool first. For a log the whole tree is cut (every connected log within reach, so the result can exceed count), and a sapling of that kind is replanted if the bot has one.","inputSchema":{"type":"object","properties":{"block":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":32}},"required":["block"]}},
 {"name":"kill","description":"Hunt and attack entities until count are dead. type: an entity name like zombie or cow, or a group: hostile, animal. Equip a weapon first. Penned animals (a fence, gate, wall or iron bars within 8 blocks) are never attacked.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"count":{"type":"number","default":1},"radius":{"type":"number","default":24}},"required":["type"]}},
@@ -9464,9 +9464,12 @@ static Value CallTool(const std::string& name, const Value& a)
     }
     if (name == "find_blocks")
     {
-        const std::string id = Id(Str(a, "block"));
+        // "_log" (a leading underscore): every block whose id ends so, e.g. all kinds of logs
+        const std::string raw = Str(a, "block");
+        const bool suffix = !raw.empty() && raw[0] == '_';
+        const std::string id = suffix ? raw : Id(raw);
         Value list = Json::Array();
-        for (const Position& p : FindBlocks(bot, [&](const Blockstate& b) { return b.GetName() == id; },
+        for (const Position& p : FindBlocks(bot, [&](const Blockstate& b) { return suffix ? EndsWith(b.GetName(), id) : b.GetName() == id; },
             static_cast<int>(Num(a, "radius", 32)), static_cast<size_t>(std::max(1.0, Num(a, "max", 10)))))
         {
             Value o;
@@ -9528,6 +9531,11 @@ static Value CallTool(const std::string& name, const Value& a)
     if (name == "home")
     {
         // The bed in the bot's house: its own, slept in every night (the sleep branch walks back to it)
+        if (a.is_object() && a.contains("forget") && a["forget"].is_bool() && a["forget"].get<bool>())
+        {
+            ForgetOwn("bed");
+            return std::string("its bed is forgotten");
+        }
         const Position bed(static_cast<int>(Num(a, "x")), static_cast<int>(Num(a, "y")), static_cast<int>(Num(a, "z")));
         SetOwn("bed", bed);
         return "its bed is at " + std::to_string(bed.x) + " " + std::to_string(bed.y) + " " + std::to_string(bed.z);

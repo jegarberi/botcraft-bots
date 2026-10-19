@@ -93,6 +93,7 @@ local function pass()
 end
 
 bot.every(60, function()
+    if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if not picker or busy then return end
     busy = true
     local ok, err = pcall(pass)
