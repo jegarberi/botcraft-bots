@@ -1944,6 +1944,22 @@ static Status SafeDig(BehaviourClient& c, const Position& p, const bool send_swi
     {
         return Status::Failure;
     }
+    // With a pickaxe in hand: the stone one for common blocks (saves the iron one's durability),
+    // the best one for ores worth it (gold, diamond, redstone, emerald need iron) and obsidian
+    const ProtocolCraft::Slot hand = c.GetInventoryManager()->GetHotbarSelected();
+    const Blockstate* block = c.GetWorld()->GetBlock(p);
+    if (!hand.IsEmptySlot() && block != nullptr && EndsWith(AssetsManager::getInstance().GetItem(hand.GetItemId())->GetName(), "_pickaxe"))
+    {
+        const std::string& name = block->GetName();
+        const bool valuable = (name.find("_ore") != std::string::npos && !EndsWith(name, "coal_ore")) ||
+            EndsWith(name, ":ancient_debris") || EndsWith(name, "obsidian");
+        const std::string pickaxe = valuable ? HeldTool(c, "pickaxe")
+            : CountItem(c, "minecraft:stone_pickaxe") > 0 ? "minecraft:stone_pickaxe" : "";
+        if (!pickaxe.empty())
+        {
+            SetItemInHand(c, pickaxe);
+        }
+    }
     return Botcraft::Dig(c, p, send_swing, face, allow_pathfinding);
 }
 
