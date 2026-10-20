@@ -1062,6 +1062,8 @@ static sqlite3* OpenShared()
         sqlite3_exec(db,
             // A small page cache per connection: there is one per thread
             "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -512;"
+            // The log back to 64 MB at most after each checkpoint (it had grown to 1.6 GB)
+            "PRAGMA journal_size_limit = 67108864;"
                     "CREATE TABLE IF NOT EXISTS sites (x1 INTEGER NOT NULL, y1 INTEGER NOT NULL, z1 INTEGER NOT NULL,"
                     "  x2 INTEGER NOT NULL, y2 INTEGER NOT NULL, z2 INTEGER NOT NULL, name TEXT NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS chests (item TEXT PRIMARY KEY, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);"
@@ -1098,6 +1100,16 @@ static sqlite3* SharedDb()
     };
     thread_local Connection connection;
     return connection.db;
+}
+
+/// @brief End a write transaction on the shared database: rolled back if the commit fails. A transaction left
+/// open on a thread's connection would hold the write lock for good, every other writer waiting on it
+static void CommitShared(sqlite3* db)
+{
+    if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
 }
 
 /// @brief Remember a place that belongs to the bot ("bed")
@@ -1656,7 +1668,10 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
     {
         return;
     }
-    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        return;     // the database stayed busy: done again next time
+    }
     sqlite3_stmt* statement = nullptr;
     sqlite3_prepare_v2(db, "DELETE FROM finds WHERE dimension = ?1 AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7"
         " OR (kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800)", -1, &statement, nullptr);
@@ -1688,7 +1703,7 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
         sqlite3_reset(statement);
     }
     sqlite3_finalize(statement);
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    CommitShared(db);
 }
 
 /// @brief Remembered places whose kind ends with this ("iron_ore" also finds deepslate_iron_ore, "_log" any log,
@@ -2977,7 +2992,11 @@ static bool IsGear(const std::string& item)
 static void SaveChests()
 {
     sqlite3* db = SharedDb();
-    sqlite3_exec(db, "BEGIN IMMEDIATE; DELETE FROM chests", nullptr, nullptr, nullptr);
+    if (db == nullptr || sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        return;     // the database stayed busy: saved with the next change
+    }
+    sqlite3_exec(db, "DELETE FROM chests", nullptr, nullptr, nullptr);
     sqlite3_stmt* statement = nullptr;
     sqlite3_prepare_v2(db, "INSERT INTO chests (item, x, y, z) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr);
     for (const auto& [name, position] : chests)
@@ -2990,7 +3009,7 @@ static void SaveChests()
         sqlite3_reset(statement);
     }
     sqlite3_finalize(statement);
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    CommitShared(db);
 }
 
 /// @brief Which kind of thing an item is, for sorting a vault: food, weapons, armor, equipment (tools),
@@ -3200,7 +3219,10 @@ static void RememberChest(BehaviourClient& c, const Position& p, const std::shar
     }
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
     const std::string by = c.GetNetworkManager()->GetMyName();
-    sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        return;     // the database stayed busy: done again next time
+    }
     sqlite3_stmt* statement = nullptr;
     sqlite3_prepare_v2(db, "DELETE FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4", -1, &statement, nullptr);
     sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
@@ -3224,7 +3246,7 @@ static void RememberChest(BehaviourClient& c, const Position& p, const std::shar
         sqlite3_reset(statement);
     }
     sqlite3_finalize(statement);
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    CommitShared(db);
 }
 
 /// @brief Close a chest, telling the other bots what is left in it
