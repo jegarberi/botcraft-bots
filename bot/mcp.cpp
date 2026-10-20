@@ -7190,8 +7190,9 @@ static Status SpaceOutStep(McpBot& c)
 
 /// @brief Stuck: break one block beside the bot, at head or feet level, starting with the side it faces.
 /// Never the block above or below (falling sand, lava, or a pit under the feet), nor something the bots use
-/// @brief Head under water with less than two thirds of its air left (300 when full): time to get out
-static bool Drowning(BehaviourClient& c)
+/// @brief Head under water with less than `air` of its air left (300 when full, 200 by default): time to get out.
+/// 301 for any head under water: a bot left standing in water sinks and drowns
+static bool Drowning(BehaviourClient& c, const int air = 200)
 {
     const std::shared_ptr<LocalPlayer> me = c.GetLocalPlayer();
     const std::shared_ptr<World> world = c.GetWorld();
@@ -7200,7 +7201,7 @@ static bool Drowning(BehaviourClient& c)
         return false;      // still joining
     }
     const Blockstate* head = world->GetBlock(BlockPos(me->GetPosition() + Vector3<double>(0.0, 1.6, 0.0)));
-    return head != nullptr && head->IsFluidOrWaterlogged() && !head->IsSolid() && me->GetDataAirSupplyId() < 200;
+    return head != nullptr && head->IsFluidOrWaterlogged() && !head->IsSolid() && me->GetDataAirSupplyId() < air;
 }
 
 /// @brief Out of the water: to the nearest dry spot to stand on within 12 blocks, else up to the surface
@@ -7208,6 +7209,13 @@ static Status SurfaceStep(McpBot& c)
 {
     c.SetState("surfacing");
     const std::shared_ptr<World> world = c.GetWorld();
+    // Under ice (a frozen river): no surface to come up to, a hole broken over the head
+    const Position over = BlockPos(c.GetLocalPlayer()->GetPosition() + Vector3<double>(0.0, 2.6, 0.0));
+    const Blockstate* lid = world->GetBlock(over);
+    if (lid != nullptr && lid->IsSolid() && lid->GetHardness() >= 0.0f && !c.IsPlanned(over))
+    {
+        SafeDig(c, over, true, PlayerDiggingFace::Down, true);
+    }
     const auto dry = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && !b->IsSolid() && !b->IsFluidOrWaterlogged(); };
     const std::vector<Position> land = FindBlocks(c, [](const Blockstate& b) { return b.IsSolid(); }, 12, 1,
         [&](const Position& p) { return dry(p + Position(0, 1, 0)) && dry(p + Position(0, 2, 0)); });
@@ -7473,7 +7481,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     return Status::Failure;
                 })
             .sequence("breathe")
-                .leaf("under water and short of air?", [](McpBot& c) { return Drowning(c) ? Status::Success : Status::Failure; })
+                .leaf("head under water?", [](McpBot& c) { return Drowning(c, 301) ? Status::Success : Status::Failure; })
                 .leaf("get out of the water", SurfaceStep)
             .end()
             .sequence("climb out")
