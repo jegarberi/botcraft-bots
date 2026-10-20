@@ -571,7 +571,7 @@ int main()
             line(menu_rows++, menu.substr(at, count), A_REVERSE);
             at += count;
         }
-        line(menu_rows, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
+        line(menu_rows, Column("🤖 bot", 13) + Column("📋 state", 23) + Column("🧑 trade", 13) + Column("💗 hp", 7) + Column("🍗 food", 8) + Column("🛡 armor", 9) + Column("📍 position", 16) + "   🏃 doing", A_BOLD);
         const int rows = std::max(3, h - menu_rows + 1 - (network.empty() ? 12 : 4 + static_cast<int>(network.size())));
         const size_t first = picked >= static_cast<size_t>(rows) ? picked - rows + 1 : 0;
         for (size_t i = first; i < bots.size() && i < first + rows; ++i)
@@ -580,7 +580,7 @@ int main()
             const std::string flags = std::string(Flag(b, "autopilot") ? "🚀" : "  ") + (Flag(b, "gear") ? "🔧" : "  ");
             const bool answered = b.is_object() && b.contains("state");
             line(menu_rows + 1 + static_cast<int>(i - first), Column(bots[i].first, 13) + Column(answered ? Field(b, "state") : "💤 no answer", 23) + Column(Field(b, "trade"), 13) +
-                Column(b.is_object() && b.contains("health") && b["health"].is_number() ? std::to_string(static_cast<int>(std::round(b["health"].get_number<double>()))) : "", 7) + Column(Field(b, "food"), 8) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
+                Column(b.is_object() && b.contains("health") && b["health"].is_number() ? std::to_string(static_cast<int>(std::round(b["health"].get_number<double>()))) : "", 7) + Column(Field(b, "food"), 8) + Column(Field(b, "armor"), 9) + Column(Where(b), 16) + flags + " " + Field(b, "last_note"), i == picked ? A_REVERSE : 0);
         }
         if (!network.empty())
         {

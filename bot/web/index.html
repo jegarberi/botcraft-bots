@@ -217,7 +217,7 @@ function card(bot, tree) {
       bot.times_stuck ? $("span", { className: "badge" }, "stuck ×" + bot.times_stuck) : "",
       bot.deaths ? $("span", { className: "badge" }, "died ×" + bot.deaths + " (last at " + bot.died_at.x + " " + bot.died_at.y + " " + bot.died_at.z + ")") : "",
       bot.team_leader ? $("span", { className: "badge" }, bot.team_leader === bot.name ? "team leader" : "follows " + bot.team_leader) : "",
-      live ? $("small", {}, `❤ ${bot.health}  🍖 ${bot.food}  at ${bot.position.x}, ${bot.position.y}, ${bot.position.z}  holding ${bot.held_item || "nothing"}`) : ""),
+      live ? $("small", {}, `❤ ${bot.health}  🍖 ${bot.food}  🛡 ${bot.armor ?? 0}/20  at ${bot.position.x}, ${bot.position.y}, ${bot.position.z}  holding ${bot.held_item || "nothing"}`) : ""),
     $("div", { className: "row" },
       $("label", {}, auto, " Autopilot (decision tree)"),
       $("label", {}, gear, " Gear up first"),

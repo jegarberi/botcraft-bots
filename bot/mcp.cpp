@@ -10115,6 +10115,26 @@ static Value CallTool(const std::string& name, const Value& a)
         o["equipment"]["feet"] = item_at(Window::INVENTORY_FEET_ARMOR);
         o["equipment"]["main_hand"] = held.IsEmptySlot() ? "" : AssetsManager::getInstance().GetItem(held.GetItemId())->GetName().substr(10);
         o["equipment"]["off_hand"] = item_at(Window::INVENTORY_OFFHAND_INDEX);
+        // Armor points (0 to 20, the chestplate icons of the game) of what it wears, Java 1.21 values
+        {
+            static const std::map<std::string, std::array<int, 4>> points = {   // helmet, chestplate, leggings, boots
+                { "leather", { 1, 3, 2, 1 } }, { "golden", { 2, 5, 3, 1 } }, { "chainmail", { 2, 5, 4, 1 } },
+                { "iron", { 2, 6, 5, 2 } }, { "diamond", { 3, 8, 6, 3 } }, { "netherite", { 3, 8, 6, 3 } } };
+            int armor = 0;
+            const char* kinds[] = { "_helmet", "_chestplate", "_leggings", "_boots" };
+            for (const short slot : { Window::INVENTORY_HEAD_ARMOR, Window::INVENTORY_CHEST_ARMOR, Window::INVENTORY_LEGS_ARMOR, Window::INVENTORY_FEET_ARMOR })
+            {
+                const std::string worn = item_at(slot);
+                if (worn == "turtle_helmet") armor += 2;
+                for (int k = 0; k < 4; ++k)
+                {
+                    const size_t at = worn.find(kinds[k]);
+                    const auto material = at == std::string::npos ? points.end() : points.find(worn.substr(0, at));
+                    if (material != points.end()) armor += material->second[k];
+                }
+            }
+            o["armor"] = armor;
+        }
         o["inventory"] = Json::Object();
         for (const auto& [index, slot] : slots)
         {
