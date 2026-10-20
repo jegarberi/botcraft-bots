@@ -988,9 +988,10 @@ static void OpenMemory(const BehaviourClient& c, const std::string& bot_name)
     std::filesystem::create_directories("../memory");
     if (sqlite3_open(("../memory/" + bot_name + ".sqlite").c_str(), &memory_db) != SQLITE_OK ||
         sqlite3_exec(memory_db,
-            // Write-ahead log, synced at checkpoints only: a commit no longer waits for the disk. With every bot
-            // writing every 10 seconds, the syncs had the disk at 40% wait and the whole program stalled
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;"
+            // Write-ahead log, never synced: the OS writes it out by itself. Synced at checkpoints, 100 bots writing every
+            // 10 seconds had the disk at 85% wait, every bot's lock held through a sync (status calls timed out). A crash
+            // of the program loses nothing; a power cut, the last seconds of what the bot saw (never a corrupt file)
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;"
             "CREATE TABLE IF NOT EXISTS places ("
             "  kind TEXT NOT NULL, dimension TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL,"
             "  seen INTEGER NOT NULL, PRIMARY KEY (dimension, x, y, z));"
@@ -1061,7 +1062,8 @@ static sqlite3* OpenShared()
         sqlite3_busy_timeout(db, 5000) != SQLITE_OK ||
         sqlite3_exec(db,
             // A small page cache per connection: there is one per thread
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -512;"
+            // Never synced, like the bots' memories (see OpenMemory): a power cut can lose the last seconds, nothing else
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF; PRAGMA cache_size = -512;"
             // The log back to 64 MB at most after each checkpoint (it had grown to 1.6 GB)
             "PRAGMA journal_size_limit = 67108864;"
                     "CREATE TABLE IF NOT EXISTS sites (x1 INTEGER NOT NULL, y1 INTEGER NOT NULL, z1 INTEGER NOT NULL,"
