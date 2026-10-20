@@ -66,7 +66,7 @@ index 3f2f481..b102715 100644
  
      private:
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..552eef1 100644
+index 958521f..091f062 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -105,7 +105,25 @@ index 958521f..552eef1 100644
              {
                  solid = true;
                  const auto& colliders = block->GetCollidersAtPos(pos);
-@@ -149,7 +160,7 @@ namespace Botcraft
+@@ -125,7 +136,17 @@ namespace Botcraft
+         std::unordered_map<std::pair<Position, float>, std::pair<Position, float>, PosFloatPairHash> came_from;
+         std::unordered_map<std::pair<Position, float>, float, PosFloatPairHash> cost;
+ 
++        // Water only when there is no dry way: a long way through it drowns the bot. Each step with the feet in
++        // it costs 8 more, with the head under too 24 more (the heuristic stays a lower bound)
++        const auto in_water = [&](const Position& p) {
++            const Blockstate* b = world->GetBlock(p);
++            return b != nullptr && b->IsFluidOrWaterlogged() && !b->IsSolid();
++        };
+         auto add_node_if_better = [&](const std::pair<Position, float>& new_pos, float new_cost, const PathNode& from) {
++            if (in_water(new_pos.first))
++            {
++                new_cost += in_water(new_pos.first + Position(0, 1, 0)) ? 24.0f : 8.0f;
++            }
+             auto it = cost.find(new_pos);
+             if (it == cost.end() || new_cost < it->second)
+             {
+@@ -149,7 +170,7 @@ namespace Botcraft
  
          bool end_is_inside_solid = false;
          block = world->GetBlock(end);
@@ -114,7 +132,7 @@ index 958521f..552eef1 100644
  
          while (!nodes_to_explore.empty())
          {
-@@ -607,6 +618,17 @@ namespace Botcraft
+@@ -607,6 +628,17 @@ namespace Botcraft
  
                          if (block != nullptr && ((block->IsSolid() && !block->IsClimbable()) || (take_damage && block->IsHazardous())))
                          {
@@ -132,7 +150,7 @@ index 958521f..552eef1 100644
                              break;
                          }
  
-@@ -960,6 +982,10 @@ namespace Botcraft
+@@ -960,6 +992,10 @@ namespace Botcraft
          // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
          // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
          // climbable at the bottom, preventing fall damage
@@ -143,7 +161,7 @@ index 958521f..552eef1 100644
          if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
              {
                  // Previous inputs have not been processed by physics thread yet
-@@ -984,8 +1010,48 @@ namespace Botcraft
+@@ -984,8 +1020,48 @@ namespace Botcraft
                      (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
                  local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
  
@@ -193,7 +211,7 @@ index 958521f..552eef1 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1195,41 @@ namespace Botcraft
+@@ -1129,7 +1205,41 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
@@ -235,7 +253,7 @@ index 958521f..552eef1 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1290,8 @@ namespace Botcraft
+@@ -1190,6 +1300,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -244,7 +262,7 @@ index 958521f..552eef1 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1212,6 +1314,22 @@ namespace Botcraft
+@@ -1212,6 +1324,22 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
  
@@ -267,7 +285,7 @@ index 958521f..552eef1 100644
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
  
-@@ -1297,7 +1415,49 @@ namespace Botcraft
+@@ -1297,7 +1425,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal

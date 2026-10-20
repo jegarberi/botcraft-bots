@@ -192,6 +192,22 @@ public:
         return output;
     }
 
+    /// @brief A chat message or command, at most one every 1.1 seconds from this bot: servers kick for spam past
+    /// about 10 in a burst (a /locate for each kind of structure got the explorer kicked), commands included
+    void SendPaced(const bool command, const std::string& text)
+    {
+        std::lock_guard<std::mutex> lock(send_mutex);
+        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+        if (now < next_send)
+        {
+            std::this_thread::sleep_for(next_send - now);
+        }
+        if (command) SendChatCommand(text); else SendChatMessage(text);
+        next_send = std::chrono::steady_clock::now() + std::chrono::milliseconds(1100);
+    }
+    std::mutex send_mutex;
+    std::chrono::steady_clock::time_point next_send;
+
     /// @brief Queue a team message for the game chat (sent one per second, servers kick chat spammers)
     void Say(const std::string& text)
     {
@@ -1321,7 +1337,7 @@ void McpBot::OnTeamMessage(const std::string& sender, const std::string& message
         if (can_teleport)
         {
             const Position to = position_at(3);
-            SendChatCommand("minecraft:tp " + sender + " " + std::to_string(to.x) + " " + std::to_string(to.y) + " " + std::to_string(to.z));
+            SendPaced(true, "minecraft:tp " + sender + " " + std::to_string(to.x) + " " + std::to_string(to.y) + " " + std::to_string(to.z));
         }
         return;
     }
@@ -6003,7 +6019,7 @@ static bool TeleportNear(McpBot& c, const int x, const int y, const int z, const
         return false;
     }
     const std::string where = std::to_string(x) + " " + std::to_string(y) + " " + std::to_string(z);
-    c.SendChatCommand("minecraft:tp @s " + where);
+    c.SendPaced(true, "minecraft:tp @s " + where);
     if (!Utilities::YieldForCondition([&]() { return distance() < 16.0; }, c, 2500))
     {
         // Refused: this bot is not an operator. A teammate that is can do it
@@ -6874,8 +6890,8 @@ static Status SleepStep(McpBot& c)
     if (set_sleep_rule && !rule_set)
     {
         rule_set = true;
-        c.SendChatCommand("gamerule playersSleepingPercentage 1");
-        c.SendChatCommand("gamerule minecraft:players_sleeping_percentage 1");
+        c.SendPaced(true, "gamerule playersSleepingPercentage 1");
+        c.SendPaced(true, "gamerule minecraft:players_sleeping_percentage 1");
     }
     // The server wakes everybody when the night is over, or skipped once enough players sleep.
     // Lying still all night is not being stuck
@@ -7161,6 +7177,32 @@ static Status SpaceOutStep(McpBot& c)
 
 /// @brief Stuck: break one block beside the bot, at head or feet level, starting with the side it faces.
 /// Never the block above or below (falling sand, lava, or a pit under the feet), nor something the bots use
+/// @brief Head under water with less than two thirds of its air left (300 when full): time to get out
+static bool Drowning(BehaviourClient& c)
+{
+    const std::shared_ptr<LocalPlayer> me = c.GetLocalPlayer();
+    const Blockstate* head = c.GetWorld()->GetBlock(BlockPos(me->GetPosition() + Vector3<double>(0.0, 1.6, 0.0)));
+    return head != nullptr && head->IsFluidOrWaterlogged() && !head->IsSolid() && me->GetDataAirSupplyId() < 200;
+}
+
+/// @brief Out of the water: to the nearest dry spot to stand on within 12 blocks, else up to the surface
+static Status SurfaceStep(McpBot& c)
+{
+    c.SetState("surfacing");
+    const std::shared_ptr<World> world = c.GetWorld();
+    const auto dry = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && !b->IsSolid() && !b->IsFluidOrWaterlogged(); };
+    const std::vector<Position> land = FindBlocks(c, [](const Blockstate& b) { return b.IsSolid(); }, 12, 1,
+        [&](const Position& p) { return dry(p + Position(0, 1, 0)) && dry(p + Position(0, 2, 0)); });
+    if (!land.empty() && GoTo(c, land[0] + Position(0, 1, 0), 0) == Status::Success)
+    {
+        return Status::Success;
+    }
+    // Air over water: the surface, where it can breathe while swimming on
+    const std::vector<Position> surface = FindBlocks(c, [](const Blockstate& b) { return b.IsAir(); }, 12, 1,
+        [&](const Position& p) { const Blockstate* below = world->GetBlock(p + Position(0, -1, 0)); return below != nullptr && below->IsFluidOrWaterlogged(); });
+    return !surface.empty() ? GoTo(c, surface[0] + Position(0, -1, 0), 0) : Status::Failure;
+}
+
 static Status UnstickStep(McpBot& c)
 {
     c.unstick = false;
@@ -7251,6 +7293,10 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     }
                     return Status::Failure;
                 })
+            .sequence("breathe")
+                .leaf("under water and short of air?", [](McpBot& c) { return Drowning(c) ? Status::Success : Status::Failure; })
+                .leaf("get out of the water", SurfaceStep)
+            .end()
             .sequence("unstick")
                 .leaf("busy but not moving for 20 seconds?", [](McpBot& c)
                     {
@@ -8265,6 +8311,7 @@ static void Watchdog(McpBot& bot)
     }
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
     const bool danger = state != "fighting" && state != "eating" && now >= bot.danger_retry_at && !FindEntities(bot, "hostile", 10.0).empty();
+    const bool drowning = state != "surfacing" && Drowning(bot);
     const bool in_place = bot.working_in_place || now - bot.worked_in_place_at.load() < std::chrono::seconds(5);
     const bool stuck = state != "idle" && !in_place && now - bot.GetStateSince() > std::chrono::seconds(120);
     // Busy but still within 1.5 blocks of the same spot after 20 seconds: walled in, or the pathfinder is bumping into something
@@ -8294,9 +8341,9 @@ static void Watchdog(McpBot& bot)
             called = true;
         }
     }
-    if (danger || stuck || blocked || called)
+    if (danger || stuck || blocked || called || drowning)
     {
-        LOG_INFO("Watchdog: interrupting \"" << state << "\": " << (called ? "called to a fight" : danger ? "monster nearby" : blocked ? "not moving, breaking a block beside" : "running for too long"));
+        LOG_INFO("Watchdog: interrupting \"" << state << "\": " << (drowning ? "drowning" : called ? "called to a fight" : danger ? "monster nearby" : blocked ? "not moving, breaking a block beside" : "running for too long"));
         // If the monster can't be reached the fight ends at once: don't interrupt again right away
         bot.danger_retry_at = now + std::chrono::seconds(10);
         bot.RestartStateClock();
@@ -8559,7 +8606,7 @@ static void SpawnBot(const std::string& login)
                     // bot whether it is an operator (see can_teleport)
                     if (watch_count == 10)
                     {
-                        bot->SendChatCommand("minecraft:tp @s ~ ~ ~");
+                        bot->SendPaced(true, "minecraft:tp @s ~ ~ ~");
                     }
                     // Every 10 seconds, write what is around in the bot's memory
                     if (++watch_count % 20 == 0 && bot->GetNetworkManager()->GetConnectionState() == ProtocolCraft::ConnectionState::Play)
@@ -8596,7 +8643,7 @@ static void SpawnBot(const std::string& login)
                     std::string line;
                     if (watch_count % 2 == 0 && bot->PopOutgoing(line))
                     {
-                        bot->SendChatMessage(line);
+                        bot->SendPaced(false, line);
                     }
                     if (watch_count % 120 == 0)
                     {
@@ -9908,11 +9955,11 @@ static Value CallTool(const std::string& name, const Value& a)
         const std::string message = Str(a, "message");
         if (!message.empty() && message[0] == '/')
         {
-            bot.SendChatCommand(message.substr(1));
+            bot.SendPaced(true, message.substr(1));
         }
         else
         {
-            bot.SendChatMessage(message);
+            bot.SendPaced(false, message);
         }
         return "sent";
     }
@@ -10630,7 +10677,7 @@ static Value CallTool(const std::string& name, const Value& a)
         const std::string what = Str(a, "name");
         // The answer is a system message: look at the ones that arrive after the command
         const long long before = bot.GetSystemCount();
-        bot.SendChatCommand("locate " + kind + " " + (what.rfind('#', 0) == 0 ? what : Id(what)));
+        bot.SendPaced(true, "locate " + kind + " " + (what.rfind('#', 0) == 0 ? what : Id(what)));
         std::string answer;
         Utilities::WaitForCondition([&]()
             {
