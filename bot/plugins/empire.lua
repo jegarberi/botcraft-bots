@@ -426,7 +426,9 @@ end
 -- The ground's height at x z (the first block of ground going down), whether it was found, and whether it lies
 -- under water or ice (a lake: a house there was built 20 blocks under water, the builders drowning)
 local function ground(x, z, from)
-    local y, bottom = from + 24, from - 80
+    -- From high up: the town's height can be a cave's (where the leader stood), and from just over it the first
+    -- "ground" was a cave floor: houses were planned 30 blocks under the surface
+    local y, bottom = math.max(from + 24, 200), from - 80
     local wet = false
     while y >= bottom do
         local r = call("get_block", { bot = observer(x, z), x = x, y = y, z = z, y_min = bottom })
@@ -434,7 +436,8 @@ local function ground(x, z, from)
         y = tonumber(r.y) or y
         local name = tostring(r.block or "")
         if is_ground(name) then
-            return y + 1, true, wet or block_at(x, y + 1, z):match("water") ~= nil
+            local over = block_at(x, y + 1, z)
+            return y + 1, true, wet or over:match("water") ~= nil or over:match("seagrass") ~= nil or over:match("kelp") ~= nil
         end
         wet = wet or name:match("ice") ~= nil or name:match("water") ~= nil
         y = y - 1
@@ -973,16 +976,25 @@ local function homes(names, now)
             h.plan, h.blocks, h.handed, h.started, h.homed = HOME_PLAN, home(h.at, n), nil, false, nil
         end
     end
-    -- A house not built yet on a lot under water (a frozen lake): to a dry lot; the wet one stays taken
+    -- A house not built yet, checked once against the ground seen from the sky: on a lot under water (a frozen
+    -- lake) it moves to a dry lot, the wet one staying taken; planned in a cave or a rock pocket under the surface,
+    -- it moves up to it
     for n, h in pairs(state.village) do
-        if not h.road and not h.done and not h.dry then
-            local _, found, wet = ground(h.at.x + 4, h.at.z + 4, h.at.y)
+        if not h.road and not h.done and not h.surface then
+            local y, found, wet = ground(h.at.x + 4, h.at.z + 4, h.at.y)
             if wet then
                 h.at = lot()
-                h.blocks, h.handed, h.started, h.homed, h.grounded = home(h.at, n), nil, false, nil, nil
+                h.blocks, h.handed, h.started, h.homed = home(h.at, n), nil, false, nil
                 note(n .. "'s lot is under water: its house moves to " .. h.at.x .. " " .. h.at.z)
+                h.surface = true
+            elseif found then
+                if y ~= h.at.y then
+                    note(n .. "'s house was planned at y " .. h.at.y .. ", the ground is at y " .. y .. ": it moves there")
+                    h.at.y = y
+                    h.blocks, h.handed, h.started, h.homed = home(h.at, n), nil, false, nil
+                end
+                h.surface, h.grounded = true, true
             end
-            h.dry = found and not wet or nil
         end
     end
     -- A house not built yet that is not on the ground (planned 50 blocks up in the air): down to it.
