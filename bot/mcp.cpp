@@ -7485,6 +7485,13 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
         .selector("decide next action")
             .leaf("pace", [](McpBot& c)
                 {
+                    // Not in the world (dropped by the server, still joining): no branch below may run, every one of
+                    // them reads the player or the world (a dropped bot's tree read its food: the program crashed)
+                    if (!c.GetLocalPlayer() || !c.GetWorld() || !c.GetInventoryManager() || !c.GetEntityManager())
+                    {
+                        Wait(c, 500);
+                        return Status::Success;
+                    }
                     // At most 5 decisions a second. An action that fails instantly (a craft with a missing
                     // ingredient, a block that can't be placed) would otherwise be retried a hundred times a
                     // second, each try sending packets: servers kick clients for that
