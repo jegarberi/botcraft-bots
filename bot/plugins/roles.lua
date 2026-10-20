@@ -12,7 +12,7 @@
 --        hostile mobs and animals near, how much of what its trade needs it lacks
 --   ->   three hidden layers of 8 units (tanh with residual connections)
 --   out  the trade's actions (softmax: drawn from, so it keeps trying the others)
--- Each time the groups plugin gives a bot its turn, the bot's network draws an action and the bot does it;
+-- Every minute the groups plugin gives each bot its turn: the bot's network draws an action and the bot does it;
 -- at its next turn, what it achieved since (its stats, weighted for the trade, minus deaths and getting
 -- stuck) is the reward the network learns from (actor-critic).
 --   roles {}                                   each trade's network: actions, how often, last rewards
@@ -765,6 +765,14 @@ local function reward(role, before, now)
     return r + NN.living_reward(before.living, now.living) - 40 * grew(now.deaths, before.deaths) - 2 * grew(now.stuck, before.stuck)
 end
 
+-- The state is 2 MB: written at most once a minute, not after each of the hundred turns a minute
+local saved_at = 0
+local function save_soon()
+    if os.time() - saved_at < 60 then return end
+    saved_at = os.time()
+    save(state)
+end
+
 local function act(name, role, members, groups)
     local spec = ROLES[role]
     if not spec then error("no trade " .. tostring(role)) end
@@ -818,7 +826,7 @@ local function act(name, role, members, groups)
                 note = note or exchange(ctx)
             end
             state.prev[name] = nil
-            save(state)
+            save_soon()
             return { action = "feed the hungry team", note = note }
         end
     end
@@ -836,9 +844,11 @@ local function act(name, role, members, groups)
     end
     state.counts[role][action.name] = (state.counts[role][action.name] or 0) + 1
     state.prev[name] = { role = role, x = x, action = pick, snap = now }
-    save(state)
+    save_soon()
     return { action = action.name, note = note, want_percent = math.floor(p[pick] * 100 + 0.5), last_reward = learnt }
 end
+
+ROLES_ACT = act     -- the groups plugin runs the turns with it, each on its own thread (bot.spawn)
 
 bot.tool{
     name = "roles",

@@ -1,12 +1,15 @@
 -- Offline check of the groups: lua5.4 test_groups.lua plugins/groups.lua
-local tool, calls, ticks = nil, {}, {}
+local tool, calls, ticks, busy = nil, {}, {}, {}
+local clock = 1000
+os.time = function() return clock end
 bot = { call = function(name, a)
     calls[#calls + 1] = { name = name, args = a }
     if name == "bots" then local l = {} for i = 1, 15 do l[i] = { name = "Bot" .. i } end return l end
     if name == "berries" then return { bot = "Bot15" } end
     if name == "roles" then return { action = "harvest", note = "ok" } end
     return {}
-end, tool = function(t) tool = t end, every = function(_, f) ticks[#ticks + 1] = f end, on_chat = function() end, log = print }
+end, spawn = function(key, f) if busy[key] then return false end f() return true end, busy = function(key) return busy[key] == true end,
+tool = function(t) tool = t end, every = function(_, f) ticks[#ticks + 1] = f end, on_chat = function() end, log = print }
 load(io.open(arg[1]):read("a"), "groups")()
 local g = tool.run({})
 local function same(a, b) return table.concat(a, ",") == table.concat(b, ",") end
@@ -21,12 +24,18 @@ for _, c in ipairs(calls) do
     end
 end
 assert(miners_team == 2, "the miners are one team")
--- Each turn goes to the next bot, through its trade's network
-calls = {}
-for _ = 1, 15 do for _, f in ipairs(ticks) do f() end end
+-- Every bot a turn within the minute, in its trade, through its network; then not again before a minute
 local turns = {}
-for _, c in ipairs(calls) do if c.name == "roles" then turns[c.args.act] = c.args.role end end
-assert(turns.Bot2 == "bakers" and turns.Bot14 == "lumberjacks" and turns.Bot13 == "explorers", "every bot gets a turn in its trade")
+ROLES_ACT = function(name, role) turns[name] = (turns[name] or 0) + 1; assert(g[role]) return { action = "harvest", note = "ok" } end
+busy.Bot5 = true
+for _ = 1, 12 do clock = clock + 5; for _, f in ipairs(ticks) do f() end end
+for i = 1, 15 do
+    if i ~= 5 then assert(turns["Bot" .. i] == 1, "Bot" .. i .. " had " .. tostring(turns["Bot" .. i]) .. " turns in its first minute") end
+end
+assert(not turns.Bot5, "a bot still on its last action waits")
+busy.Bot5 = nil
+for _ = 1, 12 do clock = clock + 5; for _, f in ipairs(ticks) do f() end end
+assert(turns.Bot5 == 1 and turns.Bot1 == 2, "the next minute: everyone again")
 assert(io.open("../groups_job.lua"), "kept for a restart")
 tool.run({ stop = true })
 assert(not io.open("../groups_job.lua"))

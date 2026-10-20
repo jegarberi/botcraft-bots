@@ -10670,6 +10670,7 @@ static Value CallTool(const std::string& name, const Value& a)
 //   bot.on_chat(function(line) end)   react to chat lines
 //   bot.every(seconds, function() end)  do something regularly (watch a long job, start its next step)
 //   bot.log(message)
+//   bot.spawn(key, function() end)  run it on its own thread, the other plugins going on meanwhile; bot.busy(key)
 static lua_State* lua = nullptr;
 // Lua states are single threaded: the MCP thread (plugin tools) and the chat thread (handlers) share it
 static std::recursive_mutex lua_mutex;
@@ -10815,6 +10816,9 @@ static Value CallLuaTool(const std::string& name, const Value& a, bool& found)
 // lua_error() longjmps: the C++ work of each binding lives in a helper that returns normally,
 // so no C++ object is alive (and no exception in flight) when the Lua error is raised
 
+// The coroutines bot.spawn made (under lua_mutex): only their tool calls let the lock go
+static std::set<lua_State*> lua_spawned_states;
+
 static bool CallFromLua(lua_State* L, const char* name)
 {
     try
@@ -10823,7 +10827,26 @@ static bool CallFromLua(lua_State* L, const char* name)
         {
             throw std::runtime_error("the program is stopping");
         }
-        PushJson(L, CallTool(name, lua_istable(L, 2) ? ToJson(L, 2) : Value(Json::Object())));
+        const Value args = lua_istable(L, 2) ? ToJson(L, 2) : Value(Json::Object());
+        if (lua_spawned_states.count(L) == 0)
+        {
+            PushJson(L, CallTool(name, args));
+            return true;
+        }
+        // A coroutine of bot.spawn: other plugin code runs while this bot acts (its thread holds the lock once)
+        Value result;
+        lua_mutex.unlock();
+        try
+        {
+            result = CallTool(name, args);
+        }
+        catch (...)
+        {
+            lua_mutex.lock();
+            throw;
+        }
+        lua_mutex.lock();
+        PushJson(L, result);
         return true;
     }
     catch (const std::exception& e)
@@ -10831,6 +10854,48 @@ static bool CallFromLua(lua_State* L, const char* name)
         lua_pushstring(L, e.what());
         return false;
     }
+}
+
+// bot.spawn(key, function): runs the function on a thread and coroutine of its own, the Lua lock let go
+// while its tool calls run; false (and nothing done) while the last one of that key still runs
+static std::set<std::string> lua_spawned; // under lua_mutex
+// ponytail: detached threads, nothing waits for them at exit; a running one's tool call fails once stopping is set
+static int LuaSpawn(lua_State* L)
+{
+    luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if (lua_spawned.count(lua_tostring(L, 1)) > 0)
+    {
+        lua_pushboolean(L, false);
+        return 1;
+    }
+    lua_State* co = lua_newthread(L);
+    const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pushvalue(L, 2);
+    lua_xmove(L, co, 1);
+    std::string key = lua_tostring(L, 1);
+    lua_spawned.insert(key);
+    lua_spawned_states.insert(co);
+    std::thread([co, ref, key = std::move(key)]()
+        {
+            std::lock_guard<std::recursive_mutex> lock(lua_mutex);
+            int results = 0;
+            if (lua_resume(co, nullptr, 0, &results) != LUA_OK && lua_isstring(co, -1))
+            {
+                LOG_ERROR("Lua spawn " << key << " failed: " << lua_tostring(co, -1));
+            }
+            lua_spawned_states.erase(co);
+            luaL_unref(lua, LUA_REGISTRYINDEX, ref);
+            lua_spawned.erase(key);
+        }).detach();
+    lua_pushboolean(L, true);
+    return 1;
+}
+
+static int LuaBusy(lua_State* L)
+{
+    lua_pushboolean(L, lua_spawned.count(luaL_checkstring(L, 1)) > 0);
+    return 1;
 }
 
 static int LuaCall(lua_State* L)
@@ -10926,7 +10991,7 @@ static void LoadPlugins(const std::string& directory)
     std::lock_guard<std::recursive_mutex> lock(lua_mutex);
     lua = luaL_newstate();
     luaL_openlibs(lua);
-    static const luaL_Reg api[] = { { "call", LuaCall }, { "tool", LuaTool }, { "on_chat", LuaOnChat }, { "every", LuaEvery }, { "log", LuaLog }, { nullptr, nullptr } };
+    static const luaL_Reg api[] = { { "call", LuaCall }, { "tool", LuaTool }, { "on_chat", LuaOnChat }, { "every", LuaEvery }, { "log", LuaLog }, { "spawn", LuaSpawn }, { "busy", LuaBusy }, { nullptr, nullptr } };
     luaL_newlib(lua, api);
     lua_setglobal(lua, "bot");
 

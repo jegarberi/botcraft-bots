@@ -37,7 +37,7 @@ libraries, and trained online while the bots play.
 | Hidden | 5 layers of 10 units (1 + 4 residual) | 5 layers of 8 units (1 + 4 residual) |
 | Outputs | 11 trades (softmax) | that trade's actions, 15 to 28 (softmax) |
 | Critic | linear value head | linear value head |
-| Decides every | Minecraft day (when a day ends) | bot turn (one bot every 15 s, round robin) |
+| Decides every | Minecraft day (when a day ends) | bot turn (each bot every minute, or when its last action ends if that takes longer) |
 | Learns from | the day's own work, cooperation and team result | what the bot achieved since its previous turn |
 | Evolution | every 5 days, best 2 of all bots | every 5 days, best 2 per trade |
 | Saved in | `bot/brain_state.lua` | `bot/roles_state.lua` |
@@ -53,7 +53,7 @@ flowchart TD
     end
     subgraph Lua["Lua plugins"]
         BR["brain.lua<br/>trade network per bot"]
-        GR["groups.lua<br/>one bot's turn every 15 s"]
+        GR["groups.lua<br/>each bot a turn a minute"]
         RO["roles.lua<br/>action network per bot and trade"]
         NL["netlink.lua<br/>share the trade network"]
         EM["empire.lua (optional)<br/>replaces the brain's trade choice"]
@@ -70,8 +70,7 @@ flowchart TD
     NL <-->|game chat| W
 ```
 
-The brain decides who works in which trade. The groups plugin then gives the bots turns, one every 15
-seconds in round robin. At each turn the bot's own action network for its trade picks an action, and the
+The brain decides who works in which trade. The groups plugin then gives every bot a turn a minute. At each turn the bot's own action network for its trade picks an action, and the
 action runs through the program's tools. At the bot's next turn, what it achieved in between is the reward
 for that action. At the end of each Minecraft day, what every bot and the team achieved is the reward for
 the trade choices.
@@ -226,8 +225,10 @@ That makes 32 inputs about the bot plus the 72 environment inputs (5 + 67 biomes
 
 ### Turns
 
-The groups plugin gives one bot a turn every 15 seconds, round robin over every bot in a trade. At its
-turn:
+The groups plugin gives every bot in a trade a turn a minute, the first turns spread over the first minute.
+Each turn runs on a thread and Lua coroutine of its own (`bot.spawn`), which lets go of the plugins' shared
+lock while the bot's tools run, so a bot busy for minutes holds up neither the other bots nor the other
+plugins. A bot still on its previous action has its next turn when that action ends. At its turn:
 
 ```mermaid
 flowchart TD
@@ -608,9 +609,9 @@ Offline tests, each run from an empty temporary directory:
 
 ## 13. Known limits and quirks
 
-- **Turns get rare with many bots.** One turn every 15 seconds in round robin means each of 100 bots
-  decides about every 25 minutes. Its action network learns about two to three times per in-game hour,
-  and a reward covers everything the bot did in those 25 minutes, not only the action drawn.
+- **Long actions stretch a turn.** A bot decides every minute, but an action that keeps it busy longer
+  (storing, fishing five times, a long walk) delays its next turn until it ends, and that reward covers the
+  whole action.
 - **The time-based condition terms cap at 5 minutes.** `living_reward` scales its "as long as it lasts"
   terms by `min(elapsed, 300 s) / 300`. In the trade network, which compares a whole day (20 minutes), a
   day of hunger costs no more than 5 minutes of it.

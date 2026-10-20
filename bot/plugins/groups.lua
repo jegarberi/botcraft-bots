@@ -9,8 +9,8 @@
 --   fishers      fish at open water, cook the catch, feed the hungry
 -- The trades hand each other what they make (the roles plugin's exchange).
 --   explorers  go far for what the team has not found yet
--- What a bot does within its trade is drawn by that trade's own neural network (the roles plugin), one bot's
--- turn every 15 seconds.
+-- What a bot does within its trade is drawn by that trade's own neural network (the roles plugin), each bot's
+-- turn every minute.
 --   groups {}                         groups everyone, once (and says who is what)
 --   groups { show = true }            who is what
 --   groups { stop = true }            everyone back to the castle
@@ -22,7 +22,6 @@ local TRADES = { "bakers", "farmers", "butchers", "miners", "builders", "soldier
 
 local groups = nil          -- { bakers = {...}, farmers = {...}, ... } (TRADES)
 local notes = {}            -- name -> what it did last
-local busy = false
 
 local function call(tool, args)
     local ok, r = pcall(bot.call, tool, args)
@@ -86,23 +85,29 @@ local function apply(g)
     call("castle", { action = "rehand" })
 end
 
--- One bot a turn, every 15 seconds: its trade's network draws what it does (the plugins share one lock, and
--- everyone in a row held it for minutes, the castle's stages, the brain's days and netlink waiting meanwhile)
-local turn = 0
-bot.every(15, function()
+-- Every bot a turn a minute: its trade's network draws what it does. Each turn runs on its own thread
+-- (bot.spawn), so a bot busy for minutes holds up neither the others nor the plugins; a bot still on its last
+-- action has its next turn once that is done
+local TURN = 60
+local next_turn = {}       -- bot -> when its next turn is due
+bot.every(5, function()
     if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
-    if not groups or busy then return end
-    local workers = {}
-    for _, t in ipairs(TRADES) do
-        for _, n in ipairs(groups[t]) do workers[#workers + 1] = { n, t } end
+    if not groups or not ROLES_ACT then return end
+    local now = os.time()
+    for _, trade in ipairs(TRADES) do
+        for _, name in ipairs(groups[trade]) do
+            -- The first turns spread over the minute
+            next_turn[name] = next_turn[name] or now + math.random(0, TURN)
+            if now >= next_turn[name] and not bot.busy(name) then
+                next_turn[name] = now + TURN
+                local members, all = groups[trade], groups
+                bot.spawn(name, function()
+                    local ok, r = pcall(ROLES_ACT, name, trade, members, all)
+                    notes[name] = ok and type(r) == "table" and (tostring(r.action or "skipped") .. ": " .. tostring(r.note)) or ("turn failed: " .. tostring(r))
+                end)
+            end
+        end
     end
-    if #workers == 0 then return end
-    busy = true
-    turn = turn % #workers + 1
-    local name, trade = workers[turn][1], workers[turn][2]
-    local ok, r = pcall(bot.call, "roles", { act = name, role = trade, members = groups[trade], groups = groups })
-    notes[name] = ok and type(r) == "table" and (tostring(r.action or "skipped") .. ": " .. tostring(r.note)) or ("turn failed: " .. tostring(r))
-    busy = false
 end)
 
 -- After a restart: once the bots are back, the groups again (their memories keep the rest)
