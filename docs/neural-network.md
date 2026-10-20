@@ -324,7 +324,7 @@ The C++ program keeps counters for each bot and shows them as `stats` in its sta
 | `assisted` | kills something in a fight it was called to |
 | `salvaged` | picks up a fallen teammate's things |
 | `idle_seconds` | spends time idle with its autopilot on (sleeping, working in place and paused bots do not count) |
-| `construction_penalty` | builds badly: 10 per chest placed facing differently from the chest beside it; 10 per one-block-wide mine slice; 10 per one-block-wide road cell; twice the plan's block count for a finished roofed building with no walkable way in |
+| `construction_penalty` | builds badly: 10 per chest placed facing differently from the chest beside it; 10 per cramped mine slice (under 3 wide or 3 high); 5 per mine step up or down without a stair block; 10 per one-block-wide road cell; twice the plan's block count for a finished roofed building with no walkable way in |
 | `damage_taken` | loses health, per point, from any cause |
 | `drown_damage`, `fall_damage`, `burn_damage` | loses health to drowning, a fall (or stalagmite), or fire, lava, magma or a campfire, per point, within 2 seconds of the hit that caused it |
 | `drown_deaths`, `fall_deaths`, `burn_deaths` | dies within 2 seconds of such a hit |

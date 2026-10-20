@@ -18,9 +18,10 @@ namespace Construction
         return !facing.empty() && !neighbor.empty() && facing != neighbor;
     }
 
-    constexpr bool NarrowMine(const bool center, const bool left, const bool right)
+    // A mine slice the bot walks through: open at the feet, but less than 3 wide or 3 high
+    constexpr bool CrampedMine(const bool center, const bool left, const bool right, const int headroom)
     {
-        return center && !left && !right;
+        return center && (!left || !right || headroom < 3);
     }
 
     // A road cell needs a second lane, including on bends and one-block slopes.

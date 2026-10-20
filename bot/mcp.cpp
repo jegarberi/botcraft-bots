@@ -2137,7 +2137,9 @@ static Status PlaceCheckedBlock(BehaviourClient& c, const std::string& item, con
     return result;
 }
 
-static void PenalizeNarrowMine(BehaviourClient& c, const Position& feet, const Position& direction)
+/// @brief A mine slice just dug: a penalty if it is cramped (under 3 wide or 3 high), and another if it
+/// climbs or drops a block (`slope`) without a stair to walk it
+static void PenalizeCrampedMine(BehaviourClient& c, const Position& feet, const Position& direction, const int slope = 0)
 {
     const auto world = c.GetWorld();
     const Position across(std::abs(direction.z), 0, std::abs(direction.x));
@@ -2150,10 +2152,19 @@ static void PenalizeNarrowMine(BehaviourClient& c, const Position& feet, const P
         if (a == nullptr || b == nullptr) return;
         lanes[lane + 1] = a->IsAir() && b->IsAir();
     }
-    if (Construction::NarrowMine(lanes[1], lanes[0], lanes[2]))
+    int headroom = 0;
+    for (const Blockstate* b; headroom < 3 && (b = world->GetBlock(feet + Position(0, headroom, 0))) != nullptr && b->IsAir(); ++headroom) {}
+    if (Construction::CrampedMine(lanes[1], lanes[0], lanes[2], headroom))
     {
-        Count(c, "narrow_mine_slices");
+        Count(c, "cramped_mine_slices");
         Count(c, "construction_penalty", 10);
+    }
+    // The step between the two levels: under the higher spot's feet going up, under these feet going down
+    const Blockstate* step = slope > 0 ? world->GetBlock(feet + Position(0, -1, 0)) : slope < 0 ? world->GetBlock(feet - direction) : nullptr;
+    if (step != nullptr && !EndsWith(step->GetName(), "_stairs"))
+    {
+        Count(c, "stairless_steps");
+        Count(c, "construction_penalty", 5);
     }
 }
 
@@ -2239,13 +2250,13 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             {
                 if (SafeDig(c, cell, true, PlayerDiggingFace::Up, false) == Status::Failure)
                 {
-                    if (changed) PenalizeNarrowMine(c, next, side);
+                    if (changed) PenalizeCrampedMine(c, next, side, slope);
                     return Status::Failure;
                 }
                 changed = true;
             }
         }
-        if (changed) PenalizeNarrowMine(c, next, side);
+        if (changed) PenalizeCrampedMine(c, next, side, slope);
         const Blockstate* floor = world->GetBlock(next + Position(0, -1, 0));
         if (floor == nullptr || floor->IsFluid() || GoTo(c, next) == Status::Failure)
         {
@@ -3952,7 +3963,7 @@ static int WideMine(McpBot& c, const Position& dir, const int steps, const bool 
                 const bool needs_dig = b != nullptr && !b->IsAir();
                 if (needs_dig && SafeDig(c, cell, true) == Status::Failure)
                 {
-                    if (changed) PenalizeNarrowMine(c, Position(base.x, floor_y, base.z), dir);
+                    if (changed) PenalizeCrampedMine(c, Position(base.x, floor_y, base.z), dir);
                     c.SetNote("wide mine: could not dig at " + std::to_string(cell.x) + " " + std::to_string(cell.y) + " " + std::to_string(cell.z));
                     return dug;
                 }
@@ -3990,6 +4001,12 @@ static int WideMine(McpBot& c, const Position& dir, const int steps, const bool 
                     LookAt(c, Vector3<double>(step.x + 0.5 - dir.x * 2.0, step.y + 0.5, step.z + 0.5 - dir.z * 2.0));
                     PlaceBlock(c, stairs, step, PlayerDiggingFace::Up, true, false, false);
                 }
+            }
+            const Blockstate* middle = world->GetBlock(Position(base.x - dir.x, floor_y + 1, base.z - dir.z));
+            if (middle != nullptr && !EndsWith(middle->GetName(), "_stairs"))
+            {
+                Count(c, "stairless_steps");
+                Count(c, "construction_penalty", 5);
             }
         }
         // A torch on the wall every 6 blocks, at head height

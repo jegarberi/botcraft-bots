@@ -4,10 +4,11 @@
 
 using Construction::Cell;
 using Construction::Space;
-static_assert(Construction::NarrowMine(true, false, false));
-static_assert(!Construction::NarrowMine(false, false, false));
-static_assert(!Construction::NarrowMine(true, true, false));
-static_assert(!Construction::NarrowMine(true, true, true));
+static_assert(Construction::CrampedMine(true, false, false, 3));
+static_assert(!Construction::CrampedMine(false, false, false, 0));
+static_assert(Construction::CrampedMine(true, true, false, 3));
+static_assert(Construction::CrampedMine(true, true, true, 2));
+static_assert(!Construction::CrampedMine(true, true, true, 3));
 
 int main()
 {
