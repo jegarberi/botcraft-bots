@@ -7420,6 +7420,29 @@ static Status UnstickStep(McpBot& c)
         ClimbOutOfPit(c);
         return Status::Success;
     }
+    const auto keep = [&](const Position& p, const Blockstate* block)
+        {
+            const std::string& name = block->GetName();
+            return EndsWith(name, ":chest") || EndsWith(name, ":barrel") || EndsWith(name, ":furnace") || EndsWith(name, ":crafting_table") ||
+                EndsWith(name, "_bed") || c.IsPlanned(p) || InStoredSite(p);
+        };
+    // The block over its head first: in a shaft or under a ledge, the way on is up (bots stood for good in a
+    // 1-wide shaft, breaking the walls beside them). Not with sand or gravel over it, nor water or lava
+    {
+        const Position over = feet + Position(0, 2, 0);
+        const Blockstate* block = world->GetBlock(over);
+        const Blockstate* above = world->GetBlock(over + Position(0, 1, 0));
+        const std::string above_name = above == nullptr ? "" : above->GetName();
+        const bool falls = EndsWith(above_name, "sand") || EndsWith(above_name, "gravel") || EndsWith(above_name, "concrete_powder") || EndsWith(above_name, "anvil");
+        if (block != nullptr && block->IsSolid() && block->GetHardness() >= 0.0f && !keep(over, block) && above != nullptr && !above->IsFluid() && !falls &&
+            !LavaNear(world, over))
+        {
+            const std::string& name = block->GetName();
+            c.SetNote("stuck: breaking the " + name.substr(name.find(':') + 1) + " over its head at " + std::to_string(over.x) + " " + std::to_string(over.y) + " " + std::to_string(over.z));
+            SafeDig(c, over, true, PlayerDiggingFace::Down, true);
+            return Status::Success;
+        }
+    }
     std::array<Position, 4> sides = { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) };
     std::sort(sides.begin(), sides.end(), [&](const Position& a, const Position& b)
         {
@@ -7436,8 +7459,7 @@ static Status UnstickStep(McpBot& c)
                 continue;
             }
             const std::string& name = block->GetName();
-            if (EndsWith(name, ":chest") || EndsWith(name, ":barrel") || EndsWith(name, ":furnace") || EndsWith(name, ":crafting_table") || EndsWith(name, "_bed") ||
-                c.IsPlanned(p))
+            if (keep(p, block))
             {
                 continue;
             }
@@ -7503,7 +7525,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     {
                         return c.unstick ? Status::Success : Status::Failure;
                     })
-                .leaf("break a block beside", UnstickStep)
+                .leaf("break the block over its head, or one beside", UnstickStep)
             .end()
             .sequence("survive")
                 .leaf("hungry and has food?", [](McpBot& c)
@@ -11718,7 +11740,7 @@ static bool HandleRpc(const Value& request, Value& response)
 // The page (web/index.html) polls /state and drives the bots through /call, which runs any tool.
 // Decision tree branches as shown in the GUI flow view: keep in sync with MakeAutopilotTree()
 static const char* tree_json = R"JSON([
-{"branch":"unstick","condition":"busy but not moving for 20 seconds?","action":"break a block beside (never above or below)","state":"unsticking"},
+{"branch":"unstick","condition":"busy but not moving for 20 seconds?","action":"break the block over its head, else one beside (never below)","state":"unsticking"},
 {"branch":"survive","condition":"hungry and has food?","action":"eat","state":"eating"},
 {"branch":"defend","condition":"hostile within 10 blocks?","action":"fight with the best sword","state":"fighting"},
 {"branch":"avenge","condition":"a player attacked one of the bots?","action":"go after that player","state":"avenging"},
