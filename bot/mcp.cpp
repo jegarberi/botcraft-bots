@@ -1534,7 +1534,9 @@ static void Remember(McpBot& c)
         }
     }
 
-    std::lock_guard<std::mutex> lock(memory->mutex);
+    // Its own memory's lock, for its own transaction only: the shared database's part below goes without it (held
+    // through it, every status and recall of the bot waited on the other bots' writes)
+    std::unique_lock<std::mutex> lock(memory->mutex);
     if (memory_db == nullptr)
     {
         return;
@@ -1599,6 +1601,7 @@ static void Remember(McpBot& c)
     // Mobs wander off and despawn: a sighting older than half an hour is forgotten
     sqlite3_exec(memory_db, "DELETE FROM places WHERE kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800", nullptr, nullptr, nullptr);
     sqlite3_exec(memory_db, "COMMIT", nullptr, nullptr, nullptr);
+    lock.unlock();
 
     // And the finds worth sharing, for the other bots: everything but its own furniture (beds, tables, furnaces)
     // and the monsters (called out in the chat). Chests and barrels are shared: what is in them is known once
