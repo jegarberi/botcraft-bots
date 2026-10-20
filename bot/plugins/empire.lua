@@ -423,16 +423,23 @@ local function is_ground(name)
         or name:match("clay") or name:match("podzol") or name:match("mud") or name:match("snow_block") or name:match("terracotta")
 end
 
+-- The ground's height at x z (the first block of ground going down), whether it was found, and whether it lies
+-- under water or ice (a lake: a house there was built 20 blocks under water, the builders drowning)
 local function ground(x, z, from)
     local y, bottom = from + 24, from - 80
+    local wet = false
     while y >= bottom do
         local r = call("get_block", { bot = observer(x, z), x = x, y = y, z = z, y_min = bottom })
-        if type(r) ~= "table" then return from, false end
+        if type(r) ~= "table" then return from, false, wet end
         y = tonumber(r.y) or y
-        if is_ground(tostring(r.block or "")) then return y + 1, true end
+        local name = tostring(r.block or "")
+        if is_ground(name) then
+            return y + 1, true, wet or block_at(x, y + 1, z):match("water") ~= nil
+        end
+        wet = wet or name:match("ice") ~= nil or name:match("water") ~= nil
         y = y - 1
     end
-    return from, false
+    return from, false, wet
 end
 
 local COLS = 8
@@ -463,10 +470,18 @@ local function lot(leader)
             state.town = { x = math.floor(p.x) + 30, y = math.floor(p.y), z = math.floor(p.z) }
         end
     end
-    local i = free_lot()
-    state.cells[(i % COLS) .. "," .. (i // COLS)] = true
-    local x, z = state.town.x + (i % COLS) * 18, state.town.z + (i // COLS) * 18
-    return { x = x, y = ground(x + 4, z + 4, state.town.y), z = z }
+    -- The next free lot that is not under water (a lot under water stays taken: it is not offered again)
+    local x, z, y
+    for _ = 1, 64 do
+        local i = free_lot()
+        state.cells[(i % COLS) .. "," .. (i // COLS)] = true
+        x, z = state.town.x + (i % COLS) * 18, state.town.z + (i // COLS) * 18
+        local found, wet
+        y, found, wet = ground(x + 4, z + 4, state.town.y)
+        if not wet then break end
+        note("the lot at " .. x .. " " .. z .. " is under water: left empty")
+    end
+    return { x = x, y = y, z = z }
 end
 
 local function houses_needed(n) return math.ceil(n / 5) end
@@ -956,6 +971,18 @@ local function homes(names, now)
     for n, h in pairs(state.village) do
         if not h.road and not h.done and h.plan ~= HOME_PLAN then
             h.plan, h.blocks, h.handed, h.started, h.homed = HOME_PLAN, home(h.at, n), nil, false, nil
+        end
+    end
+    -- A house not built yet on a lot under water (a frozen lake): to a dry lot; the wet one stays taken
+    for n, h in pairs(state.village) do
+        if not h.road and not h.done and not h.dry then
+            local _, found, wet = ground(h.at.x + 4, h.at.z + 4, h.at.y)
+            if wet then
+                h.at = lot()
+                h.blocks, h.handed, h.started, h.homed, h.grounded = home(h.at, n), nil, false, nil, nil
+                note(n .. "'s lot is under water: its house moves to " .. h.at.x .. " " .. h.at.z)
+            end
+            h.dry = found and not wet or nil
         end
     end
     -- A house not built yet that is not on the ground (planned 50 blocks up in the air): down to it.
