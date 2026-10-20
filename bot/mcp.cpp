@@ -9745,6 +9745,20 @@ static Value CallTool(const std::string& name, const Value& a)
         }
         RosterChange(Str(a, "name"), true);
         try { SpawnBot(Str(a, "name")); }
+        catch (const std::exception& e)
+        {
+            // Refused (joins throttled, the name still online after a timeout): the rejoin watcher tries again every
+            // minute, as for a bot the server dropped. Given up on, it stayed out for good: "no answer" in the panels
+            {
+                std::lock_guard<std::mutex> lock(bots_mutex);
+                Rejoin retry;
+                retry.at = std::chrono::steady_clock::now() + rejoin_delay;
+                retry.restore["bot"] = Str(a, "name");
+                retry.restore["enabled"] = start_autopilot;
+                rejoining[Str(a, "name")] = retry;
+            }
+            throw std::runtime_error(std::string(e.what()) + "; trying again every 60 seconds");
+        }
         catch (...)
         {
             std::lock_guard<std::mutex> lock(bots_mutex);
