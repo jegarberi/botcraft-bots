@@ -81,6 +81,8 @@ continues in village/empire mode, which controls trade assignments while enabled
 seed individual policies without discarding their learned weights.
 
 The empire and village modes are described in full in [docs/empire-village.md](docs/empire-village.md).
+The plan of every building the bots put up (castle, town, village, farms, mines) is in
+[docs/buildings.md](docs/buildings.md), drawn from the plugins' own block lists by `bot/gen_plans.lua`.
 Village construction reserves supply workers, prioritizes feeding hungry teammates, and allows shops to start
 as their own builders finish their homes. Roads share saved elevations and use stone stairs on slopes, with a
 longer approach when needed. Unloaded terrain waits for a survey; failed placements remain pending and retry.
