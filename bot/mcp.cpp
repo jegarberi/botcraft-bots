@@ -7194,7 +7194,12 @@ static Status SpaceOutStep(McpBot& c)
 static bool Drowning(BehaviourClient& c)
 {
     const std::shared_ptr<LocalPlayer> me = c.GetLocalPlayer();
-    const Blockstate* head = c.GetWorld()->GetBlock(BlockPos(me->GetPosition() + Vector3<double>(0.0, 1.6, 0.0)));
+    const std::shared_ptr<World> world = c.GetWorld();
+    if (!me || !world)
+    {
+        return false;      // still joining
+    }
+    const Blockstate* head = world->GetBlock(BlockPos(me->GetPosition() + Vector3<double>(0.0, 1.6, 0.0)));
     return head != nullptr && head->IsFluidOrWaterlogged() && !head->IsSolid() && me->GetDataAirSupplyId() < 200;
 }
 
@@ -7222,6 +7227,10 @@ static Status SurfaceStep(McpBot& c)
 static bool InPit(BehaviourClient& c, const size_t limit = 48)
 {
     const std::shared_ptr<World> world = c.GetWorld();
+    if (!world || !c.GetLocalPlayer())
+    {
+        return false;      // still joining
+    }
     const auto open = [&](const Position& p)
         {
             const Blockstate* b = world->GetBlock(p);
