@@ -2169,6 +2169,36 @@ static void PenalizeCrampedMine(BehaviourClient& c, const Position& feet, const 
 }
 
 /// @param allow_hands Dig with bare hands if the bot has no pickaxe: very slow and nothing drops, only to get out of a hole
+static int CraftOne(BehaviourClient& c, const std::string& item, std::string& error);
+
+/// @brief Make `at` a cobblestone stair climbing toward `up` (crafted from cobblestone when the bot has none)
+/// @return false without stairs, or when the spot can't be dug or placed
+static bool PutStair(BehaviourClient& c, const Position& at, const Position& up)
+{
+    const std::string stairs = "minecraft:cobblestone_stairs";
+    std::string error;
+    if (CountItem(c, stairs) == 0 && CountItem(c, "minecraft:cobblestone") >= 6)
+    {
+        CraftOne(c, stairs, error);
+    }
+    const Blockstate* b = c.GetWorld()->GetBlock(at);
+    if (b == nullptr || CountItem(c, stairs) == 0 || LavaNear(c.GetWorld(), at) || b->IsFluid() || b->GetHardness() < 0.0f)
+    {
+        return b != nullptr && EndsWith(b->GetName(), "_stairs");
+    }
+    if (EndsWith(b->GetName(), "_stairs"))
+    {
+        return true;
+    }
+    if (!b->IsAir() && SafeDig(c, at, true, PlayerDiggingFace::Up, false) == Status::Failure)
+    {
+        return false;
+    }
+    // A stair faces the way the player looks when placing it: its high side toward `up`
+    LookAt(c, Vector3<double>(at.x + 0.5 + up.x * 2.0, at.y + 0.5, at.z + 0.5 + up.z * 2.0));
+    return PlaceBlock(c, stairs, at, PlayerDiggingFace::Up, true, false, false) == Status::Success;
+}
+
 static Status TunnelToward(BehaviourClient& c, const Position& target, const int max_steps, const bool allow_hands = false)
 {
     const std::shared_ptr<World> world = c.GetWorld();
@@ -2225,43 +2255,68 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             return Status::Failure;
         }
         const Position next = me + side + Position(0, slope, 0);
-        // Room for the body at the next spot, plus headroom to jump when going up
-        std::vector<Position> cells = { next + Position(0, 1, 0), next };
-        if (slope < 0)
+        const Position across(std::abs(side.z), 0, std::abs(side.x));
+        // 3 high at the next spot (plus headroom to jump when going up) and, with a pickaxe, 3 wide: the middle
+        // lane is needed, the side lanes are left alone where unsafe
+        std::vector<std::pair<Position, bool>> cells;
+        if (slope > 0)
         {
-            cells.insert(cells.begin(), me + side + Position(0, 1, 0));
+            cells.push_back({ me + Position(0, 2, 0), true });
         }
-        else if (slope > 0)
+        for (int h = 2; h >= 0; --h)
         {
-            cells.insert(cells.begin(), me + Position(0, 2, 0));
+            for (const int w : { 0, -1, 1 })
+            {
+                if (w == 0 || !pickaxe.empty())
+                {
+                    cells.push_back({ next + across * w + Position(0, h, 0), w == 0 });
+                }
+            }
         }
         bool changed = false;
-        for (const Position& cell : cells)
+        for (const auto& [cell, needed] : cells)
         {
             const Blockstate* block = world->GetBlock(cell);
             // Not into water, bedrock, or anything with lava against it: that is how a miner dies.
             // Nor through what the team is building
             if (block == nullptr || block->IsFluid() || block->GetHardness() < 0.0f || LavaNear(world, cell) ||
-                (!block->IsAir() && builder != nullptr && builder->IsPlanned(cell)))
+                (!block->IsAir() && builder != nullptr && builder->IsPlanned(cell)) || (!needed && in_site(cell)))
             {
-                return Status::Failure;
+                if (needed) return Status::Failure;
+                continue;
             }
             if (!block->IsAir())
             {
                 if (SafeDig(c, cell, true, PlayerDiggingFace::Up, false) == Status::Failure)
                 {
+                    if (!needed) continue;
                     if (changed) PenalizeCrampedMine(c, next, side, slope);
                     return Status::Failure;
                 }
                 changed = true;
             }
         }
-        if (changed) PenalizeCrampedMine(c, next, side, slope);
+        // A stair on each step, so the way back is walked, not jumped: going up, under the next spot
+        if (slope > 0 && !pickaxe.empty())
+        {
+            PutStair(c, me + side, side);
+        }
         const Blockstate* floor = world->GetBlock(next + Position(0, -1, 0));
         if (floor == nullptr || floor->IsFluid() || GoTo(c, next) == Status::Failure)
         {
+            if (changed) PenalizeCrampedMine(c, next, side, slope);
             return Status::Failure;
         }
+        // Going down, under the spot just left
+        if (slope < 0 && !pickaxe.empty())
+        {
+            PutStair(c, me + Position(0, -1, 0), Position(0, 0, 0) - side);
+        }
+        if (!pickaxe.empty())
+        {
+            SetItemInHand(c, pickaxe);
+        }
+        if (changed) PenalizeCrampedMine(c, next, side, slope);
         // A torch every 6 blocks of tunnel, on the spot just left: monsters only spawn in the dark
         if (step % 6 == 5)
         {
