@@ -39,6 +39,10 @@ add_executable(test_site_index EXCLUDE_FROM_ALL test_site_index.cpp)
 target_link_libraries(test_site_index PRIVATE botcraft)
 target_compile_options(test_site_index PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
 
+add_executable(test_world_lock EXCLUDE_FROM_ALL test_world_lock.cpp)
+target_link_libraries(test_world_lock PRIVATE botcraft)
+target_compile_options(test_world_lock PRIVATE -UNDEBUG)
+
 add_executable(test_build_quality EXCLUDE_FROM_ALL test_build_quality.cpp)
 target_compile_features(test_build_quality PRIVATE cxx_std_17)
 target_compile_options(test_build_quality PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)

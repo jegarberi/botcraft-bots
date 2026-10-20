@@ -65,6 +65,84 @@ index 3f2f481..b102715 100644
  #endif
  
      private:
+diff --git a/botcraft/include/botcraft/Game/World/World.hpp b/botcraft/include/botcraft/Game/World/World.hpp
+index ab9bafc..817649e 100644
+--- a/botcraft/include/botcraft/Game/World/World.hpp
++++ b/botcraft/include/botcraft/Game/World/World.hpp
+@@ -4,6 +4,7 @@
+ #include <memory>
+ #include <optional>
+ #include <shared_mutex>
++#include <thread>
+ #include <unordered_map>
+ 
+ #include "botcraft/Game/Enums.hpp"
+@@ -14,6 +15,47 @@
+ 
+ #include "protocolCraft/Handler.hpp"
+ 
++namespace Botcraft
++{
++    /// @brief A shared mutex where a waiting writer goes first: new readers wait while one is queued, unless their
++    /// thread already holds a read lock (a reader entering again would otherwise deadlock with that writer). With
++    /// 100 bots reading the shared world nonstop, the plain one kept the network threads (the writers) waiting
++    /// over a second per update, and the keep-alive answers queued behind them: the server dropped the bots
++    class WritePreferringMutex
++    {
++    public:
++        void lock() { ++writers_waiting; mutex.lock(); --writers_waiting; }
++        bool try_lock() { return mutex.try_lock(); }
++        void unlock() { mutex.unlock(); }
++        void lock_shared()
++        {
++            if (reads_held == 0)
++            {
++                while (writers_waiting.load(std::memory_order_acquire) > 0)
++                {
++                    std::this_thread::yield();
++                }
++            }
++            mutex.lock_shared();
++            ++reads_held;
++        }
++        bool try_lock_shared()
++        {
++            if (!mutex.try_lock_shared()) return false;
++            ++reads_held;
++            return true;
++        }
++        void unlock_shared() { --reads_held; mutex.unlock_shared(); }
++
++    private:
++        std::shared_mutex mutex;
++        std::atomic<int> writers_waiting = 0;
++        // Read locks this thread holds, on any world (ponytail: counted across instances; a thread reading one
++        // world then another skips the wait on the second, never deadlocks)
++        static inline thread_local int reads_held = 0;
++    };
++}
++
+ namespace std
+ {
+     template<>
+@@ -132,7 +174,7 @@ namespace Botcraft
+         /// @return Basically an object you can use as a std::unordered_map<std::pair<int, int>, Chunk>*.
+         /// **ALL WORLD UPDATE WILL BE BLOCKED WHILE THIS OBJECT IS ALIVE**, make sure it goes out of scope
+         /// as soon as you don't need it.
+-        Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, std::shared_mutex, std::shared_lock> GetChunks() const;
++        Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, WritePreferringMutex, std::shared_lock> GetChunks() const;
+ 
+ #if PROTOCOL_VERSION < 358 /* < 1.13 */
+         /// @brief Set biome of given block column. Does nothing if not loaded. Thread-safe
+@@ -377,7 +419,7 @@ namespace Botcraft
+ 
+     private:
+         std::unordered_map<std::pair<int, int>, Chunk> terrain;
+-        mutable std::shared_mutex world_mutex;
++        mutable WritePreferringMutex world_mutex;
+ 
+ #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
+         std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 index 958521f..091f062 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
@@ -504,7 +582,7 @@ index 2e0f761..daa0ad8 100644
          // as IsSame always returns false anyway
  #if !USE_GUI
 diff --git a/botcraft/src/Game/World/World.cpp b/botcraft/src/Game/World/World.cpp
-index 8fa9ddf..b912b3b 100644
+index 8fa9ddf..5dd0715 100644
 --- a/botcraft/src/Game/World/World.cpp
 +++ b/botcraft/src/Game/World/World.cpp
 @@ -4,8 +4,32 @@
@@ -522,7 +600,7 @@ index 8fa9ddf..b912b3b 100644
 +        class TimedWriteLock
 +        {
 +        public:
-+            TimedWriteLock(std::shared_mutex& m, const char* where) : lock(m, std::defer_lock)
++            TimedWriteLock(WritePreferringMutex& m, const char* where) : lock(m, std::defer_lock)
 +            {
 +                const auto start = std::chrono::steady_clock::now();
 +                lock.lock();
@@ -533,13 +611,57 @@ index 8fa9ddf..b912b3b 100644
 +                }
 +            }
 +        private:
-+            std::unique_lock<std::shared_mutex> lock;
++            std::unique_lock<WritePreferringMutex> lock;
 +        };
 +    }
 +
      World::World(const bool is_shared_) : is_shared(is_shared_)
      {
  #if PROTOCOL_VERSION < 719 /* < 1.16 */
+@@ -26,7 +50,7 @@ namespace Botcraft
+ 
+     bool World::IsLoaded(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+ 
+         const int chunk_x = static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH)));
+         const int chunk_z = static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)));
+@@ -44,7 +68,7 @@ namespace Botcraft
+ #if PROTOCOL_VERSION < 757 /* < 1.18 */
+         return 256;
+ #else
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         return GetHeightImpl();
+ #endif
+     }
+@@ -54,14 +78,14 @@ namespace Botcraft
+ #if PROTOCOL_VERSION < 757 /* < 1.18 */
+         return 0;
+ #else
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         return GetMinYImpl();
+ #endif
+     }
+ 
+     bool World::IsInFastLavaDimension() const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+ #if PROTOCOL_VERSION < 719 /* < 1.16 */
+         return current_dimension == Dimension::Nether;
+ #else
+@@ -72,7 +96,7 @@ namespace Botcraft
+     bool World::HasChunkBeenModified(const int x, const int z)
+     {
+ #if USE_GUI
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({ x,z });
+         if (it == terrain.end())
+         {
 @@ -87,7 +111,7 @@ namespace Botcraft
      std::optional<Chunk> World::ResetChunkModificationState(const int x, const int z)
      {
@@ -572,7 +694,7 @@ index 8fa9ddf..b912b3b 100644
          for (auto it = terrain.begin(); it != terrain.end();)
          {
              const int load_count = it->second.RemoveLoader(loader_id);
-@@ -135,7 +159,7 @@ namespace Botcraft
+@@ -135,19 +159,19 @@ namespace Botcraft
  
      void World::SetBlock(const Position& pos, const BlockstateId id)
      {
@@ -581,6 +703,50 @@ index 8fa9ddf..b912b3b 100644
          SetBlockImpl(pos, id);
      }
  
+     const Blockstate* World::GetBlock(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         return GetBlockImpl(pos);
+     }
+ 
+     std::vector<const Blockstate*> World::GetBlocks(const std::vector<Position>& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         std::vector<const Blockstate*> output(pos.size());
+         for (size_t i = 0; i < pos.size(); ++i)
+         {
+@@ -165,7 +189,7 @@ namespace Botcraft
+         std::vector<AABB> output;
+         output.reserve(32);
+         Position current_pos;
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         for (int y = static_cast<int>(std::floor(min_aabb.y)) - 1; y <= static_cast<int>(std::floor(max_aabb.y)); ++y)
+         {
+             current_pos.y = y;
+@@ -191,7 +215,7 @@ namespace Botcraft
+ 
+     Vector3<double> World::GetFlow(const Position& pos)
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         Vector3<double> flow(0.0);
+         std::vector<Position> horizontal_neighbours = {
+             Position(0, 0, -1), Position(1, 0, 0),
+@@ -263,9 +287,9 @@ namespace Botcraft
+         return flow;
+     }
+ 
+-    Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, std::shared_mutex, std::shared_lock> World::GetChunks() const
++    Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, WritePreferringMutex, std::shared_lock> World::GetChunks() const
+     {
+-        return Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, std::shared_mutex, std::shared_lock>(terrain, world_mutex);
++        return Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, WritePreferringMutex, std::shared_lock>(terrain, world_mutex);
+     }
+ 
+ #if PROTOCOL_VERSION < 358 /* < 1.13 */
 @@ -276,7 +300,7 @@ namespace Botcraft
      void World::SetBiome(const int x, const int y, const int z, const int biome)
  #endif
@@ -590,6 +756,15 @@ index 8fa9ddf..b912b3b 100644
  #if PROTOCOL_VERSION < 552 /* < 1.15 */
          SetBiomeImpl(x, z, biome);
  #else
+@@ -286,7 +310,7 @@ namespace Botcraft
+ 
+     const Biome* World::GetBiome(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({
+             static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
+             static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
 @@ -308,7 +332,7 @@ namespace Botcraft
  
      void World::SetSkyLight(const Position& pos, const unsigned char skylight)
@@ -608,6 +783,24 @@ index 8fa9ddf..b912b3b 100644
          auto it = terrain.find({
              static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
              static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
+@@ -340,7 +364,7 @@ namespace Botcraft
+ 
+     unsigned char World::GetSkyLight(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({
+             static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
+             static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
+@@ -357,7 +381,7 @@ namespace Botcraft
+ 
+     unsigned char World::GetBlockLight(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({
+             static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
+             static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
 @@ -374,7 +398,7 @@ namespace Botcraft
  
      void World::SetBlockEntityData(const Position& pos, const ProtocolCraft::NBT::Value& data)
@@ -617,6 +810,33 @@ index 8fa9ddf..b912b3b 100644
          auto it = terrain.find({
              static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
              static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
+@@ -402,7 +426,7 @@ namespace Botcraft
+ 
+     ProtocolCraft::NBT::Value World::GetBlockEntityData(const Position& pos) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({
+             static_cast<int>(std::floor(pos.x / static_cast<double>(CHUNK_WIDTH))),
+             static_cast<int>(std::floor(pos.z / static_cast<double>(CHUNK_WIDTH)))
+@@ -428,7 +452,7 @@ namespace Botcraft
+     std::string World::GetDimension(const int x, const int z) const
+ #endif
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         auto it = terrain.find({ x, z });
+         if (it == terrain.end())
+         {
+@@ -448,7 +472,7 @@ namespace Botcraft
+     std::string World::GetCurrentDimension() const
+ #endif
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+         return current_dimension;
+     }
+ 
 @@ -458,20 +482,20 @@ namespace Botcraft
      void World::SetCurrentDimension(const std::string& dimension)
  #endif
@@ -650,6 +870,24 @@ index 8fa9ddf..b912b3b 100644
          dimension_fast_lava[dimension] = fast_lava;
      }
  #endif
+@@ -612,7 +636,7 @@ namespace Botcraft
+ 
+     bool World::IsFree(const AABB& aabb, const bool fluid_collide) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+ 
+         const Vector3<double> min_aabb = aabb.GetMin();
+         const Vector3<double> max_aabb = aabb.GetMax();
+@@ -662,7 +686,7 @@ namespace Botcraft
+ 
+     std::optional<Position> World::GetSupportingBlockPos(const AABB& aabb) const
+     {
+-        std::shared_lock<std::shared_mutex> lock(world_mutex);
++        std::shared_lock<WritePreferringMutex> lock(world_mutex);
+ 
+         const Vector3<double> min_aabb = aabb.GetMin();
+         const Vector3<double> max_aabb = aabb.GetMax();
 @@ -707,7 +731,7 @@ namespace Botcraft
  
      void World::Handle(ProtocolCraft::ClientboundLoginPacket& packet)
