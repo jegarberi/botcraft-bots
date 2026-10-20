@@ -34,6 +34,7 @@
 #include <regex>
 #include <sqlite3.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -11340,6 +11341,14 @@ static void ServeSocket(const std::string& path, const std::string& name)
                     {
                         continue;
                     }
+                    // Out of files for now: the bot stays reachable once some are closed (returning left it
+                    // unreachable for good)
+                    if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)
+                    {
+                        LOG_WARNING("Socket " << path << ": " << std::strerror(errno));
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
                     return;
                 }
                 std::thread([fd, name, path]()
@@ -11730,6 +11739,12 @@ static void ServeWeb(const std::string& bind_address, const int port, const std:
                 // A tool call can take minutes: one thread per request keeps the page responsive
                 std::thread(HandleHttp, client).detach();
             }
+            else if (errno != EINTR)
+            {
+                // Out of files, say: not a busy loop on the waiting connection
+                LOG_WARNING("Web GUI: " << std::strerror(errno));
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
         }
     }
     close(server);
@@ -11764,6 +11779,14 @@ static void Usage()
 
 int main(int argc, char* argv[])
 {
+    // Each bot holds about 7 files (its memory database, sockets, event handles) and each thread its own shared
+    // database connection: 100 bots ran out of the default 1024, and then no socket or page could be opened
+    rlimit files{};
+    if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < files.rlim_max)
+    {
+        files.rlim_cur = std::min<rlim_t>(files.rlim_max, 65536);
+        setrlimit(RLIMIT_NOFILE, &files);
+    }
     // stdout is the MCP channel: keep a private copy of it and point fd 1 at stderr,
     // so nothing the library or a plugin prints can corrupt the protocol
     FILE* out = fdopen(dup(STDOUT_FILENO), "w");
