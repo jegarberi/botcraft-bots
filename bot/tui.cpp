@@ -18,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -378,12 +379,21 @@ int main()
         {
             while (!done && !stop)
             {
-                std::vector<std::pair<std::string, Value>> fresh;
+                // Every bot at once, 10 seconds each at most: one after the other, a few slow bots held up the rest
+                std::vector<std::pair<std::string, std::future<Value>>> asked;
                 for (const std::string& name : names())
                 {
-                    bool ok;
-                    Value status = AskBot(name, "status", Value(ProtocolCraft::Json::Object()), 3, ok);
-                    fresh.push_back({ name, ok ? status : Value(ProtocolCraft::Json::Object()) });
+                    asked.push_back({ name, std::async(std::launch::async, [name]()
+                        {
+                            bool ok;
+                            Value status = AskBot(name, "status", Value(ProtocolCraft::Json::Object()), 10, ok);
+                            return ok ? status : Value(ProtocolCraft::Json::Object());
+                        }) });
+                }
+                std::vector<std::pair<std::string, Value>> fresh;
+                for (auto& [name, answer] : asked)
+                {
+                    fresh.push_back({ name, answer.get() });
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex);

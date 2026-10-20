@@ -1051,16 +1051,17 @@ static std::map<std::string, std::string> LoadDoing(const BehaviourClient& c)
 }
 
 // One database shared by all the bots, botcraft.sqlite: the construction sites, the chests, the mines.
-// Every bot process opens it, the busy timeout makes them wait for each other's writes
-static sqlite3* SharedDb()
+// Each thread has its own connection: with every bot in one process, one connection made all of them queue
+// (status calls waited seconds) and mixed one thread's statements into another's transaction. In WAL mode the
+// connections read side by side; the busy timeout makes writers wait for each other
+static sqlite3* OpenShared()
 {
-    static sqlite3* db = []
-        {
-            sqlite3* db = nullptr;
-            if (sqlite3_open("../botcraft.sqlite", &db) != SQLITE_OK ||
-                sqlite3_busy_timeout(db, 5000) != SQLITE_OK ||
-                sqlite3_exec(db,
-                    "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;"
+    sqlite3* db = nullptr;
+    if (sqlite3_open("../botcraft.sqlite", &db) != SQLITE_OK ||
+        sqlite3_busy_timeout(db, 5000) != SQLITE_OK ||
+        sqlite3_exec(db,
+            // A small page cache per connection: there is one per thread
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -512;"
                     "CREATE TABLE IF NOT EXISTS sites (x1 INTEGER NOT NULL, y1 INTEGER NOT NULL, z1 INTEGER NOT NULL,"
                     "  x2 INTEGER NOT NULL, y2 INTEGER NOT NULL, z2 INTEGER NOT NULL, name TEXT NOT NULL);"
                     "CREATE TABLE IF NOT EXISTS chests (item TEXT PRIMARY KEY, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);"
@@ -1079,15 +1080,24 @@ static sqlite3* SharedDb()
                     "  z INTEGER NOT NULL, item TEXT NOT NULL, count INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
                     "  PRIMARY KEY (dimension, x, y, z, item));"
                     "CREATE INDEX IF NOT EXISTS chest_contents_item ON chest_contents (item);",
-                    nullptr, nullptr, nullptr) != SQLITE_OK)
-            {
-                LOG_ERROR("Can't open the shared database: " << (db ? sqlite3_errmsg(db) : "out of memory"));
-                sqlite3_close(db);
-                db = nullptr;
-            }
-            return db;
-        }();
+            nullptr, nullptr, nullptr) != SQLITE_OK)
+    {
+        LOG_ERROR("Can't open the shared database: " << (db ? sqlite3_errmsg(db) : "out of memory"));
+        sqlite3_close(db);
+        db = nullptr;
+    }
     return db;
+}
+
+static sqlite3* SharedDb()
+{
+    struct Connection
+    {
+        sqlite3* db = OpenShared();
+        ~Connection() { sqlite3_close(db); }
+    };
+    thread_local Connection connection;
+    return connection.db;
 }
 
 /// @brief Remember a place that belongs to the bot ("bed")
