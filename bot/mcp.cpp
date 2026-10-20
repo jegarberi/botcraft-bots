@@ -7415,7 +7415,10 @@ static Status UnstickStep(McpBot& c)
         const Blockstate* head = world->GetBlock(feet + side + Position(0, 1, 0));
         walls += (foot != nullptr && foot->IsSolid()) || (head != nullptr && head->IsSolid());
     }
-    if (again && walls >= 3)
+    // Or stuck twice underground (no sky over it): a cave or an old tunnel with no way out the pathfinder can find
+    // (a bot asked again and again for a place it could not walk to, breaking walls beside it): stairs up and out
+    const bool underground = world->GetSkyLight(feet + Position(0, 1, 0)) == 0;
+    if (again && (walls >= 3 || underground))
     {
         ClimbOutOfPit(c);
         return Status::Success;
