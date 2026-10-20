@@ -478,7 +478,8 @@ end
 local function plot(list, px, y, pz)
     for dx = -4, 4 do
         for dz = -4, 4 do
-            if dx == 0 and dz == 0 then add(list, px, y - 1, pz, AIR) else add(list, px + dx, y - 1, pz + dz, "dirt") end
+            -- The middle: water (the builders bring it in buckets) keeps the whole 9x9 plot hydrated
+            if dx == 0 and dz == 0 then add(list, px, y - 1, pz, "water") else add(list, px + dx, y - 1, pz + dz, "dirt") end
         end
     end
 end

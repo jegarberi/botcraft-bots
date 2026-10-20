@@ -249,6 +249,7 @@ local ROLES = {
                 if not has(ctx.st, "_hoe") then return make(ctx, "stone_hoe", 1) end
                 local r, err = call("make_farm", { bot = ctx.bot })
                 if r then return "made a farm: " .. (r.tilled or 0) .. " tilled" end
+                if tostring(err):match("needs a bucket") then return make(ctx, "bucket", 1) end
                 if tostring(err):match("no water") then return "no water near: " .. walk_off(ctx, 24) end
                 return "could not make a farm: " .. tostring(err) end },
             { name = "collect eggs", run = function(ctx)

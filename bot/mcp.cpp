@@ -1890,13 +1890,43 @@ static const std::map<std::string, Crop> crops = {
     { "minecraft:nether_wart", { 3, "minecraft:nether_wart" } },
 };
 
+/// @brief Ready to pick at p: a crop fully grown, sugar cane from its second block up (the base grows again), a
+/// pumpkin or melon grown from a stem (the stem gives another), a sweet berry bush with berries
+static bool Ripe(const World& world, const Position& p, const Blockstate& b)
+{
+    const std::string& name = b.GetName();
+    const auto crop = crops.find(name);
+    if (crop != crops.end())
+    {
+        return b.GetVariableValue("age") == std::to_string(crop->second.mature_age);
+    }
+    const auto is = [&](const Position& q, const char* what) { const Blockstate* o = world.GetBlock(q); return o != nullptr && o->GetName() == what; };
+    if (name == "minecraft:sugar_cane")
+    {
+        return is(p + Position(0, -1, 0), "minecraft:sugar_cane") && !is(p + Position(0, -2, 0), "minecraft:sugar_cane");
+    }
+    if (name == "minecraft:pumpkin" || name == "minecraft:melon")
+    {
+        const char* stem = name == "minecraft:pumpkin" ? "minecraft:attached_pumpkin_stem" : "minecraft:attached_melon_stem";
+        for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+        {
+            if (is(p + d, stem)) return true;
+        }
+        return false;
+    }
+    if (name == "minecraft:sweet_berry_bush")
+    {
+        return std::atoi(b.GetVariableValue("age").c_str()) >= 2;
+    }
+    return false;
+}
+
 static std::vector<Position> RipeCrops(BehaviourClient& c, const int radius, const size_t max_results)
 {
-    return FindBlocks(c, [](const Blockstate& b)
-        {
-            const auto crop = crops.find(b.GetName());
-            return crop != crops.end() && b.GetVariableValue("age") == std::to_string(crop->second.mature_age);
-        }, radius, max_results);
+    static const std::set<std::string> kinds = { "minecraft:sugar_cane", "minecraft:pumpkin", "minecraft:melon", "minecraft:sweet_berry_bush" };
+    const std::shared_ptr<World> world = c.GetWorld();
+    return FindBlocks(c, [](const Blockstate& b) { return crops.count(b.GetName()) > 0 || kinds.count(b.GetName()) > 0; }, radius, max_results,
+        [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && Ripe(*world, p, *b); });
 }
 
 /// @brief Name of a food item the bot holds, "" if none
@@ -2965,14 +2995,126 @@ static Status KillTask(BehaviourClient& c, const std::string& type, const int co
 /// @brief Harvest every ripe crop in range, pick up the drops and replant
 static int CraftOne(BehaviourClient& c, const std::string& item, std::string& error);
 
+static std::string ItemLike(BehaviourClient& c, const std::string& suffix, const int min_count);
+
+/// @brief Dirt or grass with air over it: soil to till or plant in
+static bool IsSoil(const World& world, const Position& p)
+{
+    const Blockstate* block = world.GetBlock(p);
+    const Blockstate* above = world.GetBlock(p + Position(0, 1, 0));
+    return block != nullptr && above != nullptr && above->IsAir() && (block->GetName() == "minecraft:dirt" || block->GetName() == "minecraft:grass_block");
+}
+
+/// @brief After a harvest, more than before: crops on bare farmland, new soil tilled within reach of the water
+/// while seeds last, sugar cane beside free water (16 new spots a round at most)
+static void GrowFarm(BehaviourClient& c, const int radius, std::atomic<int>& replanted)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const auto seed = [&]()
+        {
+            for (const char* kind : { "minecraft:wheat_seeds", "minecraft:carrot", "minecraft:potato", "minecraft:beetroot_seeds" })
+            {
+                // Carrots and potatoes are food too: a few kept to eat
+                const bool food = std::string_view(kind) == "minecraft:carrot" || std::string_view(kind) == "minecraft:potato";
+                if (CountItem(c, kind) > (food ? 4 : 0)) return std::string(kind);
+            }
+            return std::string();
+        };
+    int budget = 16;
+    const auto plant = [&](const Position& soil)
+        {
+            const std::string kind = seed();
+            if (kind.empty() || PlaceBlock(c, kind, soil + Position(0, 1, 0), PlayerDiggingFace::Up, true) == Status::Failure) return false;
+            ++replanted;
+            --budget;
+            return true;
+        };
+    const auto bare = [&](const Blockstate& b) { return b.GetName() == "minecraft:farmland"; };
+    for (const Position& p : FindBlocks(c, bare, radius, 32, [&](const Position& q) { const Blockstate* a = world->GetBlock(q + Position(0, 1, 0)); return a != nullptr && a->IsAir(); }))
+    {
+        if (budget <= 0 || !plant(p)) break;
+    }
+    // Farmland is hydrated by water up to 4 blocks away, on its level or one above
+    const std::string hoe = ItemLike(c, "_hoe", 1);
+    const auto is_water = [](const Blockstate& b) { return b.IsWater(); };
+    const std::vector<Position> waters = FindBlocks(c, is_water, radius, 64);
+    const auto touches_farmland = [&](const Position& w)
+        {
+            for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+            {
+                const Blockstate* b = world->GetBlock(w + d);
+                if (b != nullptr && b->GetName() == "minecraft:farmland") return true;
+            }
+            return false;
+        };
+    for (const Position& w : waters)
+    {
+        if (hoe.empty() || budget <= 0 || seed().empty() || !touches_farmland(w)) continue;
+        for (int dx = -4; dx <= 4 && budget > 0; ++dx)
+        {
+            for (int dz = -4; dz <= 4 && budget > 0; ++dz)
+            {
+                for (const int dy : { 0, -1 })
+                {
+                    const Position soil = w + Position(dx, dy, dz);
+                    if (budget <= 0 || !IsSoil(*world, soil) || seed().empty() || GoTo(c, soil, 3) == Status::Failure ||
+                        SetItemInHand(c, hoe) == Status::Failure || InteractWithBlock(c, soil, PlayerDiggingFace::Up) == Status::Failure)
+                    {
+                        continue;
+                    }
+                    Wait(c, 250);
+                    plant(soil);
+                }
+            }
+        }
+    }
+    // Sugar cane on soil or sand beside water that has no field: it grows 3 high, cut down to the base each harvest
+    for (const Position& w : waters)
+    {
+        if (budget <= 0 || CountItem(c, "minecraft:sugar_cane") == 0) break;
+        if (touches_farmland(w)) continue;
+        for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+        {
+            const Position spot = w + d;
+            const Blockstate* b = world->GetBlock(spot);
+            const Blockstate* a = world->GetBlock(spot + Position(0, 1, 0));
+            if (b == nullptr || a == nullptr || !a->IsAir() || CountItem(c, "minecraft:sugar_cane") == 0 ||
+                (b->GetName() != "minecraft:dirt" && b->GetName() != "minecraft:grass_block" && b->GetName() != "minecraft:sand"))
+            {
+                continue;
+            }
+            if (PlaceBlock(c, "minecraft:sugar_cane", spot + Position(0, 1, 0), PlayerDiggingFace::Up, true) == Status::Success)
+            {
+                ++replanted;
+                --budget;
+            }
+        }
+    }
+}
+
 static Status FarmTask(BehaviourClient& c, const int radius, const bool replant, std::atomic<int>& harvested, std::atomic<int>& replanted)
 {
     const std::shared_ptr<World> world = c.GetWorld();
     for (const Position& p : RipeCrops(c, radius, 512))
     {
         const Blockstate* block = world->GetBlock(p);
-        const auto crop = block == nullptr ? crops.end() : crops.find(block->GetName());
-        if (crop == crops.end() || Dig(c, p, true) == Status::Failure)
+        if (block == nullptr || !Ripe(*world, p, *block))
+        {
+            continue;
+        }
+        if (block->GetName() == "minecraft:sweet_berry_bush")
+        {
+            // Picked with a right-click: the bush stays and grows more
+            if (GoTo(c, p, 3) == Status::Success && InteractWithBlock(c, p, PlayerDiggingFace::Up) == Status::Success)
+            {
+                ++harvested;
+                Count(c, "harvested");
+                Wait(c, 300);
+            }
+            continue;
+        }
+        const auto crop = crops.find(block->GetName());
+        if (Dig(c, p, true) == Status::Failure)
         {
             continue;
         }
@@ -2981,10 +3123,14 @@ static Status FarmTask(BehaviourClient& c, const int radius, const bool replant,
         // Walk onto the plot to pick up the drops, they include what we replant with
         Wait(c, 300);
         GoTo(c, p, 1);
-        if (replant && PlaceBlock(c, crop->second.seed, p, std::nullopt, true) == Status::Success)
+        if (replant && crop != crops.end() && PlaceBlock(c, crop->second.seed, p, std::nullopt, true) == Status::Success)
         {
             ++replanted;
         }
+    }
+    if (replant)
+    {
+        GrowFarm(c, radius, replanted);
     }
     // Bone meal on what is still growing: 2 to 5 growth stages at once, whatever the light and the water
     // (a bone makes 3; skeletons drop them). 16 a round at most
@@ -6018,6 +6164,118 @@ static bool EnsureFuel(McpBot& c, const std::string& stage, bool& gathering)
     return false;
 }
 
+/// @brief The still water nearest the bot (32 blocks) to fill a bucket at, not one of `skip`: water that refills
+/// first (two still neighbours or more: a lake, a river, an infinite trench), else any not watering a field
+static std::optional<Position> WaterToFill(BehaviourClient& c, const std::vector<Position>& skip = {})
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const auto still = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsWater() && !b->IsFluidFalling() && b->GetVariableValue("level") == "0"; };
+    const auto is_source = [](const Blockstate& b) { return b.IsWater() && !b.IsFluidFalling() && b.GetVariableValue("level") == "0"; };
+    const auto around = [&](const Position& p, const std::function<bool(const Position&)>& test)
+        {
+            int n = 0;
+            for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) }) n += test(p + d);
+            return n;
+        };
+    const auto ok = [&](const Position& p) { return std::find(skip.begin(), skip.end(), p) == skip.end(); };
+    const std::vector<Position> refilling = FindBlocks(c, is_source, 32, 1, [&](const Position& p) { return ok(p) && around(p, still) >= 2; });
+    if (!refilling.empty()) return refilling[0];
+    const auto farmland = [&](const Position& q) { const Blockstate* b = world->GetBlock(q); return b != nullptr && b->GetName() == "minecraft:farmland"; };
+    const std::vector<Position> any = FindBlocks(c, is_source, 32, 1, [&](const Position& p) { return ok(p) && around(p, farmland) == 0; });
+    if (!any.empty()) return any[0];
+    return std::nullopt;
+}
+
+/// @brief Fill the empty bucket the bot carries at the nearest still water other than `skip`: in sight (32
+/// blocks), else one remembered or seen through the rock (96 blocks), walked to and filled there
+/// @return whether the bot now holds a water bucket
+static bool FillBucket(McpBot& c, const std::vector<Position>& skip = {})
+{
+    if (CountItem(c, "minecraft:water_bucket") > 0) return true;
+    if (CountItem(c, "minecraft:bucket") == 0) return false;
+    const auto wanted = [&](const Position& p) { return std::find(skip.begin(), skip.end(), p) == skip.end(); };
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        if (const std::optional<Position> source = WaterToFill(c, skip))
+        {
+            const Position& w = *source;
+            UseHeldAt(c, "minecraft:bucket", Vector3<double>(w.x + 0.5, w.y + 0.9, w.z + 0.5));
+            return Utilities::YieldForCondition([&]() { return CountItem(c, "minecraft:water_bucket") > 0; }, c, 2000);
+        }
+        std::vector<std::pair<std::string, Position>> known = Recall(c, "water", 1);
+        if (known.empty())
+        {
+            LookThroughRock(c, { "water" }, BlockPos(c.GetLocalPlayer()->GetPosition()).y);
+            known = Recall(c, "water", 1);
+        }
+        if (known.empty() || !wanted(known[0].second))
+        {
+            return false;
+        }
+        c.SetNote("farm: fetching water at " + std::to_string(known[0].second.x) + " " + std::to_string(known[0].second.z));
+        if (TravelTask(c, known[0].second.x, known[0].second.z) == Status::Failure)
+        {
+            Forget(c, known[0].second);
+            return false;
+        }
+    }
+    return false;
+}
+
+/// @brief A water source that never runs dry, at `middle`: a trench 3 long along x, 1 deep, a bucket poured at
+/// each end; the middle, between two sources, becomes one too, and a bucket taken from it fills again. Buckets
+/// are filled at the nearest still water (walked to, 96 blocks at most)
+/// @return whether the middle is a source
+static bool InfiniteWater(McpBot& c, const Position& middle, std::string& error)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const std::vector<Position> trench = { middle + Position(-1, 0, 0), middle, middle + Position(1, 0, 0) };
+    // Walls all round and a floor, or the water runs off
+    for (const Position& t : trench)
+    {
+        for (const Position& d : { Position(0, -1, 0), Position(0, 0, 1), Position(0, 0, -1), Position(1, 0, 0), Position(-1, 0, 0) })
+        {
+            const Position q = t + d;
+            if (std::find(trench.begin(), trench.end(), q) != trench.end()) continue;
+            const Blockstate* b = world->GetBlock(q);
+            if (b == nullptr || !b->IsSolid())
+            {
+                error = "no room for a water trench at " + std::to_string(middle.x) + " " + std::to_string(middle.y) + " " + std::to_string(middle.z);
+                return false;
+            }
+        }
+    }
+    for (const Position& t : trench)
+    {
+        const Blockstate* b = world->GetBlock(t);
+        if (b != nullptr && !b->IsAir() && !b->IsWater() && Dig(c, t, true) == Status::Failure)
+        {
+            error = "could not dig the water trench";
+            return false;
+        }
+    }
+    for (const Position& end : { trench[0], trench[2] })
+    {
+        const Blockstate* b = world->GetBlock(end);
+        if (b != nullptr && b->IsWater() && b->GetVariableValue("level") == "0") continue;
+        if (!FillBucket(c, trench))
+        {
+            error = CountItem(c, "minecraft:bucket") + CountItem(c, "minecraft:water_bucket") == 0 ? "needs a bucket to bring water (make bucket)" : "no water within 96 blocks to fill a bucket";
+            return false;
+        }
+        c.SetNote("farm: pouring water for a source that never runs dry");
+        if (GoTo(c, end, 3) == Status::Failure || UseHeldAt(c, "minecraft:water_bucket", Vector3<double>(end.x + 0.5, end.y, end.z + 0.5)) == Status::Failure)
+        {
+            error = "could not pour the water";
+            return false;
+        }
+        Wait(c, 500);
+    }
+    Utilities::YieldForCondition([&]() { const Blockstate* b = world->GetBlock(middle); return b != nullptr && b->IsWater() && b->GetVariableValue("level") == "0"; }, c, 3000);
+    const Blockstate* b = world->GetBlock(middle);
+    return b != nullptr && b->IsWater();
+}
+
 /// @brief One step toward water standing at p: make a bucket (3 iron ingots, mined and smelted if need be),
 /// fill it at the nearest water (found by looking around up to 96 blocks, and walked to), empty it at p.
 /// @return Failure only when the pouring itself did not work
@@ -6032,9 +6290,10 @@ static Status PourStep(McpBot& c, const Position& p)
             Obtain(c, "minecraft:bucket");
             return Status::Success;
         }
-        // Still water, not a stream: only a source fills a bucket
-        const auto is_source = [](const Blockstate& b) { return b.IsWater() && !b.IsFluidFalling() && b.GetVariableValue("level") == "0"; };
-        const std::vector<Position> sources = FindBlocks(c, is_source, 32, 1);
+        // Still water, not a stream: only a source fills a bucket. Not water just poured for the build (or a field)
+        // when there is water that refills
+        const std::optional<Position> source = WaterToFill(c);
+        const std::vector<Position> sources = source ? std::vector<Position>{ *source } : std::vector<Position>{};
         if (!sources.empty())
         {
             c.SetNote("building: filling the bucket at " + std::to_string(sources[0].x) + " " + std::to_string(sources[0].y) + " " + std::to_string(sources[0].z));
@@ -7678,14 +7937,14 @@ static const char* tools_json = R"JSON([
 {"name":"dye","description":"Dye wool. color: white, orange, magenta, light_blue, yellow, lime, pink, gray, light_gray, cyan, purple, blue, brown, green, red or black. By default crafts count dyed wool from wool the bot carries (one dye each). sheep=true dyes count sheep instead: each then gives wool of that colour every time it is shorn. The dye comes from the inventory, or is made from what the bot carries (red from a poppy, yellow from a dandelion, white from bone meal...).","inputSchema":{"type":"object","properties":{"color":{"type":"string"},"count":{"type":"number","default":1},"sheep":{"type":"boolean","default":false}},"required":["color"]}},
 {"name":"lure","description":"Lead animals to a place, for a pen or a farm: with their food in hand (cow, sheep, goat: wheat; pig, rabbit: carrot; chicken: wheat_seeds; or food=...), the bot goes up to the nearest ones of this type within 48 blocks and walks to x y z in short hops, waiting for them and going back for them when they lose interest. Returns how many arrived. Then close the pen and use breed.","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"z":{"type":"number"},"food":{"type":"string"}},"required":["type","x","y","z"]}},
 {"name":"breed","description":"Feed the two nearest animals of a type with a food item from the inventory so they breed (e.g. cow + wheat, pig + carrot, chicken + wheat_seeds).","inputSchema":{"type":"object","properties":{"type":{"type":"string"},"food":{"type":"string"},"radius":{"type":"number","default":16}},"required":["type","food"]}},
-{"name":"farm","description":"Harvest every fully grown crop nearby (wheat, carrots, potatoes, beetroots, nether_wart), pick up the drops and replant.","inputSchema":{"type":"object","properties":{"radius":{"type":"number","default":16},"replant":{"type":"boolean","default":true}}}},
+{"name":"farm","description":"Harvest everything ripe nearby and replant: fully grown wheat, carrots, potatoes, beetroots and nether wart; sugar cane from its second block up (the base grows again); pumpkins and melons grown from a stem (the stem stays); sweet berry bushes with berries (picked, the bush stays). Then the farm grows: crops on bare farmland, more soil tilled within 4 blocks of the field's water while the seeds last, sugar cane planted beside water with no field (16 new spots a round at most).","inputSchema":{"type":"object","properties":{"radius":{"type":"number","default":16},"replant":{"type":"boolean","default":true}}}},
 {"name":"craft","description":"Craft one recipe. grid is 3 rows of 3 item names, \"\" for empty cells, e.g. sticks: [[\"oak_planks\",\"\",\"\"],[\"oak_planks\",\"\",\"\"],[\"\",\"\",\"\"]]. Recipes that fit in 2x2 use the inventory grid; larger ones use the nearest crafting_table.","inputSchema":{"type":"object","properties":{"grid":{"type":"array","items":{"type":"array","items":{"type":"string"}}}},"required":["grid"]}},
 {"name":"autopilot","description":"Turn the bot's decision tree on or off. When on, the bot picks its next action itself, in priority order: eat when hungry, fight hostile mobs within 8 blocks, hunt when it has no food, cut a tree when it has no wood, make a pickaxe / axe / sword / shovel when it has none (planks, crafting table and sticks as needed), then gear up further (mine stone for stone tools, hunt cows for leather armor, mine and smelt iron for a shield), harvest and replant ripe crops within 16 blocks, gather the requested resource, otherwise idle. Other tools still work: they interrupt it, then it resumes. gather: optional block id to collect, or several separated by commas (the bot explores to find it, and for ores digs down and tunnels), count: how many. gear: false to skip gearing up, true to (re)start it; see last_note in status for its progress.","inputSchema":{"type":"object","properties":{"enabled":{"type":"boolean"},"gear":{"type":"boolean"},"gather":{"type":"string"},"count":{"type":"number","default":16}},"required":["enabled"]}},
 {"name":"snapshot","description":"Image of what the bot sees right now (first-person view). Only available when the server was started with --snapshot FILE.","inputSchema":{"type":"object","properties":{}}},
 {"name":"team","description":"Make all the connected bots work as a team: they turn their autopilot on, share one objective and travel together (each bot rejoins the leader when more than 16 blocks away). objective: gather (block: one id or several separated by commas, e.g. iron_ore,gold_ore,diamond_ore,redstone_ore; count: total, split between the bots; for ores the bots first make stone tools and an iron pickaxe, then tunnel down to the ore, deepslate variants included, lighting their tunnels and mining spots with torches made from the coal they find), attack (type: entity name or hostile/animal, count: total), build (plan=box: fill the box x1 y1 z1 - x2 y2 z2 with the block item; plan=blocks: any structure given block by block, see blocks; a bot that runs out of a block goes and gathers more of it; plan=shelter: a first-night shelter of outer width size (default 5) with its lowest corner at x1 y1 z1, walls 3 high, flat roof, doorway in the middle of the north side; each bot uses what it carries), follow (just stay with the leader), disband. leader: bot name, defaults to the first bot. The bots talk in the game chat with lines starting with [team]: members report what they find, the leader assigns two of them to each find and asks everyone for a status every minute (see team_reports in the leader's status). Bots still eat, defend themselves and gear up first; pass gear=false to autopilot to skip gearing up.","inputSchema":{"type":"object","properties":{"objective":{"type":"string","enum":["gather","attack","build","follow","disband"]},"leader":{"type":"string"},"block":{"type":"string"},"type":{"type":"string"},"item":{"type":"string"},"plan":{"type":"string","enum":["box","shelter","blocks"]},"site":{"type":"array","description":"the building site as a box [x1, y1, z1, x2, y2, z2]: the bots never mine material inside it","items":{"type":"number"}},"blocks":{"type":"array","description":"plan=blocks: [[x, y, z, item], ...], up to 4096 entries; the item air clears the spot, any other block replaces what stands there","items":{"type":"array"}},"size":{"type":"number","default":5},"count":{"type":"number","default":16},"x1":{"type":"number"},"y1":{"type":"number"},"z1":{"type":"number"},"x2":{"type":"number"},"y2":{"type":"number"},"z2":{"type":"number"}},"required":["objective"]}},
 {"name":"recipe","description":"How an item is made, from the game's own recipe data: every crafting recipe (pattern and key, or ingredient list; #minecraft:planks means any item of that tag), how many it makes, whether it needs a crafting table, and what it is smelted from if it comes from a furnace.","inputSchema":{"type":"object","properties":{"item":{"type":"string"}},"required":["item"]}},
 {"name":"craft_item","description":"Craft an item by name, count times: finds the recipe, lays it out with what the bot holds (any accepted variant, e.g. any planks), in the inventory grid or at the nearest crafting table. Fails with the list of missing ingredients. Prefer this to craft, which needs the 3x3 grid spelled out.","inputSchema":{"type":"object","properties":{"item":{"type":"string"},"count":{"type":"number","default":1}},"required":["item"]}},
-{"name":"make_farm","description":"Start a crop plot: till the dirt and grass within radius (max 4, the reach of water) of the nearest water that has soil beside it, and plant the seeds the bot carries (wheat_seeds, carrot, potato, beetroot_seeds). Needs a hoe (craft_item wooden_hoe). One water block in the middle keeps a 9x9 plot hydrated. The farm tool harvests and replants later.","inputSchema":{"type":"object","properties":{"radius":{"type":"number","default":4}}}},
+{"name":"make_farm","description":"Start a crop plot: till the dirt and grass within radius (max 4, the reach of water) of the nearest water that has soil beside it, and sow it: wheat_seeds, carrot, potato and beetroot_seeds in rows, pumpkin and melon seeds every other block on the outer ring (the fruit grows on the grass outside; seeds are crafted from pumpkins and melon slices the bot carries). With no seeds the bot breaks grass for wheat seeds first. With no water by any soil within 32 blocks, the plot goes on a village garden bed or the soil nearest the bot, around a water source of its own that never runs dry: a trench 3 long, a bucket poured at each end, so the middle refills (the bucket is filled at the nearest still water, walked to, 96 blocks at most; needs a bucket). Needs a hoe. The farm tool harvests, replants and grows the plot later.","inputSchema":{"type":"object","properties":{"radius":{"type":"number","default":4}}}},
 {"name":"locate","description":"Ask the server where the nearest biome, structure or point of interest is, with its /locate command (the bot must be a server operator). kind: biome, structure or poi. name: its id, e.g. forest, plains, village_plains, mineshaft, or a #tag like #minecraft:village. go=true also walks there. Good for going straight to resources: forest for wood, village for food and beds, mineshaft for ores and rails.","inputSchema":{"type":"object","properties":{"kind":{"type":"string","enum":["biome","structure","poi"]},"name":{"type":"string"},"go":{"type":"boolean","default":false}},"required":["kind","name"]}},
 {"name":"travel","description":"Walk a long distance to x z (any height), in hops, for places too far for goto. Fails if the way is blocked three hops in a row.","inputSchema":{"type":"object","properties":{"x":{"type":"number"},"z":{"type":"number"}},"required":["x","z"]}},
 {"name":"recall","description":"Places the bot remembers having seen (kept in its own SQLite database across restarts): ores, logs, crafting tables, furnaces, chests, barrels, beds, crops, berry bushes and animals (mob:cow), with what the other bots reported (ores, logs, crops, berry bushes, animals). kind is the end of a block id: iron_ore (also finds deepslate_iron_ore), _log, bed, crafting_table, chest... Nearest first. status lists how many of each kind are remembered.","inputSchema":{"type":"object","properties":{"kind":{"type":"string"},"max":{"type":"number","default":5}},"required":["kind"]}},
@@ -10202,7 +10461,7 @@ static Value CallTool(const std::string& name, const Value& a)
         const auto tilled = std::make_shared<std::atomic<int>>(0);
         const auto planted = std::make_shared<std::atomic<int>>(0);
         const auto error = std::make_shared<std::string>();
-        Run(bot, 300, name, [=](McpBot& c)
+        Run(bot, 900, name, [=](McpBot& c)
             {
                 const std::shared_ptr<World> w = c.GetWorld();
                 const std::string hoe = ItemLike(c, "_hoe");
@@ -10211,13 +10470,27 @@ static Value CallTool(const std::string& name, const Value& a)
                     *error = "needs a hoe in the inventory (craft_item wooden_hoe)";
                     return Status::Failure;
                 }
-                // Water hydrates farmland up to 4 blocks away on its own level: the plot is the soil around a water block
-                const auto is_soil = [&](const Position& p)
+                // Something to sow: seeds from the grass, and pumpkin or melon seeds from the fruit the bot carries
+                std::string craft_error;
+                if (CountItem(c, "minecraft:pumpkin_seeds") == 0 && CountItem(c, "minecraft:pumpkin") >= 2) CraftOne(c, "minecraft:pumpkin_seeds", craft_error);
+                if (CountItem(c, "minecraft:melon_seeds") == 0 && CountItem(c, "minecraft:melon_slice") >= 4) CraftOne(c, "minecraft:melon_seeds", craft_error);
+                const auto crop_seeds = [&]()
                     {
-                        const Blockstate* block = w->GetBlock(p);
-                        const Blockstate* above = w->GetBlock(p + Position(0, 1, 0));
-                        return block != nullptr && above != nullptr && above->IsAir() && (block->GetName() == "minecraft:dirt" || block->GetName() == "minecraft:grass_block");
+                        std::vector<std::string> kinds;
+                        for (const char* seed : { "minecraft:wheat_seeds", "minecraft:carrot", "minecraft:potato", "minecraft:beetroot_seeds" })
+                        {
+                            if (CountItem(c, seed) > 0) kinds.push_back(seed);
+                        }
+                        return kinds;
                     };
+                if (crop_seeds().empty())
+                {
+                    c.SetNote("farm: breaking grass for seeds");
+                    std::atomic<int> got = 0;
+                    CollectTask(c, [](const Blockstate& b) { return b.GetName() == "minecraft:short_grass" || b.GetName() == "minecraft:tall_grass"; }, 24, 32, got);
+                }
+                // Water hydrates farmland up to 4 blocks away on its own level: the plot is the soil around a water block
+                const auto is_soil = [&](const Position& p) { return IsSoil(*w, p); };
                 const std::vector<Position> waters = FindBlocks(c, [](const Blockstate& b) { return b.IsWater(); }, 32, 400);
                 const auto water = std::find_if(waters.begin(), waters.end(), [&](const Position& p)
                     {
@@ -10230,42 +10503,41 @@ static Value CallTool(const std::string& name, const Value& a)
                 }
                 else
                 {
-                    // Village farm plots built next to homes have a composter on the rim and a 5x5 dirt bed beside it
-                    const std::vector<Position> composters = FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:composter"; }, 32, 64);
-                    const auto composter = std::find_if(composters.begin(), composters.end(), [&](const Position& p)
-                        {
-                            for (int dx = -4; dx <= 4; ++dx)
-                            {
-                                for (int dz = -4; dz <= 4; ++dz)
-                                {
-                                    if (is_soil(p + Position(dx, -1, dz)) || is_soil(p + Position(dx, 0, dz)))
-                                    {
-                                        return true;
-                                    }
-                                }
-                            }
-                            return false;
-                        });
-                    if (composter == composters.end())
+                    // No water by any soil: the plot goes on a village garden bed (a composter on its rim), else on the
+                    // soil nearest the bot, with a water source of its own in the middle, made from two buckets
+                    std::vector<Position> sites;
+                    for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:composter"; }, 32, 8))
                     {
-                        *error = "no water with dirt or grass beside it within 32 blocks: farmland has to be within 4 blocks of water";
+                        sites.push_back(p + Position(3, -1, 0));
+                    }
+                    for (const Position& p : FindBlocks(c, [](const Blockstate& b) { return b.GetName() == "minecraft:grass_block" || b.GetName() == "minecraft:dirt"; }, 16, 24,
+                        [&](const Position& q) { return is_soil(q); }))
+                    {
+                        sites.push_back(p);
+                    }
+                    std::string why = "no soil near to farm on";
+                    bool made = false;
+                    for (const Position& site : sites)
+                    {
+                        if (!is_soil(site) || !InfiniteWater(c, site, why))
+                        {
+                            if (why.find("bucket") != std::string::npos || why.find("96 blocks") != std::string::npos) break;
+                            continue;
+                        }
+                        center = site;
+                        made = true;
+                        break;
+                    }
+                    if (!made)
+                    {
+                        *error = why;
                         return Status::Failure;
                     }
-                    center = *composter + Position(3, -1, 0);
-                    if (!is_soil(center) && !is_soil(center + Position(1, 0, 0)))
-                    {
-                        center = *composter;
-                    }
-                    // If the bot has a water bucket, pour it in the middle of the plot so the farmland stays hydrated
-                    if (CountItem(c, "minecraft:water_bucket") > 0)
-                    {
-                        const Blockstate* mid = w->GetBlock(center);
-                        if (mid != nullptr && !mid->IsWater() && (mid->GetName() == "minecraft:dirt" || mid->GetName() == "minecraft:grass_block") &&
-                            GoTo(c, center, 3) == Status::Success && Dig(c, center, true) == Status::Success)
-                        {
-                            UseHeldAt(c, "minecraft:water_bucket", Vector3<double>(center.x + 0.5, center.y, center.z + 0.5));
-                        }
-                    }
+                }
+                std::vector<std::string> stems;
+                for (const char* seed : { "minecraft:pumpkin_seeds", "minecraft:melon_seeds" })
+                {
+                    if (CountItem(c, seed) > 0) stems.push_back(seed);
                 }
                 for (int dx = -radius; dx <= radius; ++dx)
                 {
@@ -10283,23 +10555,23 @@ static Value CallTool(const std::string& name, const Value& a)
                         }
                         ++*tilled;
                         Wait(c, 250);
-                        // Rows of different crops side by side grow faster (a third more often, says the wiki):
-                        // each row along x gets the next kind the bot carries
-                        std::vector<std::string> kinds;
-                        for (const char* seed : { "minecraft:wheat_seeds", "minecraft:carrot", "minecraft:potato", "minecraft:beetroot_seeds" })
+                        // Pumpkins and melons on the outer ring, every other block: the fruit grows on the grass outside
+                        const bool ring = std::abs(dx) == radius || std::abs(dz) == radius;
+                        std::string seed;
+                        if (ring && !stems.empty() && (dx + dz) % 2 == 0)
                         {
-                            if (CountItem(c, seed) > 0)
-                            {
-                                kinds.push_back(seed);
-                            }
+                            seed = stems[((dx + dz + 2 * radius) / 2) % stems.size()];
                         }
-                        if (!kinds.empty())
+                        else
                         {
-                            const std::string& seed = kinds[((soil.z % static_cast<int>(kinds.size())) + kinds.size()) % kinds.size()];
-                            if (PlaceBlock(c, seed, soil + Position(0, 1, 0), PlayerDiggingFace::Up, true) == Status::Success)
-                            {
-                                ++*planted;
-                            }
+                            // Rows of different crops side by side grow faster (a third more often, says the wiki):
+                            // each row along x gets the next kind the bot carries
+                            const std::vector<std::string> kinds = crop_seeds();
+                            if (!kinds.empty()) seed = kinds[((soil.z % static_cast<int>(kinds.size())) + kinds.size()) % kinds.size()];
+                        }
+                        if (!seed.empty() && CountItem(c, seed) > 0 && PlaceBlock(c, seed, soil + Position(0, 1, 0), PlayerDiggingFace::Up, true) == Status::Success)
+                        {
+                            ++*planted;
                         }
                     }
                 }
