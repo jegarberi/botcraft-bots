@@ -2619,7 +2619,18 @@ static Status CollectTask(BehaviourClient& c, const std::function<bool(const Blo
                 builder->unreachable[p] = std::chrono::steady_clock::now();
             }
         };
-    const std::function<bool(const Position&)> outside_the_site = [builder](const Position& p) { return !InStoredSite(p) && (builder == nullptr || !builder->InSite(p)); };
+    // Nothing under water: a dive for ore on a lake bed is how the bots drowned (they surfaced, went back, again)
+    const std::shared_ptr<World> world = c.GetWorld();
+    const auto wet = [&](const Position& p)
+        {
+            for (const Position& d : { Position(0, 1, 0), Position(0, 2, 0), Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+            {
+                const Blockstate* b = world->GetBlock(p + d);
+                if (b != nullptr && b->IsFluidOrWaterlogged() && !b->IsSolid()) return true;
+            }
+            return false;
+        };
+    const std::function<bool(const Position&)> outside_the_site = [&, builder](const Position& p) { return !InStoredSite(p) && (builder == nullptr || !builder->InSite(p)) && !wet(p); };
     while (done < count)
     {
         std::vector<Position> found = FindBlocks(c, match, radius, failed.size() + 8, outside_the_site);
@@ -7206,7 +7217,7 @@ static Status SurfaceStep(McpBot& c)
 }
 
 /// @brief In a pit: fewer than `limit` spots to walk to from where the bot stands (a step up of one block, drops
-/// of up to three), with walls all round rather than drops too deep to take. Open ground, a cave system, a mine
+/// of up to three), hemmed in mostly by walls rather than by drops too deep to take. Open ground, a cave system, a mine
 /// with its stair, a house with its door give more; the top of a pillar is a drop, not a pit
 static bool InPit(BehaviourClient& c, const size_t limit = 48)
 {
@@ -7225,7 +7236,7 @@ static bool InPit(BehaviourClient& c, const size_t limit = 48)
     }
     std::set<Position> seen = { start };
     std::vector<Position> todo = { start };
-    bool drop = false;
+    int drops = 0, walls = 0;
     while (!todo.empty() && seen.size() < limit)
     {
         const Position p = todo.back();
@@ -7249,7 +7260,11 @@ static bool InPit(BehaviourClient& c, const size_t limit = 48)
                     if (stand(p + d + Position(0, dy, 0))) next = p + d + Position(0, dy, 0);
                     else if (!open(p + d + Position(0, dy, 0))) break;
                 }
-                drop = drop || !next;
+                drops += !next;
+            }
+            else
+            {
+                ++walls;
             }
             if (next && seen.insert(*next).second)
             {
@@ -7257,7 +7272,8 @@ static bool InPit(BehaviourClient& c, const size_t limit = 48)
             }
         }
     }
-    return seen.size() < limit && !drop;
+    // Mostly walls: a pit (a hole in its floor is a drop too). Mostly drops: the top of a pillar, a ledge
+    return seen.size() < limit && walls > 0 && walls >= 2 * drops;
 }
 
 /// @brief A block the bot can build with: not one that falls (sand, gravel) nor anything it needs for itself
