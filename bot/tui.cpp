@@ -374,26 +374,46 @@ int main()
     static std::vector<std::string> network_lines;
     network_bot.clear();
 
-    // The statuses, every 2 seconds, off the drawing thread: a busy bot must not freeze the keys
+    // The statuses, every 2 seconds, off the drawing thread: a busy bot must not freeze the keys. With the
+    // automatic polling off (o), only the bot asked for (p) is polled
+    static std::atomic<bool> auto_poll = true;
+    static std::string poll_request;    // under mutex
+    const auto ask_status = [](const std::string& name)
+        {
+            bool ok;
+            Value status = AskBot(name, "status", Value(ProtocolCraft::Json::Object()), 10, ok);
+            return ok ? status : Value(ProtocolCraft::Json::Object());
+        };
     std::thread poller([&]()
         {
             while (!done && !stop)
             {
-                // Every bot at once, 10 seconds each at most: one after the other, a few slow bots held up the rest
-                std::vector<std::pair<std::string, std::future<Value>>> asked;
-                for (const std::string& name : names())
-                {
-                    asked.push_back({ name, std::async(std::launch::async, [name]()
-                        {
-                            bool ok;
-                            Value status = AskBot(name, "status", Value(ProtocolCraft::Json::Object()), 10, ok);
-                            return ok ? status : Value(ProtocolCraft::Json::Object());
-                        }) });
-                }
                 std::vector<std::pair<std::string, Value>> fresh;
-                for (auto& [name, answer] : asked)
+                if (auto_poll)
                 {
-                    fresh.push_back({ name, answer.get() });
+                    // Every bot at once, 10 seconds each at most: one after the other, a few slow bots held up the rest
+                    std::vector<std::pair<std::string, std::future<Value>>> asked;
+                    for (const std::string& name : names())
+                    {
+                        asked.push_back({ name, std::async(std::launch::async, ask_status, name) });
+                    }
+                    for (auto& [name, answer] : asked)
+                    {
+                        fresh.push_back({ name, answer.get() });
+                    }
+                }
+                else
+                {
+                    // The bots as they are now, each with what it said last time it was asked
+                    std::map<std::string, Value> known;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        for (const auto& entry : statuses) known[entry.first] = entry.second;
+                    }
+                    for (const std::string& name : names())
+                    {
+                        fresh.push_back({ name, known.count(name) ? known[name] : Value(ProtocolCraft::Json::Object()) });
+                    }
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -426,6 +446,21 @@ int main()
                 }
                 for (int i = 0; i < 20 && !done && !stop; ++i)
                 {
+                    std::string name;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        name.swap(poll_request);
+                    }
+                    if (!name.empty())
+                    {
+                        const Value status = ask_status(name);
+                        std::lock_guard<std::mutex> lock(mutex);
+                        for (auto& entry : statuses)
+                        {
+                            if (entry.first == name) entry.second = status;
+                        }
+                        message = (status.size() > 0 ? "🔄 " + name + " polled" : "💤 " + name + " did not answer");
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
             }
@@ -522,7 +557,7 @@ int main()
                 }
             };
         const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  T 🗑️ drop items  w 🚶 follow player  W ⏹️ stop following  "
-            "l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
+            "p 🔄 poll bot  o " + std::string(auto_poll ? "⏸️ poll on request only" : "🔁 poll all") + "  l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
         int menu_rows = 0;
         for (size_t at = 0; at < menu.size();)
         {
@@ -616,7 +651,7 @@ int main()
                 { 'B', "Build castle (whole team)" }, { 'r', "Build roads to mines (whole team)" },
                 { 'F', "Create crop farm (near water)" }, { 'M', "Mine ores / open mine as needed" },
                 { 'H', "Build shelter" }, { 'V', "Plant castle farms" }, { 'P', "Stock castle animal pens" },
-                { 'T', "Drop items (keep armor and tools), wait 10 s" }, { 'w', "Follow a player" }, { 'W', "Stop following, back to work" }
+                { 'T', "Drop items (keep armor and tools), wait 10 s" }, { 'p', "Poll this bot now" }, { 'w', "Follow a player" }, { 'W', "Stop following, back to work" }
             };
             std::vector<std::string> labels;
             for (const auto& action : actions) labels.push_back(action.second);
@@ -655,6 +690,18 @@ int main()
         else if (key == 'A')
         {
             all_bots = !all_bots;
+        }
+        else if (key == 'p' && !bot.empty())
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            poll_request = bot;
+            message = "⏳ asking " + bot + "...";
+        }
+        else if (key == 'o')
+        {
+            auto_poll = !auto_poll;
+            std::lock_guard<std::mutex> lock(mutex);
+            message = auto_poll ? "🔁 polling every bot every 2 s" : "⏸️ polling only on request (p)";
         }
         else if (key == 'c')
         {

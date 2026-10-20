@@ -38,6 +38,8 @@
 <h1>Botcraft control</h1>
 <div class="top">
   <label><input type="checkbox" id="all-bots"> Send bot actions to all bots</label>
+  <label><input type="checkbox" id="auto-refresh" checked> Refresh every bot each second (off: only on request)</label>
+  <button type="button" id="refresh-all">Refresh all now</button>
   <form class="row" id="bot-action">
     <label for="action-target">Bot</label>
     <select id="action-target"><option value="">No bots connected</option></select>
@@ -209,8 +211,8 @@ function card(bot, tree) {
   const placeKind = $("select", {}, $("option", { value: "structure" }, "structure"), $("option", { value: "biome" }, "biome"));
   const place = $("input", { type: "text", placeholder: "e.g. village_plains" });
   place.setAttribute("list", "places"); place.setAttribute("aria-label", "Structure or biome id"); placeKind.setAttribute("aria-label", "Kind of place");
-  return $("section", { className: "bot" },
-    $("div", { className: "row" }, $("h2", {}, bot.name), $("span", { className: "badge state" }, bot.state),
+  return $("section", { className: "bot", id: "bot-" + bot.name },
+    $("div", { className: "row" }, $("h2", {}, bot.name), $("button", { onclick: () => pollBot(bot.name), title: "Ask this bot for its status now" }, "Refresh"), $("span", { className: "badge state" }, bot.state),
       bot.trade ? $("span", { className: "badge" }, bot.trade) : "",
       bot.times_stuck ? $("span", { className: "badge" }, "stuck ×" + bot.times_stuck) : "",
       bot.deaths ? $("span", { className: "badge" }, "died ×" + bot.deaths + " (last at " + bot.died_at.x + " " + bot.died_at.y + " " + bot.died_at.z + ")") : "",
@@ -252,10 +254,27 @@ let actionTargets = "";
 let editing = false;
 document.addEventListener("focusin", e => editing = e.target.matches("#bots input[type=text], #bots input[type=number], #bots select"));
 document.addEventListener("focusout", () => editing = false);
-async function refresh() {
-  if (editing) return;  // don't rebuild the cards under the user's cursor
+// Polling every bot each second, or (switched off, remembered in this browser) only when asked
+const autoRefresh = document.getElementById("auto-refresh");
+try { autoRefresh.checked = localStorage.getItem("autoRefresh") !== "off"; } catch (e) {}
+autoRefresh.onchange = () => { try { localStorage.setItem("autoRefresh", autoRefresh.checked ? "on" : "off"); } catch (e) {} };
+document.getElementById("refresh-all").onclick = () => refresh(true);
+let tree = [];
+async function pollBot(name) {
+  message.textContent = "asking " + name + "…";
+  try {
+    const r = await (await fetch("/call", { method: "POST", headers: { "X-Bot": "1" }, body: JSON.stringify({ name: "status", arguments: { bot: name } }) })).json();
+    const old = document.getElementById("bot-" + name);
+    if (!r.ok || typeof r.result !== "object") { message.textContent = name + " did not answer"; return; }
+    if (old) old.replaceWith(card({ ...r.result, name }, tree));
+    message.textContent = name + " refreshed at " + new Date().toLocaleTimeString();
+  } catch (e) { message.textContent = "server unreachable"; }
+}
+async function refresh(asked = false) {
+  if (editing || (!asked && !autoRefresh.checked)) return;  // don't rebuild the cards under the user's cursor
   try {
     const state = await (await fetch("/state")).json();
+    tree = state.tree;
     const targetNames = JSON.stringify(state.bots.map(b => b.name));
     if (targetNames !== actionTargets) {
       actionTargets = targetNames;
@@ -268,7 +287,7 @@ async function refresh() {
       ...(state.bots.length ? [] : [$("p", {}, "No bot connected.")]));
   } catch (e) { message.textContent = "server unreachable"; }
 }
-setInterval(refresh, 1000); refresh();
+setInterval(() => refresh(), 1000); refresh(true);
 // One view per bot, reloaded every 5 seconds (kept out of the cards, which are rebuilt every second)
 let views = [], shown = "";
 function refreshViews() {
