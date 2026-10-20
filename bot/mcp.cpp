@@ -438,6 +438,8 @@ public:
     std::atomic<bool> can_teleport = false;
     /// @brief Last time the bot had to unstick itself (behaviour thread only)
     std::chrono::steady_clock::time_point last_unstick = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    /// @brief Not before then is the bot checked again for being trapped in a pit (behaviour thread only)
+    std::chrono::steady_clock::time_point trap_check_at;
     /// @brief Not before this time will the bot look for a bed again tonight, and the beds that refused it (behaviour thread only)
     std::chrono::steady_clock::time_point sleep_retry_at = std::chrono::steady_clock::now();
     std::set<Botcraft::Position> beds_refused;
@@ -7203,6 +7205,162 @@ static Status SurfaceStep(McpBot& c)
     return !surface.empty() ? GoTo(c, surface[0] + Position(0, -1, 0), 0) : Status::Failure;
 }
 
+/// @brief In a pit: fewer than `limit` spots to walk to from where the bot stands (a step up of one block, drops
+/// of up to three), with walls all round rather than drops too deep to take. Open ground, a cave system, a mine
+/// with its stair, a house with its door give more; the top of a pillar is a drop, not a pit
+static bool InPit(BehaviourClient& c, const size_t limit = 48)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const auto open = [&](const Position& p)
+        {
+            const Blockstate* b = world->GetBlock(p);
+            return b != nullptr && (!b->IsSolid() || EndsWith(b->GetName(), "_door") || EndsWith(b->GetName(), "_fence_gate")) && !b->IsLava();
+        };
+    const auto solid = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsSolid(); };
+    const auto stand = [&](const Position& p) { return open(p) && open(p + Position(0, 1, 0)) && solid(p + Position(0, -1, 0)); };
+    const Position start = BlockPos(c.GetLocalPlayer()->GetPosition());
+    if (!stand(start))
+    {
+        return false;      // swimming, jumping, on a ladder: not now
+    }
+    std::set<Position> seen = { start };
+    std::vector<Position> todo = { start };
+    bool drop = false;
+    while (!todo.empty() && seen.size() < limit)
+    {
+        const Position p = todo.back();
+        todo.pop_back();
+        for (const Position& d : { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) })
+        {
+            std::optional<Position> next;
+            if (stand(p + d))
+            {
+                next = p + d;
+            }
+            else if (open(p + Position(0, 2, 0)) && stand(p + d + Position(0, 1, 0)))
+            {
+                next = p + d + Position(0, 1, 0);
+            }
+            else if (open(p + d) && open(p + d + Position(0, 1, 0)))
+            {
+                // Off the edge: down to the first floor, three blocks at most
+                for (int dy = -1; dy >= -3 && !next; --dy)
+                {
+                    if (stand(p + d + Position(0, dy, 0))) next = p + d + Position(0, dy, 0);
+                    else if (!open(p + d + Position(0, dy, 0))) break;
+                }
+                drop = drop || !next;
+            }
+            if (next && seen.insert(*next).second)
+            {
+                todo.push_back(*next);
+            }
+        }
+    }
+    return seen.size() < limit && !drop;
+}
+
+/// @brief A block the bot can build with: not one that falls (sand, gravel) nor anything it needs for itself
+static std::string BuildingBlock(BehaviourClient& c)
+{
+    for (const char* item : { "minecraft:cobblestone", "minecraft:dirt", "minecraft:cobbled_deepslate", "minecraft:andesite", "minecraft:diorite",
+        "minecraft:granite", "minecraft:stone", "minecraft:netherrack", "minecraft:tuff", "minecraft:deepslate" })
+    {
+        if (CountItem(c, item) > 0) return item;
+    }
+    return "";
+}
+
+/// @brief Out of a pit by a stair against its wall, block by block: place one ahead (against the wall, or the step
+/// before), step up onto it, again until there is ground to walk off on. With no blocks, a wall block is mined for
+/// one; with no room for a step, a pillar (jump, block underneath). Under a roof (a sealed pocket of a cave) the
+/// stair is dug instead
+static Status ClimbOutOfPit(McpBot& c)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const std::array<Position, 4> sides = { Position(1, 0, 0), Position(0, 0, 1), Position(-1, 0, 0), Position(0, 0, -1) };
+    if (world->GetSkyLight(BlockPos(c.GetLocalPlayer()->GetPosition()) + Position(0, 1, 0)) == 0)
+    {
+        c.SetNote("trapped under a roof: digging stairs up and out");
+        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+        const Position& way = sides[std::hash<std::string>()(c.GetNetworkManager()->GetMyName()) % 4];
+        TunnelToward(c, feet + Position(way.x * 12, 12, way.z * 12), 6, true);
+        return Status::Success;
+    }
+    const auto open = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && !b->IsSolid() && !b->IsFluid(); };
+    const auto solid = [&](const Position& p) { const Blockstate* b = world->GetBlock(p); return b != nullptr && b->IsSolid(); };
+    int last = static_cast<int>(std::hash<std::string>()(c.GetNetworkManager()->GetMyName()) % 4);
+    for (int step = 0; step < 40; ++step)
+    {
+        if (!InPit(c))
+        {
+            c.SetNote("out of the pit");
+            return Status::Success;
+        }
+        const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
+        std::string item = BuildingBlock(c);
+        if (item.empty())
+        {
+            // Mined from the wall, at the feet: what comes out is the block to build with
+            c.SetNote("trapped in a pit with no blocks: mining some from the wall");
+            bool dug = false;
+            for (const Position& d : sides)
+            {
+                const Blockstate* b = world->GetBlock(feet + d);
+                if (b == nullptr || !b->IsSolid() || b->GetHardness() < 0.0f || b->IsFluid() || EndsWith(b->GetName(), "sand") || EndsWith(b->GetName(), "gravel") ||
+                    EndsWith(b->GetName(), "chest") || EndsWith(b->GetName(), "barrel") || EndsWith(b->GetName(), "crafting_table") || EndsWith(b->GetName(), "furnace") ||
+                    c.IsPlanned(feet + d) || LavaNear(world, feet + d))
+                {
+                    continue;
+                }
+                if (SafeDig(c, feet + d, true, PlayerDiggingFace::Up, true) == Status::Success)
+                {
+                    Utilities::YieldForCondition([&]() { return !BuildingBlock(c).empty(); }, c, 3000);
+                    dug = true;
+                    break;
+                }
+            }
+            item = BuildingBlock(c);
+            if (!dug || item.empty())
+            {
+                c.SetNote("trapped in a pit: no blocks and none to mine");
+                return Status::Failure;
+            }
+        }
+        c.SetNote("trapped in a pit: building a stair up its wall (" + item.substr(10) + ")");
+        // The next step: straight on if it can, else turning; a spot with room over it, against a wall
+        bool climbed = false;
+        for (int turn = 0; turn < 4 && !climbed; ++turn)
+        {
+            const int k = (last + turn) % 4;
+            const Position step_at = feet + sides[k];
+            const Position across(std::abs(sides[k].z), 0, std::abs(sides[k].x));
+            if (!open(step_at) || !open(step_at + Position(0, 1, 0)) || !open(step_at + Position(0, 2, 0)) || !open(feet + Position(0, 2, 0)) ||
+                !(solid(step_at + across) || solid(step_at - across) || solid(step_at + sides[k]) || solid(step_at + Position(0, -1, 0))))
+            {
+                continue;
+            }
+            if (!solid(step_at) && PlaceCheckedBlock(c, item, step_at, std::nullopt, true, true, false) == Status::Failure)
+            {
+                continue;
+            }
+            if (GoTo(c, step_at + Position(0, 1, 0), 0) == Status::Success && BlockPos(c.GetLocalPlayer()->GetPosition()).y > feet.y)
+            {
+                Count(c, "built");
+                last = k;
+                climbed = true;
+            }
+        }
+        // No room for a step: straight up on a pillar
+        if (!climbed && !PillarUp(c, item))
+        {
+            c.SetNote("trapped in a pit: could not build a step");
+            return Status::Failure;
+        }
+    }
+    return Status::Failure;
+}
+
 static Status UnstickStep(McpBot& c)
 {
     c.unstick = false;
@@ -7226,11 +7384,7 @@ static Status UnstickStep(McpBot& c)
     }
     if (again && walls >= 3)
     {
-        c.SetNote("stuck in a hole: digging stairs up and out");
-        // Each bot its own way (they may all be in the same hole)
-        const int way = static_cast<int>(std::hash<std::string>()(c.GetNetworkManager()->GetMyName()) % 4);
-        const Position ways[] = { Position(1, 0, 0), Position(0, 0, 1), Position(-1, 0, 0), Position(0, 0, -1) };
-        TunnelToward(c, feet + Position(ways[way].x * 12, 12, ways[way].z * 12), 6, true);
+        ClimbOutOfPit(c);
         return Status::Success;
     }
     std::array<Position, 4> sides = { Position(1, 0, 0), Position(-1, 0, 0), Position(0, 0, 1), Position(0, 0, -1) };
@@ -7296,6 +7450,20 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("breathe")
                 .leaf("under water and short of air?", [](McpBot& c) { return Drowning(c) ? Status::Success : Status::Failure; })
                 .leaf("get out of the water", SurfaceStep)
+            .end()
+            .sequence("climb out")
+                .leaf("trapped in a pit? (checked every 10 seconds)", [](McpBot& c)
+                    {
+                        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+                        if (now < c.trap_check_at) return Status::Failure;
+                        c.trap_check_at = now + std::chrono::seconds(10);
+                        return InPit(c) ? Status::Success : Status::Failure;
+                    })
+                .leaf("build a stair up the wall", [](McpBot& c)
+                    {
+                        c.SetState("climbing out of a pit");
+                        return ClimbOutOfPit(c);
+                    })
             .end()
             .sequence("unstick")
                 .leaf("busy but not moving for 20 seconds?", [](McpBot& c)
