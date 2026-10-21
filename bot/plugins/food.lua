@@ -8,7 +8,8 @@
 --                  bread, one for three farmers), workers added where the next one brings most, until the team's
 --                  eating is covered (60% of the bots at most). FOOD_PLAN: the empire splits the bots with it
 --   the hungry     a bot at 6 food or less with nothing to eat walks to the bot carrying most food, which hands it
---                  some (once in 3 minutes for each bot, one at a time for each giver)
+--                  16 (once in 3 minutes for each bot, one at a time for each giver); a bot carrying more than 64
+--                  shares it out, down to 32, with the bots carrying little
 --   food {}        the plan: what the team eats, what each trade brings in, how many in each, the last feeds
 local EDIBLE = NN and NN.edible or {}
 local SURVEY_EVERY, LOOK_EVERY = 600, 60
@@ -130,32 +131,62 @@ local function plan(need, r, cap, most)
     return p, made
 end
 
--- The hungry with nothing to eat go to the bot carrying most food, which gives them some
+-- The hungry with nothing to eat go to the bot carrying most food, which gives them some. A bot carrying more
+-- than RICH shares it out (down to KEEP) with the bots carrying little, hungry first: each of them can feed others
+local GIVE, RICH, KEEP = 16, 64, 32
 local function feed(list, now)
-    local donors = {}
+    local donors, stock = {}, {}
     for _, st in ipairs(list) do
-        if edible_count(st) >= 8 and (tonumber(st.food) or 20) > 10 then donors[#donors + 1] = st end
+        stock[st.name] = edible_count(st)
+        if stock[st.name] >= 8 and (tonumber(st.food) or 20) > 10 then donors[#donors + 1] = st end
     end
-    table.sort(donors, function(a, b) return edible_count(a) > edible_count(b) end)
-    local sent = 0
+    table.sort(donors, function(a, b) return stock[a.name] > stock[b.name] end)
+    local rich = donors[1] ~= nil and stock[donors[1].name] > RICH
+    local takers = {}
     for _, st in ipairs(list) do
-        local hungry = (tonumber(st.food) or 20) <= 6 and edible_count(st) == 0
-        if hungry and sent < 10 and now - (state.fed_at[st.name] or 0) >= 180 then
+        local hungry = (tonumber(st.food) or 20) <= 6 and stock[st.name] == 0
+        if hungry or (rich and stock[st.name] < 8) then takers[#takers + 1] = { st = st, hungry = hungry } end
+    end
+    table.sort(takers, function(a, b) return (tonumber(a.st.food) or 20) < (tonumber(b.st.food) or 20) end)
+    -- Each giver gets a round of takers and walks it in one go (a giver still on its last round is left out)
+    local rounds, order, sent = {}, {}, 0
+    for _, t in ipairs(takers) do
+        local st = t.st
+        if sent >= 20 then break end
+        if now - (state.fed_at[st.name] or 0) >= 180 then
             for _, d in ipairs(donors) do
-                if d.name ~= st.name and not bot.busy("feed:" .. d.name) then
+                -- The rich give to anyone short; the others only to the hungry
+                local can = t.hungry or stock[d.name] - GIVE >= KEEP
+                if d.name ~= st.name and can and stock[d.name] >= GIVE and not bot.busy("feed:" .. d.name) then
                     state.fed_at[st.name] = now
+                    stock[d.name] = stock[d.name] - GIVE
                     sent = sent + 1
-                    local to, from, at = st.name, d.name, d.position
-                    bot.spawn("feed:" .. from, function()
-                        call("goto", { bot = to, x = math.floor(at.x), y = math.floor(at.y), z = math.floor(at.z), tolerance = 3 })
-                        local ok = call("give", { bot = from, to = to, item = "food", count = 6 }) ~= nil
-                        table.insert(state.feeds, 1, os.date("%H:%M ") .. from .. (ok and " fed " or " could not feed ") .. to)
-                        while #state.feeds > 20 do table.remove(state.feeds) end
-                    end)
+                    if not rounds[d.name] then rounds[d.name] = {}; order[#order + 1] = d end
+                    table.insert(rounds[d.name], t)
                     break
                 end
             end
         end
+    end
+    for _, d in ipairs(order) do
+        local from, at, round = d.name, d.position, rounds[d.name]
+        -- The hungry walk toward the giver meanwhile (it comes to them too); the others just wait for it
+        for _, t in ipairs(round) do
+            if t.hungry then
+                local to = t.st.name
+                bot.spawn("walk:" .. to, function()
+                    call("goto", { bot = to, x = math.floor(at.x), y = math.floor(at.y), z = math.floor(at.z), tolerance = 3 })
+                end)
+            end
+        end
+        bot.spawn("feed:" .. from, function()
+            for _, t in ipairs(round) do
+                local to = t.st.name
+                local ok = call("give", { bot = from, to = to, item = "food", count = GIVE }) ~= nil
+                table.insert(state.feeds, 1, os.date("%H:%M ") .. from .. (ok and " fed " or " could not feed ") .. to)
+                while #state.feeds > 20 do table.remove(state.feeds) end
+            end
+        end)
     end
 end
 

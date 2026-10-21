@@ -571,10 +571,16 @@ local function supply_crew(names)
     local roles = {}
     local plan = type(FOOD_PLAN) == "table" and FOOD_PLAN or nil
     if plan then
-        -- Food first, as the food plugin's plan says (the house builders eat too and make none): the crew's share of
-        -- food workers is the plan's share of all the bots, in the plan's proportions; the rest bring wood and stone
+        -- Food first, as the food plugin's plan says (the house builders eat too and make none): house builders are
+        -- drafted until the crew holds every food worker the plan wants, two more bringing wood and stone. Their
+        -- houses wait; as the hunger goes down the plan shrinks and they go back to them
         local total = (plan.fishers or 0) + (plan.butchers or 0) + (plan.farmers or 0) + (plan.bakers or 0)
-        local slots = math.min(crew - 2, math.ceil(crew * total / math.max(1, #names)))
+        local available = 0
+        for _, n in ipairs(candidates) do
+            if (state.village[n] or {}).done or available < #candidates - 1 then available = available + 1 end
+        end
+        crew = math.max(crew, math.min(available, total + 2))
+        local slots = math.min(crew - 2, total)
         for _, t in ipairs({ "fishers", "butchers", "farmers", "bakers" }) do
             for _ = 1, math.floor(slots * (plan[t] or 0) / math.max(1, total) + 0.5) do roles[#roles + 1] = t end
         end

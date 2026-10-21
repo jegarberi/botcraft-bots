@@ -35,10 +35,28 @@ local list = {
 }
 FOOD.feed(list, 1000)
 assert(calls[1].name == "goto" and calls[1].args.bot == "Hungry" and calls[1].args.x == 40, "the hungry one goes to the bot with most food")
-assert(calls[2].name == "give" and calls[2].args.bot == "Fisher" and calls[2].args.to == "Hungry", "which hands it food")
+assert(calls[2].name == "give" and calls[2].args.bot == "Fisher" and calls[2].args.to == "Hungry" and calls[2].args.count == 16, "which hands it food")
 calls = {}
 FOOD.feed(list, 1060)
 assert(#calls == 0, "not again within 3 minutes")
+-- A bot with 269 fish shares them, 16 a bot, with those carrying little (hungry first), keeping 32
+calls = {}
+FOOD.state.fed_at = {}
+list = { { name = "Rich", food = 17, inventory = { cooked_cod = 269 }, position = { x = 0, y = 64, z = 0 } } }
+for i = 1, 30 do list[#list + 1] = { name = "B" .. i, food = i == 30 and 2 or 15, inventory = {}, position = { x = i, y = 64, z = 0 } } end
+local gives, first = 0, nil
+local spawns = 0
+bot.busy = function() return false end
+FOOD.feed(list, 5000)
+for _, c in ipairs(calls) do
+    if c.name == "give" then
+        gives = gives + 1
+        first = first or c.args.to
+        assert(c.args.count == 16 and c.args.bot == "Rich", "16 from the rich one")
+    end
+end
+assert(first == "B30", "the hungry one first: " .. tostring(first))
+assert(gives == math.floor((269 - 32) / 16), "shared down to 32: " .. gives)
 
 -- The empire: the food trades get at least the plan, and bots move into them from the trades over their share
 local src = io.open(arg[2]):read("a")
@@ -67,7 +85,9 @@ local function crew()
     return c
 end
 local c = crew()
-assert(c.fishers == 1 and c.farmers == 4 and c.bakers == 1 and c.lumberjacks == 1 and c.miners == 1, "6 of 8 on food, as planned")
+-- 55 food workers wanted, 29 bots free to supply (the last builder keeps building): all drafted, 27 on food
+assert(c.fishers == 4 and c.farmers == 17 and c.bakers == 6 and c.lumberjacks == 1 and c.miners == 1,
+    "house builders drafted into food: " .. tostring(c.fishers) .. " " .. tostring(c.farmers) .. " " .. tostring(c.bakers))
 local first = {}
 for n, role in pairs(state.support) do first[n] = role end
 crew()
@@ -78,5 +98,12 @@ local traders = {}
 for n in pairs(state.support) do traders[#traders + 1] = n end
 state.groups = { miners = traders }
 g = split(traders)
-assert(#g.fishers == 1 and #g.farmers == 4, "the crew's food roles are its trades now: " .. #g.fishers .. " " .. #g.farmers)
+assert(#g.fishers == 4 and #g.farmers == 17, "the crew's food roles are its trades now: " .. #g.fishers .. " " .. #g.farmers)
+-- Little hunger, a small plan: the usual crew of 4 for 15 bots, the rest build their houses
+FOOD_PLAN = { fishers = 2, butchers = 0, farmers = 2, bakers = 1 }
+state.support = nil
+c = crew()
+local size = 0
+for _ in pairs(state.support) do size = size + 1 end
+assert(size == 8, "no draft when the plan is small: " .. size)
 print("food OK: fishing first with water and rods, butchers up to the animals, the hungry fed, the empire and the village supply crew follow the plan")

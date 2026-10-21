@@ -11858,12 +11858,14 @@ static bool CallFromLua(lua_State* L, const char* name)
         const Value args = lua_istable(L, 2) ? ToJson(L, 2) : Value(Json::Object());
         // A bot still covering its basics (shelter, wood, workbench, furnace, seeds, water, its field, bread) does no other work
         static const std::set<std::string> work = { "goto", "dig", "place_block", "interact_block", "use_item", "collect", "kill", "make",
-            "fish", "milk", "shear", "dye", "lure", "breed", "farm", "craft", "craft_item", "make_farm", "schematic", "travel", "locate", "store", "give" };
+            "fish", "milk", "shear", "dye", "lure", "breed", "farm", "craft", "craft_item", "make_farm", "schematic", "travel", "locate", "store" };
         if (work.count(name) > 0)
         {
             std::shared_ptr<McpBot> target;
             try { target = TargetBot(args); } catch (const std::exception&) {}
-            const std::string basics = target ? target->GetBasics() : "";
+            // Except a starving bot walking to the one that feeds it
+            const bool starving = target && name == std::string("goto") && target->GetLocalPlayer() && target->GetLocalPlayer()->GetFood() <= 6;
+            const std::string basics = target && !starving ? target->GetBasics() : "";
             if (!basics.empty())
             {
                 throw std::runtime_error(target->GetNetworkManager()->GetMyName() + " is covering its basics first (" + basics + "): other work waits");
