@@ -210,6 +210,35 @@ With no elected leader, the first bot becomes leader.
 
 ---
 
+### Food first (the food plugin)
+
+`bot/plugins/food.lua` keeps the team fed, and the split follows it:
+
+- **What the team eats:** every minute, the drop of every bot's food bar (eating fills it back up), as a running
+  average. To it are added a quarter to spare and, for bots below 10 food, what they lack, made up within 15 minutes.
+- **What there is around the town:** every 10 minutes, from the three bots nearest the town: animals (cows, pigs,
+  sheep, chickens, rabbits), sweet berry bushes, water, farmland and crops, and the fishing rods and string the
+  bots carry. With none seen, the biome decides (rivers, oceans, beaches, swamps: fish; plains, savannas, forests:
+  animals; taiga: berries).
+- **Food points a worker brings in a minute:** fishers 6 with open water (16 water blocks or more) and a rod or
+  string (2 without), as many as the water allows (one for 8 water blocks, 8 at most); butchers 8 with 4 animals or
+  more, one for 6 animals; farmers 2, plus up to 4 for berry bushes and up to 4 for fields; a baker for three
+  farmers, for the bread. Rough figures, not measured per trade.
+- **The plan:** workers one at a time where the next one brings most (each more worker on the same source brings 85%
+  of the one before), until the team's eating is covered, 60% of the bots at most. `FOOD_PLAN` holds it.
+- **The split:** the food trades get at least the plan's numbers, taken from the other trades, the largest first.
+  Bots keep their trades, except that when a food trade is short of the plan, up to 5 bots move to it at each
+  rebalance, from the other trades most over their share (never the leader, the berry picker, the explorer or a
+  supplier), the food trade the plan wants most first. Bots still building their house have no trade: they eat, so
+  the plan counts them, but it does not draft them.
+- **The hungry:** every minute, a bot at 6 food or less carrying nothing edible walks to the bot carrying most food
+  (8 items or more, itself above 10 food), which hands it 6. Once in 3 minutes for each hungry bot, one at a time
+  for each giver, 10 a minute at most.
+- `food {}` shows what the team eats, the plan, the rates, what was seen and the last feeds.
+
+The plan works in empire and village mode. With the empire stopped, the brain assigns the trades and the plan is
+not used; the hungry are still fed.
+
 ## 7. Buildings
 
 One building at a time, put up by one builder taken off its trade (never the leader, the berry picker or

@@ -190,6 +190,20 @@ local function targets(n)
     end
     table.sort(rest, function(a, b) return a[2] > b[2] end)       -- largest remainders get the bots left
     for i = 1, n - given do out[rest[i][1]] = out[rest[i][1]] + 1 end
+    -- Enough food for everyone first (the food plugin's plan): the food trades get at least that many, taken from
+    -- the other trades, the largest first
+    local food = type(FOOD_PLAN) == "table" and FOOD_PLAN or {}
+    for _, t in ipairs({ "fishers", "butchers", "farmers", "bakers" }) do
+        local short = math.max(0, math.min(n, tonumber(food[t]) or 0) - out[t])
+        while short > 0 do
+            local from, most = nil, 0
+            for _, u in ipairs(TRADES) do
+                if not food[u] and out[u] > most then from, most = u, out[u] end
+            end
+            if not from then break end
+            out[from], out[t], short = out[from] - 1, out[t] + 1, short - 1
+        end
+    end
     return out
 end
 
@@ -232,6 +246,32 @@ local function split(names)
     for t, list in pairs(state.groups or {}) do for _, n in ipairs(list) do was[n] = t end end
     local g, placed, pairs_ = {}, {}, {}
     for _, t in ipairs(TRADES) do g[t] = {} end
+    -- Bots keep their trades, but when a food trade is short of the food plan (the team eats more than it makes),
+    -- up to 5 bots move to it from the other trades with most over their share (never the leader, the berry picker,
+    -- the explorer, a supplier)
+    local food = type(FOOD_PLAN) == "table" and FOOD_PLAN or {}
+    local have = {}
+    for _, t in ipairs(TRADES) do have[t] = 0 end
+    for _, n in ipairs(names) do if was[n] then have[was[n]] = have[was[n]] + 1 end end
+    local moved = 0
+    local order = {}
+    for t in pairs(food) do if have[t] then order[#order + 1] = t end end
+    table.sort(order, function(a, b) return (tonumber(food[a]) or 0) > (tonumber(food[b]) or 0) end)   -- what the plan wants most first
+    for _, t in ipairs(order) do
+        while moved < 5 and have[t] < (want[t] or 0) do
+            local from, over = nil, 0
+            for _, u in ipairs(TRADES) do
+                if not food[u] and have[u] - (want[u] or 0) > over then from, over = u, have[u] - (want[u] or 0) end
+            end
+            if not from then break end
+            local who
+            for _, n in ipairs(names) do
+                if was[n] == from and not keep[n] and n ~= leader then who = n end
+            end
+            if not who then break end
+            was[who], have[from], have[t], moved = t, have[from] - 1, have[t] + 1, moved + 1
+        end
+    end
     for _, n in ipairs(names) do
         if was[n] then
             g[was[n]][#g[was[n]] + 1] = n; placed[n] = true
@@ -1169,6 +1209,7 @@ end
 
 -- One look a minute: the rules, in order, like an AI script's
 local function play(now)
+    EMPIRE_TOWN = state.town          -- where the food plugin looks for food around
     local names = {}
     for _, b in ipairs(call("bots", {}) or {}) do names[#names + 1] = b.name end
     if #names == 0 then return end
