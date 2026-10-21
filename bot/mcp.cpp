@@ -11447,35 +11447,52 @@ static bool CallFromLua(lua_State* L, const char* name)
 // while its tool calls run; false (and nothing done) while the last one of that key still runs
 static std::set<std::string> lua_spawned; // under lua_mutex
 // ponytail: detached threads, nothing waits for them at exit; a running one's tool call fails once stopping is set
-static int LuaSpawn(lua_State* L)
+/// @brief Run the function on top of L (popped) on a thread and coroutine of its own, under `key`: the Lua lock is
+/// let go while its tool calls run. Nothing if that key still runs. Called with the Lua lock held
+static bool StartSpawned(lua_State* L, const std::string& key)
 {
-    luaL_checkstring(L, 1);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-    if (lua_spawned.count(lua_tostring(L, 1)) > 0)
+    if (lua_spawned.count(key) > 0)
     {
-        lua_pushboolean(L, false);
-        return 1;
+        lua_pop(L, 1);
+        return false;
     }
+    lua_Debug where{};
+    lua_pushvalue(L, -1);
+    lua_getinfo(L, ">S", &where);
+    const std::string source = std::string(where.short_src) + ":" + std::to_string(where.linedefined);
     lua_State* co = lua_newthread(L);
     const int ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    lua_pushvalue(L, 2);
     lua_xmove(L, co, 1);
-    std::string key = lua_tostring(L, 1);
     lua_spawned.insert(key);
     lua_spawned_states.insert(co);
-    std::thread([co, ref, key = std::move(key)]()
+    std::thread([co, ref, key, source]()
         {
             std::lock_guard<std::recursive_mutex> lock(lua_mutex);
+            const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
             int results = 0;
             if (lua_resume(co, nullptr, 0, &results) != LUA_OK && lua_isstring(co, -1))
             {
-                LOG_ERROR("Lua spawn " << key << " failed: " << lua_tostring(co, -1));
+                LOG_ERROR("Lua " << key << " (" << source << ") failed: " << lua_tostring(co, -1));
+            }
+            const long long took = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
+            if (took >= 10)
+            {
+                LOG_WARNING("Lua " << key << " (" << source << ") took " << took << " s");
             }
             lua_spawned_states.erase(co);
             luaL_unref(lua, LUA_REGISTRYINDEX, ref);
             lua_spawned.erase(key);
         }).detach();
-    lua_pushboolean(L, true);
+    return true;
+}
+
+static int LuaSpawn(lua_State* L)
+{
+    luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    const std::string key = lua_tostring(L, 1);
+    lua_pushvalue(L, 2);
+    lua_pushboolean(L, StartSpawned(L, key));
     return 1;
 }
 
@@ -12265,13 +12282,11 @@ int main(int argc, char* argv[])
                             continue;
                         }
                         timer.next = std::chrono::steady_clock::now() + timer.interval;
+                        // Each on its own thread, the lock let go during its tool calls: run here one after the other,
+                        // one timer held the lock for minutes, every other plugin (and plugin tool call) waiting
                         std::lock_guard<std::recursive_mutex> lock(lua_mutex);
                         lua_rawgeti(lua, LUA_REGISTRYINDEX, timer.function);
-                        if (lua_pcall(lua, 0, 0, 0) != LUA_OK)
-                        {
-                            LOG_ERROR("Lua timer failed: " << lua_tostring(lua, -1));
-                            lua_pop(lua, 1);
-                        }
+                        StartSpawned(lua, "timer " + std::to_string(timer.function));
                     }
                     std::string line;
                     {
