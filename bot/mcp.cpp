@@ -12243,7 +12243,21 @@ int main(int argc, char* argv[])
                 rejoining[names[i]] = queued;
             }
         }
-        SpawnBot(names[0]);
+        // Server down or restarting: the first bot waits in the queue too instead of ending the program
+        try
+        {
+            SpawnBot(names[0]);
+        }
+        catch (const std::exception& e)
+        {
+            LOG_WARNING(e.what() << ": trying again in " << rejoin_delay.count() << " s");
+            std::lock_guard<std::mutex> lock(bots_mutex);
+            Rejoin queued;
+            queued.at = std::chrono::steady_clock::now() + rejoin_delay;
+            queued.restore["bot"] = names[0];
+            queued.restore["enabled"] = start_autopilot;
+            rejoining[names[0]] = queued;
+        }
 
         std::thread snapshots([&]()
             {
