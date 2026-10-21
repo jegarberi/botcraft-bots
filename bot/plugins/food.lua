@@ -21,7 +21,7 @@ local state = {
     last_food = {},                  -- bot -> its food bar at the last look
     survey = nil, surveyed_at = 0,
     rates = {}, plan = {}, need = 0,
-    fed_at = {}, feeds = {},
+    fed_at = {}, feeds = {}, rest_until = {},
 }
 local looked_at = 0
 
@@ -138,7 +138,8 @@ local function feed(list, now)
     local donors, stock = {}, {}
     for _, st in ipairs(list) do
         stock[st.name] = edible_count(st)
-        if stock[st.name] >= 8 and (tonumber(st.food) or 20) > 10 then donors[#donors + 1] = st end
+        -- (a giver whose last round all failed rests 10 minutes: stuck somewhere, it needs its time to get out)
+        if stock[st.name] >= 8 and (tonumber(st.food) or 20) > 10 and now >= (state.rest_until[st.name] or 0) then donors[#donors + 1] = st end
     end
     table.sort(donors, function(a, b) return stock[a.name] > stock[b.name] end)
     local rich = donors[1] ~= nil and stock[donors[1].name] > RICH
@@ -180,15 +181,18 @@ local function feed(list, now)
             end
         end
         bot.spawn("feed:" .. from, function()
+            local any = false
             for _, t in ipairs(round) do
                 local to, where = t.st.name, t.st.position
                 -- Where the taker was (the giver goes there when it is out of sight); fed only if something was given
                 local r = call("give", { bot = from, to = to, item = "food", count = GIVE,
                     x = math.floor(where.x), y = math.floor(where.y), z = math.floor(where.z) })
                 local ok = type(r) == "table" and (tonumber(r.given) or 0) > 0
+                any = any or ok
                 table.insert(state.feeds, 1, os.date("%H:%M ") .. from .. (ok and " fed " or " could not feed ") .. to)
                 while #state.feeds > 20 do table.remove(state.feeds) end
             end
+            if not any then state.rest_until[from] = os.time() + 600 end
         end)
     end
 end

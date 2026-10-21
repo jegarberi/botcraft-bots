@@ -7347,20 +7347,26 @@ static std::string BuildingBlock(BehaviourClient& c)
 /// before), step up onto it, again until there is ground to walk off on. With no blocks, a wall block is mined for
 /// one; with no room for a step, a pillar (jump, block underneath). Under a roof (a sealed pocket of a cave) the
 /// stair is dug instead
+/// @brief Under a roof: no sky light, or a ceiling within 3 blocks over the head (a glass roof lets the sky light
+/// in, and a stair built against the wall soon meets the ceiling)
+static bool Roofed(McpBot& c)
+{
+    const std::shared_ptr<World> world = c.GetWorld();
+    const Position head = BlockPos(c.GetLocalPlayer()->GetPosition()) + Position(0, 1, 0);
+    if (world->GetSkyLight(head) == 0) return true;
+    for (int dy = 1; dy <= 3; ++dy)
+    {
+        const Blockstate* b = world->GetBlock(head + Position(0, dy, 0));
+        if (b != nullptr && b->IsSolid()) return true;
+    }
+    return false;
+}
+
 static Status ClimbOutOfPit(McpBot& c)
 {
     const std::shared_ptr<World> world = c.GetWorld();
     const std::array<Position, 4> sides = { Position(1, 0, 0), Position(0, 0, 1), Position(-1, 0, 0), Position(0, 0, -1) };
-    // Under a roof: no sky light, or a ceiling within 3 blocks over the head (a glass roof lets the sky light in,
-    // and a stair built against the wall soon meets the ceiling)
-    const Position head = BlockPos(c.GetLocalPlayer()->GetPosition()) + Position(0, 1, 0);
-    bool roofed = world->GetSkyLight(head) == 0;
-    for (int dy = 1; dy <= 3 && !roofed; ++dy)
-    {
-        const Blockstate* b = world->GetBlock(head + Position(0, dy, 0));
-        roofed = b != nullptr && b->IsSolid();
-    }
-    if (roofed)
+    if (Roofed(c))
     {
         c.SetNote("trapped under a roof: digging stairs up and out");
         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
@@ -7460,7 +7466,7 @@ static Status UnstickStep(McpBot& c)
         c.last_unstick = std::chrono::steady_clock::now();
         return Status::Success;
     }
-    if (c.walled_in.exchange(false) && InPit(c, 64))
+    if (c.walled_in.exchange(false) && (Roofed(c) || InPit(c, 64)))
     {
         c.last_unstick = std::chrono::steady_clock::now();
         return ClimbOutOfPit(c);
