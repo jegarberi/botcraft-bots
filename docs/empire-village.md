@@ -231,6 +231,11 @@ With no elected leader, the first bot becomes leader.
   rebalance, from the other trades most over their share (never the leader, the berry picker, the explorer or a
   supplier), the food trade the plan wants most first. Bots still building their house have no trade: they eat, so
   the plan counts them, but it does not draft them.
+- **The village's supply crew** (4 for every 15 bots, the only bots with a trade while the houses go up) follows
+  the plan too: its share of food workers is the plan's share of all the bots, in the plan's proportions (fishers,
+  butchers, farmers, bakers), at least 2 left for wood and stone (lumberjacks and miners in turn). Each keeps its
+  role of the last minute while that role is still wanted. With no plan, the crew is farmers, bakers, lumberjacks
+  and miners in equal numbers, as before.
 - **The hungry:** every minute, a bot at 6 food or less carrying nothing edible walks to the bot carrying most food
   (8 items or more, itself above 10 food), which hands it 6. Once in 3 minutes for each hungry bot, one at a time
   for each giver, 10 a minute at most.

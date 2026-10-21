@@ -42,7 +42,7 @@ assert(#calls == 0, "not again within 3 minutes")
 
 -- The empire: the food trades get at least the plan, and bots move into them from the trades over their share
 local src = io.open(arg[2]):read("a")
-src = src:gsub("local function targets%(", "function targets("):gsub("local function split%(", "function split("):gsub("local state =", "state =")
+src = src:gsub("local function targets%(", "function targets("):gsub("local function split%(", "function split("):gsub("local function supply_crew%(", "function supply_crew("):gsub("local state =", "state =")
 load(src, "empire")()
 FOOD_PLAN = { fishers = 5, butchers = 0, farmers = 2, bakers = 1 }
 local want = targets(15)
@@ -54,4 +54,22 @@ state.groups = { miners = {} }
 for i = 1, 15 do names[i] = "Bot" .. i; table.insert(state.groups.miners, names[i]) end
 local g = split(names)
 assert(#g.fishers == 5, "5 miners moved to fishing: " .. #g.fishers)
-print("food OK: fishing first with water and rods, butchers up to the animals, the hungry fed, the empire follows the plan")
+-- Village mode: the house builders' supply crew follows the plan too (food first, the rest wood and stone),
+-- and keeps its roles from one minute to the next
+FOOD_PLAN = { fishers = 8, butchers = 0, farmers = 35, bakers = 12 }
+state.village = {}
+local villagers = {}
+for i = 1, 30 do villagers[i] = "V" .. i; state.village[villagers[i]] = { done = i <= 10 } end
+local function crew()
+    supply_crew(villagers)
+    local c = {}
+    for _, role in pairs(state.support) do c[role] = (c[role] or 0) + 1 end
+    return c
+end
+local c = crew()
+assert(c.fishers == 1 and c.farmers == 4 and c.bakers == 1 and c.lumberjacks == 1 and c.miners == 1, "6 of 8 on food, as planned")
+local first = {}
+for n, role in pairs(state.support) do first[n] = role end
+crew()
+for n, role in pairs(state.support) do assert(first[n] == role, n .. " kept its role") end
+print("food OK: fishing first with water and rods, butchers up to the animals, the hungry fed, the empire and the village supply crew follow the plan")

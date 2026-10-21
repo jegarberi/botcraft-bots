@@ -565,17 +565,46 @@ local function supply_crew(names)
         if not not ap ~= not not bp then return not not ap end
         return a > b
     end)
+    local crew = 4 * math.max(1, math.ceil(#names / 15))
     local roles = {}
-    for _ = 1, math.max(1, math.ceil(#names / 15)) do
-        for _, role in ipairs({ "farmers", "bakers", "lumberjacks", "miners" }) do roles[#roles + 1] = role end
+    local plan = type(FOOD_PLAN) == "table" and FOOD_PLAN or nil
+    if plan then
+        -- Food first, as the food plugin's plan says (the house builders eat too and make none): the crew's share of
+        -- food workers is the plan's share of all the bots, in the plan's proportions; the rest bring wood and stone
+        local total = (plan.fishers or 0) + (plan.butchers or 0) + (plan.farmers or 0) + (plan.bakers or 0)
+        local slots = math.min(crew - 2, math.ceil(crew * total / math.max(1, #names)))
+        for _, t in ipairs({ "fishers", "butchers", "farmers", "bakers" }) do
+            for _ = 1, math.floor(slots * (plan[t] or 0) / math.max(1, total) + 0.5) do roles[#roles + 1] = t end
+        end
+        while #roles > slots do table.remove(roles) end
+        while #roles < crew do roles[#roles + 1] = #roles % 2 == 0 and "lumberjacks" or "miners" end
+    else
+        for _ = 1, crew / 4 do
+            for _, role in ipairs({ "farmers", "bakers", "lumberjacks", "miners" }) do roles[#roles + 1] = role end
+        end
     end
-    local unfinished = 0
+    -- Who supplies (as before: finished homeowners first, then all but the last builder), each in its role of the
+    -- last minute while that role is still wanted: the plan moves a little each minute, the bots should not
+    local crew_members, unfinished = {}, 0
     for _, n in ipairs(candidates) do
-        if #roles == 0 then break end
+        if #crew_members == #roles then break end
         local done = (state.village[n] or {}).done
         if done or unfinished < pending - 1 then
-            support[n] = table.remove(roles, 1)
+            crew_members[#crew_members + 1] = n
             if not done then unfinished = unfinished + 1 end
+        end
+    end
+    local left = {}
+    for _, r in ipairs(roles) do left[r] = (left[r] or 0) + 1 end
+    for _, n in ipairs(crew_members) do
+        local before = state.support and state.support[n]
+        if before and (left[before] or 0) > 0 then support[n], left[before] = before, left[before] - 1 end
+    end
+    for _, n in ipairs(crew_members) do
+        if not support[n] then
+            for _, r in ipairs(roles) do
+                if (left[r] or 0) > 0 then support[n], left[r] = r, left[r] - 1; break end
+            end
         end
     end
     state.support = support
