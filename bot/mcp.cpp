@@ -495,6 +495,13 @@ public:
     /// @brief When each basic that failed gets another try, and when they were last looked at (behaviour thread only)
     std::map<std::string, std::chrono::steady_clock::time_point> basics_retry_at;
     std::chrono::steady_clock::time_point basics_checked_at{};
+    /// @brief Walks the pathfinder gave up on (planned again and again without moving); and, for the watchdog (stepper
+    /// thread only), where and since when it counts them: many in a small area is a bot walled in
+    std::atomic<int> path_give_ups = 0;
+    int give_ups_from = 0;
+    Botcraft::Vector3<double> give_ups_at;
+    std::chrono::steady_clock::time_point give_ups_since{};
+    std::atomic<bool> walled_in = false;
     bool basics_done = false;
     std::string GetBasics()
     {
@@ -7344,7 +7351,16 @@ static Status ClimbOutOfPit(McpBot& c)
 {
     const std::shared_ptr<World> world = c.GetWorld();
     const std::array<Position, 4> sides = { Position(1, 0, 0), Position(0, 0, 1), Position(-1, 0, 0), Position(0, 0, -1) };
-    if (world->GetSkyLight(BlockPos(c.GetLocalPlayer()->GetPosition()) + Position(0, 1, 0)) == 0)
+    // Under a roof: no sky light, or a ceiling within 3 blocks over the head (a glass roof lets the sky light in,
+    // and a stair built against the wall soon meets the ceiling)
+    const Position head = BlockPos(c.GetLocalPlayer()->GetPosition()) + Position(0, 1, 0);
+    bool roofed = world->GetSkyLight(head) == 0;
+    for (int dy = 1; dy <= 3 && !roofed; ++dy)
+    {
+        const Blockstate* b = world->GetBlock(head + Position(0, dy, 0));
+        roofed = b != nullptr && b->IsSolid();
+    }
+    if (roofed)
     {
         c.SetNote("trapped under a roof: digging stairs up and out");
         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
@@ -7419,8 +7435,11 @@ static Status ClimbOutOfPit(McpBot& c)
         // No room for a step: straight up on a pillar
         if (!climbed && !PillarUp(c, item))
         {
-            c.SetNote("trapped in a pit: could not build a step");
-            return Status::Failure;
+            // Nowhere to step or pillar: dig stairs up instead
+            c.SetNote("trapped in a pit: could not build a step, digging stairs up");
+            const Position& way = sides[last];
+            TunnelToward(c, feet + Position(way.x * 12, 12, way.z * 12), 6, true);
+            return Status::Success;
         }
     }
     return Status::Failure;
@@ -7440,6 +7459,11 @@ static Status UnstickStep(McpBot& c)
     {
         c.last_unstick = std::chrono::steady_clock::now();
         return Status::Success;
+    }
+    if (c.walled_in.exchange(false) && InPit(c, 64))
+    {
+        c.last_unstick = std::chrono::steady_clock::now();
+        return ClimbOutOfPit(c);
     }
     // Stuck again within two minutes, walled in on 3 sides or more: one block won't do, the bot is in a hole. Dig
     // stairs up and out, by hand if it has no pickaxe (slow, but it gets there). (Not "anything solid overhead": a
@@ -9164,6 +9188,25 @@ static void Watchdog(McpBot& bot)
         bot.unstick = true;
         ++bot.times_stuck;
         bot.moved_at = now;
+    }
+    // Walks given up one after another (4 in 3 minutes) while the bot stays within 8 blocks: walled in (a room with no
+    // way out, a cave pocket). Its walks fail at once, so it never stands still long enough for the check above
+    const int give_ups = bot.path_give_ups.load();
+    if (position.SqrDist(bot.give_ups_at) > 8.0 * 8.0 || now - bot.give_ups_since > std::chrono::minutes(3))
+    {
+        bot.give_ups_at = position;
+        bot.give_ups_since = now;
+        bot.give_ups_from = give_ups;
+    }
+    else if (give_ups - bot.give_ups_from >= 4)
+    {
+        LOG_INFO(bot.GetNetworkManager()->GetMyName() << ": " << give_ups - bot.give_ups_from << " walks given up within 8 blocks: walled in");
+        bot.unstick = true;
+        bot.walled_in = true;
+        ++bot.times_stuck;
+        bot.give_ups_at = position;
+        bot.give_ups_since = now;
+        bot.give_ups_from = give_ups;
     }
     // A call to fight: drop what it is doing now, not when its current action ends (minutes, for a walk)
     bool called = false;
@@ -12730,6 +12773,10 @@ int main(int argc, char* argv[])
             shared_world = std::make_shared<World>(true);
         }
         Botcraft::AssetsManager::getInstance();
+        Botcraft::on_pathfinding_gave_up = [](BehaviourClient& client)
+            {
+                if (McpBot* bot = dynamic_cast<McpBot*>(&client)) ++bot->path_give_ups;
+            };
         malloc_trim(0);
         spawn_delay_seconds = delay;
         // The bots of last time (bot/bots.txt), unless the command line says which

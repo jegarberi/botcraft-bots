@@ -1,3 +1,26 @@
+diff --git a/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp b/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
+index 0f6cf12..9a2de33 100644
+--- a/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
++++ b/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
+@@ -3,6 +3,7 @@
+ #include "botcraft/AI/Status.hpp"
+ #include "botcraft/Game/Vector3.hpp"
+ 
++#include <functional>
+ #include <memory>
+ 
+ namespace Botcraft
+@@ -38,6 +39,10 @@ namespace Botcraft
+     /// @param sprint If true, the bot will sprint/swim when possible
+     /// @param speed_factor Multiply vanilla speed if different from 1.0
+     /// @return Success if goal is reached, Failure otherwise
++    /// @brief (bot patch) Called when a walk gives up after planning again and again from the same block without
++    /// moving: the caller can tell a bot walled in from one that just met a bad path
++    extern std::function<void(BehaviourClient&)> on_pathfinding_gave_up;
++
+     Status GoTo(BehaviourClient& client, const Position& goal, const int dist_tolerance = 0, const int min_end_dist = 0, const int min_end_dist_xz = 0, const bool allow_jump = true, const bool sprint = true, const float speed_factor = 1.0f);
+ 
+     /// @brief Same thing as GoTo, but reads its parameters from the blackboard
 diff --git a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
 index 260a52e..234e5af 100644
 --- a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
@@ -144,7 +167,7 @@ index ab9bafc..817649e 100644
  #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
          std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..091f062 100644
+index 958521f..f0a35c4 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -289,11 +312,13 @@ index 958521f..091f062 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1205,41 @@ namespace Botcraft
+@@ -1129,7 +1205,43 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
 +    Status GoToSearch(BehaviourClient& client, const Vector3<double>& goal, const int dist_tolerance, const int min_end_dist, const int min_end_dist_xz, const bool allow_jump, const bool sprint, float speed_factor);
++
++    std::function<void(BehaviourClient&)> on_pathfinding_gave_up;
 +
 +    // (bot patch) A goal that could not be reached a moment ago, from about the same spot, is not searched for
 +    // again (a failed search visits its whole budget, 15000 nodes): the caller gets the failure after a short
@@ -331,7 +356,7 @@ index 958521f..091f062 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1300,8 @@ namespace Botcraft
+@@ -1190,6 +1302,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -340,7 +365,7 @@ index 958521f..091f062 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1212,6 +1324,22 @@ namespace Botcraft
+@@ -1212,6 +1326,23 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
  
@@ -351,6 +376,7 @@ index 958521f..091f062 100644
 +                if (++plans_in_place >= 5)
 +                {
 +                    LOG_WARNING("Pathfinding planned 5 times from " << current_position << " without moving (asked " << goal_block << "). Giving up.");
++                    if (on_pathfinding_gave_up) on_pathfinding_gave_up(client);
 +                    return Status::Failure;
 +                }
 +            }
@@ -363,7 +389,7 @@ index 958521f..091f062 100644
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
  
-@@ -1297,7 +1425,49 @@ namespace Botcraft
+@@ -1297,7 +1428,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal
