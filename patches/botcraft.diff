@@ -167,7 +167,7 @@ index ab9bafc..817649e 100644
  #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
          std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..ee4b41e 100644
+index 958521f..505517f 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -365,17 +365,26 @@ index 958521f..ee4b41e 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1211,6 +1325,32 @@ namespace Botcraft
+@@ -1211,6 +1325,41 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().y + 0.25)),
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
-+            // (bot patch) Standing on top of a short solid block (a bed, a slab, a chest: feet at Y.56 or Y.5): that
-+            // block is the floor, not where the bot is. Planned from inside it, no walk ever left a bed
++            // (bot patch) Standing on top of a solid block at least half a block high (a bed, a slab, a chest: feet at
++            // Y.56 or Y.5): that block is the floor, not where the bot is. Planned from inside it, no walk ever left
++            // a bed. A thin layer (snow) is walked in, its block stays the start
 +            {
 +                const Blockstate* under_feet = world->GetBlock(current_position);
-+                if (under_feet != nullptr && under_feet->IsSolid() && local_player->GetPosition().y > current_position.y + 0.01)
++                if (under_feet != nullptr && under_feet->IsSolid())
 +                {
-+                    current_position.y += 1;
++                    double top = current_position.y;
++                    for (const auto& collider : under_feet->GetCollidersAtPos(current_position))
++                    {
++                        top = std::max(top, collider.GetMax().y);
++                    }
++                    if (top - current_position.y >= 0.5 && local_player->GetPosition().y >= top - 0.01)
++                    {
++                        current_position.y += 1;
++                    }
 +                }
 +            }
 +
@@ -398,7 +407,7 @@ index 958521f..ee4b41e 100644
  
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
-@@ -1297,7 +1437,49 @@ namespace Botcraft
+@@ -1297,7 +1446,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal

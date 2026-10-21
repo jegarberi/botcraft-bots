@@ -8764,6 +8764,18 @@ static bool ClearTrap(McpBot& c)
         return true;
     }
     const Position feet = BlockPos(player->GetPosition());
+    // Standing on a bed in the daytime: the head is half a block higher than the pathfinder plans for, and a low
+    // ceiling holds the bot there (the berry picker stood on its bed all day). The bed is picked up, to place again
+    {
+        const Blockstate* b = world->GetBlock(feet);
+        if (b != nullptr && EndsWith(b->GetName(), "_bed") && IsNightTime(c) == Status::Failure)
+        {
+            c.SetNote("standing on a bed: picking it up");
+            Dig(c, feet, true);
+            Wait(c, 500);
+            return true;
+        }
+    }
     for (const Position& p : { feet, feet + Position(0, 1, 0) })
     {
         const Blockstate* b = world->GetBlock(p);
