@@ -691,7 +691,7 @@ local function clear_lot(b, o)
     end
 end
 
-local HOME_PLAN = 4
+local HOME_PLAN = 5
 local function home(o, owner)
     local H = 4
     local b, put = hut(o, 7, 7, H, "oak_planks", "oak_log", "air")
@@ -729,6 +729,12 @@ local function home(o, owner)
         { 3, 0, 4, "oak_stairs[facing=west]" }, { 4, 0, 4, "oak_fence" }, { 4, 1, 4, "oak_pressure_plate" }, { 5, 0, 4, "oak_stairs[facing=east]" },
         { 2, -1, 7, "cobblestone" }, { 2, 0, 7, "oak_sign|" .. owner .. "'s|house" },
         { 4, -1, 7, "cobblestone" }, { 4, 0, 7, "oak_fence" }, { 4, 1, 7, "torch" } })
+    -- The way out of the door: 3 blocks straight out, 3 high, on a cobblestone path. On a hillside the ground came
+    -- up to the door, and its owner was shut in with it while building
+    for z = 7, 9 do
+        b[#b + 1] = { o.x + 3, o.y - 1, o.z + z, "cobblestone" }
+        for y = 0, 2 do b[#b + 1] = { o.x + 3, o.y + y, o.z + z, "air" } end
+    end
     return farm_and_campfire(b, o, false)
 end
 
