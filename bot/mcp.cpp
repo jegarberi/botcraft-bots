@@ -34,6 +34,7 @@
 #include <regex>
 #include <sqlite3.h>
 #include <fcntl.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -12697,6 +12698,12 @@ int main(int argc, char* argv[])
     {
         files.rlim_cur = std::min<rlim_t>(files.rlim_max, 65536);
         setrlimit(RLIMIT_NOFILE, &files);
+    }
+    // BOTCRAFT_PROFILE=1: perf and gdb of this user may attach to the running program (the kernel's ptrace rule
+    // otherwise lets only a parent process do it, and profiling meant restarting all the bots under perf)
+    if (const char* profile = std::getenv("BOTCRAFT_PROFILE"); profile != nullptr && std::string(profile) == "1")
+    {
+        prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
     }
     // stdout is the MCP channel: keep a private copy of it and point fd 1 at stderr,
     // so nothing the library or a plugin prints can corrupt the protocol
