@@ -51,6 +51,18 @@ remembers seeing, and its decision tree with the branch it is on.
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
 
+## Basics first
+
+A bot that joins covers its basics before anything else, in this order: a place for the night (a bed, or a 3×3
+hut it builds of dirt), wood (8 planks' worth), a crafting table, a furnace (8 cobblestone), wheat seeds (from grass), water by soil (or a
+bucket to make some), its own wheat field, a composter by the field, then bread from its wheat. A bot deep
+underground digs up to the surface first. Meanwhile the plugins' work waits: their tool calls for it are refused,
+and its trade's network skips its turns. A step that fails is tried again 5 minutes later; meanwhile the bot gets
+on with other work. Once they are covered, it goes back to its field to harvest and bake whenever the wheat is
+ripe. At night, a bot with no bed closes itself into its hut. Each harvest plants at least one more crop than
+was cut (grass is broken for seeds when short), and saplings and seeds beyond 32 go in the composter, for bone meal.
+`status` shows `basics` while a bot is on them.
+
 ## Neural policies
 
 The full description (architecture, inputs, rewards and penalties, learning, evolution, sharing) is in

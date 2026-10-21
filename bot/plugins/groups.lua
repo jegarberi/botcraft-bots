@@ -102,6 +102,12 @@ bot.every(5, function()
                 next_turn[name] = now + TURN
                 local members, all = groups[trade], groups
                 bot.spawn(name, function()
+                    -- Still covering its basics (shelter, wood, workbench, furnace, seeds, water, its field, bread): no turn
+                    local okst, st = pcall(bot.call, "status", { bot = name })
+                    if okst and type(st) == "table" and st.basics then
+                        notes[name] = "basics first: " .. tostring(st.basics)
+                        return
+                    end
                     local ok, r = pcall(ROLES_ACT, name, trade, members, all)
                     notes[name] = ok and type(r) == "table" and (tostring(r.action or "skipped") .. ": " .. tostring(r.note)) or ("turn failed: " .. tostring(r))
                 end)
