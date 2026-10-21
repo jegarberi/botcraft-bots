@@ -6976,9 +6976,14 @@ static Status GiveTask(McpBot& c, const std::string& to, const Position& to_at, 
             return Status::Failure;
         }
     }
+    // A giver that can't walk still hands over to a taker that came close enough
     if (GoTo(c, BlockPos(*target), 2) == Status::Failure)
     {
-        return Status::Failure;
+        const std::optional<Vector3<double>> close = where();
+        if (!close || close->SqrDist(c.GetLocalPlayer()->GetPosition()) > 4.0 * 4.0)
+        {
+            return Status::Failure;
+        }
     }
     const std::optional<Vector3<double>> now = where();
     LookAt(c, now.value_or(*target));
@@ -7421,6 +7426,8 @@ static Status ClimbOutOfPit(McpBot& c)
     return Status::Failure;
 }
 
+static bool ClearTrap(McpBot& c);
+
 static Status UnstickStep(McpBot& c)
 {
     c.unstick = false;
@@ -7429,17 +7436,10 @@ static Status UnstickStep(McpBot& c)
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
     const Position feet = BlockPos(player->GetPosition());
     const Vector3<double> front = player->GetFrontVector();
-    // Standing in a block that holds whoever is in it (a berry bush also hurts at every step): out of the way first
-    for (const Position& p : { feet, feet + Position(0, 1, 0) })
+    if (ClearTrap(c))
     {
-        const Blockstate* b = world->GetBlock(p);
-        if (b != nullptr && (b->GetName() == "minecraft:sweet_berry_bush" || b->GetName() == "minecraft:cobweb" || b->GetName() == "minecraft:powder_snow"))
-        {
-            c.SetNote("stuck in " + b->GetName().substr(10) + ": breaking it");
-            Dig(c, p, true);
-            c.last_unstick = std::chrono::steady_clock::now();
-            return Status::Success;
-        }
+        c.last_unstick = std::chrono::steady_clock::now();
+        return Status::Success;
     }
     // Stuck again within two minutes, walled in on 3 sides or more: one block won't do, the bot is in a hole. Dig
     // stairs up and out, by hand if it has no pickaxe (slow, but it gets there). (Not "anything solid overhead": a
@@ -8060,6 +8060,10 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             .sequence("breathe")
                 .leaf("head under water?", [](McpBot& c) { return Drowning(c, 301) ? Status::Success : Status::Failure; })
                 .leaf("get out of the water", SurfaceStep)
+            .end()
+            .sequence("caught")
+                .leaf("standing in a berry bush, a cobweb or powder snow?", [](McpBot& c) { return ClearTrap(c) ? Status::Success : Status::Failure; })
+                .leaf("broken", [](McpBot&) { return Status::Success; })
             .end()
             .sequence("climb out")
                 .leaf("trapped in a pit? (checked every 10 seconds)", [](McpBot& c)
@@ -8709,6 +8713,28 @@ void McpBot::ResumeDefault()
     SetBehaviourTree(autopilot ? autopilot_tree : idle_tree);
 }
 
+/// @brief Standing in a block that holds whoever is in it (a berry bush, which also hurts at every step, a cobweb,
+/// powder snow): broken. The pathfinder won't start from inside one, it plans from a spot nearby the bot is not on,
+/// and every walk gives up at once. True if one was broken
+static bool ClearTrap(McpBot& c)
+{
+    const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
+    const std::shared_ptr<World> world = c.GetWorld();
+    if (!player || !world) return false;
+    const Position feet = BlockPos(player->GetPosition());
+    for (const Position& p : { feet, feet + Position(0, 1, 0) })
+    {
+        const Blockstate* b = world->GetBlock(p);
+        if (b != nullptr && (b->GetName() == "minecraft:sweet_berry_bush" || b->GetName() == "minecraft:cobweb" || b->GetName() == "minecraft:powder_snow"))
+        {
+            c.SetNote("caught in " + b->GetName().substr(10) + ": breaking it");
+            Dig(c, p, true);
+            return true;
+        }
+    }
+    return false;
+}
+
 /// @brief Run a task as a one-shot tree on the bot's behaviour thread and block until it is done,
 /// then hand the bot back to its default tree
 template<typename F>
@@ -8721,7 +8747,7 @@ static bool Run(McpBot& bot, const int timeout_s, const std::string& what, F&& f
     const auto result = std::make_shared<std::atomic<int>>(0);
     bot.SetBehaviourTree(Builder<McpBot>("tool: " + what)
         .sequence()
-            .leaf("set state", [what](McpBot& c) { c.SetState("tool: " + what); return Status::Success; })
+            .leaf("set state", [what](McpBot& c) { c.SetState("tool: " + what); ClearTrap(c); return Status::Success; })
             .selector()
                 .sequence()
                     .leaf(what, std::forward<F>(f))

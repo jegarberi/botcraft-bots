@@ -170,9 +170,9 @@ local function feed(list, now)
     end
     for _, d in ipairs(order) do
         local from, at, round = d.name, d.position, rounds[d.name]
-        -- The hungry walk toward the giver meanwhile (it comes to them too); the others just wait for it
+        -- The takers walk toward the giver meanwhile (it comes to them too: whichever gets there)
         for _, t in ipairs(round) do
-            if t.hungry then
+            do
                 local to = t.st.name
                 bot.spawn("walk:" .. to, function()
                     call("goto", { bot = to, x = math.floor(at.x), y = math.floor(at.y), z = math.floor(at.z), tolerance = 3 })
