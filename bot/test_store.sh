@@ -1,7 +1,7 @@
 #!/bin/bash
 # The stores, the same checks on each: SQLite in a temporary folder, a throwaway PostgreSQL cluster and a throwaway
 # Valkey (or Redis) server, both on spare ports, removed afterwards. A server whose binaries are missing is skipped.
-# Build first: cmake --build build --target test_store
+# Build first: cmake --build build --target test_store bot_import
 set -u
 cd "$(dirname "$0")"
 tmp=$(mktemp -d)
@@ -10,6 +10,8 @@ fail=0
 
 echo "== sqlite"
 BOTCRAFT_DB= BOTCRAFT_MEMORY_DIR="$tmp/memory" BOTCRAFT_SHARED_DB="$tmp/shared.sqlite" bin/test_store || fail=1
+# What that run left in SQLite is imported into each server store below (bot_import counts what arrived)
+import() { echo "-- import from sqlite"; BOTCRAFT_DB="$1" bin/bot_import "$tmp/memory" "$tmp/shared.sqlite" | tail -2 || fail=1; }
 
 pgbin=$(ls -d /usr/lib*/postgresql*/bin 2>/dev/null | sort -V | tail -1)
 if [ -x "${pgbin:-}/initdb" ]; then
@@ -18,7 +20,7 @@ if [ -x "${pgbin:-}/initdb" ]; then
     initdb -D "$tmp/pg" -U bots --auth=trust >/dev/null && \
         pg_ctl -D "$tmp/pg" -o "-p 55432 -k $tmp -c listen_addresses=''" -l "$tmp/pg.log" -w start >/dev/null && \
         createdb -h "$tmp" -p 55432 -U bots bots && \
-        BOTCRAFT_DB="postgresql://bots@/bots?host=$tmp&port=55432" bin/test_store || { fail=1; tail -5 "$tmp/pg.log"; }
+        BOTCRAFT_DB="postgresql://bots@/bots?host=$tmp&port=55432" bin/test_store && import "postgresql://bots@/bots?host=$tmp&port=55432" || { fail=1; tail -5 "$tmp/pg.log"; }
 else
     echo "== postgresql: initdb not found, skipped"
 fi
@@ -29,7 +31,7 @@ if [ -n "$server" ]; then
     "$server" --port 56379 --save '' --appendonly no --daemonize no >"$tmp/kv.log" 2>&1 &
     kv=$!
     until (exec 3<>/dev/tcp/127.0.0.1/56379) 2>/dev/null; do sleep 0.1; done
-    BOTCRAFT_DB="valkey://127.0.0.1:56379/0" bin/test_store || fail=1
+    BOTCRAFT_DB="valkey://127.0.0.1:56379/0" bin/test_store && import "valkey://127.0.0.1:56379/0" || fail=1
 else
     echo "== valkey: no valkey-server or redis-server, skipped"
 fi

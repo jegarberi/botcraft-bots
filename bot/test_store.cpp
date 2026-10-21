@@ -57,6 +57,18 @@ int main()
     const auto summary = m->Summary(40);
     assert(summary.size() == 2);
 
+    // Cleared: nothing left, and it takes new writes
+    {
+        std::unique_ptr<store::Memory> other = store::OpenMemory(bot + "x");
+        other->SetOwn("bed", Position(1, 2, 3));
+        other->ReplaceBox(dim, box, { { "oak_log", Position(1, 50, 1) } });
+        other->SaveDoing("state", "x");
+        other->Clear();
+        assert(!other->GetOwn("bed") && other->Summary(10).empty() && other->LoadDoing().empty());
+        assert(m->Nearest(dim, "_ore", Position(0, 40, 0), 10).size() == 2);
+        other->SetOwn("bed", Position(4, 5, 6));
+        assert(other->GetOwn("bed") == Position(4, 5, 6));
+    }
     // Begin/Commit group writes
     m->Begin();
     m->SaveDoing("make", "bread 4");

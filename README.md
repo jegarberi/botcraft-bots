@@ -63,9 +63,15 @@ chests and their contents, building sites, mines, trades) go to the store `BOTCR
 | `valkey://[:password@]host:6379[/db]` | Valkey (or Redis, also `redis://`): hashes and sets under `bc:` |
 
 `BOTCRAFT_DB_POOL` sets how many connections the program opens to a PostgreSQL or Valkey server (default 8). The
-two are built in when libpq and hiredis are installed at build time. Nothing is copied from one store to another:
-a new store starts empty: the bots learn their surroundings again within minutes and the groups plugin hands the
-trades out again from its own saved state, but building sites, mines and what the chests hold start over. `bot/test_store.sh` runs the same checks on all three, on a throwaway PostgreSQL and Valkey.
+two are built in when libpq and hiredis are installed at build time. A new store starts empty; to bring the SQLite
+data along, stop the program and run from `bot/bin`:
+
+    BOTCRAFT_DB=postgresql://user:password@host/db ./bot_import
+
+It copies every bot's memory (`../memory/*.sqlite`) and the shared database (`../botcraft.sqlite`; other paths as
+its two arguments), then counts what arrived and says so if anything differs. Places keep kind and position (seen
+becomes the import time); sites and mines are only copied into a store that has none, so a second run adds no
+copies. `bot/test_store.sh` runs the same checks on all three, on a throwaway PostgreSQL and Valkey.
 
 ## Basics first
 

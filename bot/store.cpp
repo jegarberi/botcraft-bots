@@ -269,6 +269,7 @@ namespace store
                 while (s.Next()) summary.push_back({ s.Text(0), s.Int(1) });
                 return summary;
             }
+            void Clear() override { Exec(db, "DELETE FROM places; DELETE FROM own; DELETE FROM doing;"); }
             void Begin() override { Exec(db, "BEGIN"); }
             void Commit() override { Exec(db, "COMMIT"); }
 
@@ -638,6 +639,8 @@ namespace store
                 PQfinish(c);
                 return nullptr;
             }
+            // Notices ("relation already exists, skipping") stay out of the log
+            PQsetNoticeProcessor(c, [](void*, const char*) {}, nullptr);
             // The tables, once per connection (cheap when they exist). The memories of all the bots share a table
             // set, keyed by bot; "seen_by" for SQLite's "by" (a reserved word here)
             static std::once_flag schema;
@@ -806,6 +809,14 @@ namespace store
             {
                 auto c = PgPool().Take();
                 if (c) Pq(c.get(), "DELETE FROM places WHERE bot = $1 AND x = $2 AND y = $3 AND z = $4", bot, p.x, p.y, p.z);
+            }
+            void Clear() override
+            {
+                auto c = PgPool().Take();
+                if (!c) return;
+                Pq(c.get(), "DELETE FROM places WHERE bot = $1", bot);
+                Pq(c.get(), "DELETE FROM own WHERE bot = $1", bot);
+                Pq(c.get(), "DELETE FROM doing WHERE bot = $1", bot);
             }
             std::vector<std::pair<std::string, int>> Summary(const int max) override
             {
@@ -1323,6 +1334,22 @@ namespace store
                 std::sort(summary.begin(), summary.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
                 if (summary.size() > static_cast<size_t>(std::max(0, max))) summary.resize(static_cast<size_t>(std::max(0, max)));
                 return summary;
+            }
+            void Clear() override
+            {
+                auto c = ValkeyPool().Take();
+                if (!c) return;
+                // Every key under the bot's prefix, found with SCAN (KEYS would stall the server)
+                std::string cursor = "0";
+                do
+                {
+                    const Reply r = Command(c.get(), { "SCAN", cursor, "MATCH", prefix + "*", "COUNT", "1000" });
+                    if (!r || r->type != REDIS_REPLY_ARRAY || r->elements < 2) break;
+                    cursor = std::string(r->element[0]->str, r->element[0]->len);
+                    std::vector<std::string> del = { "UNLINK" };
+                    for (size_t i = 0; i < r->element[1]->elements; ++i) del.emplace_back(r->element[1]->element[i]->str, r->element[1]->element[i]->len);
+                    if (del.size() > 1) Command(c.get(), del);
+                } while (cursor != "0");
             }
         private:
             void ForgetOldMobs(redisContext* c, const long long now)

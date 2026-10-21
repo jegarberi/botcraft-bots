@@ -50,6 +50,8 @@ namespace store
         virtual void Forget(const Position& p) = 0;
         /// @brief How many places of each kind, most numerous first
         virtual std::vector<std::pair<std::string, int>> Summary(int max) = 0;
+        /// @brief Everything the bot remembers goes (an import replaces it)
+        virtual void Clear() = 0;
         /// @brief Writes between Begin and Commit go together (SQLite: one transaction)
         virtual void Begin() {}
         virtual void Commit() {}
