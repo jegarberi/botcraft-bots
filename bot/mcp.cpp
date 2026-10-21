@@ -922,11 +922,19 @@ static std::vector<Position> FindBlocks(BehaviourClient& c, const std::function<
     const auto closer = [&](const Position& a, const Position& b) { return dist(a) < dist(b); };
 
     std::vector<Position> found;
+    // The world's read lock held over the scan (each block read then takes none), let go every 4096 reads
+    std::shared_lock<WritePreferringMutex> reading = world->ReadLock();
+    size_t reads = 0;
     const auto look = [&](const int x, const int y, const int z)
         {
             if (y < min_y || y > max_y)
             {
                 return;
+            }
+            if (++reads % 4096 == 0)
+            {
+                reading.unlock();
+                reading.lock();
             }
             const Position p(x, y, z);
             const Blockstate* block = world->GetBlock(p);
@@ -8271,10 +8279,10 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("spend the night in it", ShelterNightStep)
             .end()
             .sequence("basics")
-                .leaf("still lacks a shelter, wood, a workbench, a furnace, seeds, water, a wheat field or bread? (checked every 10 seconds)", [](McpBot& c)
+                .leaf("still lacks a shelter, wood, a workbench, a furnace, seeds, water, a wheat field or bread? (checked every minute: it scans 32 blocks around)", [](McpBot& c)
                     {
                         const auto now = std::chrono::steady_clock::now();
-                        if (now - c.basics_checked_at >= std::chrono::seconds(10))
+                        if (now - c.basics_checked_at >= std::chrono::seconds(60))
                         {
                             c.basics_checked_at = now;
                             NextBasic(c);

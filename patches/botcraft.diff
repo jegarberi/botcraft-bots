@@ -89,18 +89,19 @@ index 3f2f481..b102715 100644
  
      private:
 diff --git a/botcraft/include/botcraft/Game/World/World.hpp b/botcraft/include/botcraft/Game/World/World.hpp
-index ab9bafc..817649e 100644
+index ab9bafc..300ff17 100644
 --- a/botcraft/include/botcraft/Game/World/World.hpp
 +++ b/botcraft/include/botcraft/Game/World/World.hpp
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  #include <memory>
  #include <optional>
  #include <shared_mutex>
++#include <vector>
 +#include <thread>
  #include <unordered_map>
  
  #include "botcraft/Game/Enums.hpp"
-@@ -14,6 +15,47 @@
+@@ -14,6 +16,80 @@
  
  #include "protocolCraft/Handler.hpp"
  
@@ -116,8 +117,15 @@ index ab9bafc..817649e 100644
 +        void lock() { ++writers_waiting; mutex.lock(); --writers_waiting; }
 +        bool try_lock() { return mutex.try_lock(); }
 +        void unlock() { mutex.unlock(); }
++        // A thread already reading this world reads again without touching the lock: a search holds it once and
++        // its millions of block reads cost nothing (one shared counter bounced between 30 cores was 63% of the CPU)
 +        void lock_shared()
 +        {
++            if (int* depth = Held())
++            {
++                ++*depth;
++                return;
++            }
 +            if (reads_held == 0)
 +            {
 +                while (writers_waiting.load(std::memory_order_acquire) > 0)
@@ -127,37 +135,67 @@ index ab9bafc..817649e 100644
 +            }
 +            mutex.lock_shared();
 +            ++reads_held;
++            held.push_back({ this, 1 });
 +        }
 +        bool try_lock_shared()
 +        {
++            if (int* depth = Held())
++            {
++                ++*depth;
++                return true;
++            }
 +            if (!mutex.try_lock_shared()) return false;
 +            ++reads_held;
++            held.push_back({ this, 1 });
 +            return true;
 +        }
-+        void unlock_shared() { --reads_held; mutex.unlock_shared(); }
++        void unlock_shared()
++        {
++            for (size_t i = 0; i < held.size(); ++i)
++            {
++                if (held[i].first == this && --held[i].second == 0)
++                {
++                    held.erase(held.begin() + i);
++                    --reads_held;
++                    mutex.unlock_shared();
++                    return;
++                }
++            }
++        }
 +
 +    private:
++        int* Held()
++        {
++            for (auto& [m, depth] : held) if (m == this) return &depth;
++            return nullptr;
++        }
 +        std::shared_mutex mutex;
 +        std::atomic<int> writers_waiting = 0;
 +        // Read locks this thread holds, on any world (ponytail: counted across instances; a thread reading one
 +        // world then another skips the wait on the second, never deadlocks)
 +        static inline thread_local int reads_held = 0;
++        // Which of them, and how many times over
++        static inline thread_local std::vector<std::pair<const WritePreferringMutex*, int>> held;
 +    };
 +}
 +
  namespace std
  {
      template<>
-@@ -132,7 +174,7 @@ namespace Botcraft
+@@ -132,7 +208,11 @@ namespace Botcraft
          /// @return Basically an object you can use as a std::unordered_map<std::pair<int, int>, Chunk>*.
          /// **ALL WORLD UPDATE WILL BE BLOCKED WHILE THIS OBJECT IS ALIVE**, make sure it goes out of scope
          /// as soon as you don't need it.
 -        Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, std::shared_mutex, std::shared_lock> GetChunks() const;
 +        Utilities::ScopeLockedWrapper<const std::unordered_map<std::pair<int, int>, Chunk>, WritePreferringMutex, std::shared_lock> GetChunks() const;
++
++        /// @brief (bot patch) The world's read lock, for a search to hold over its block reads (they then cost no
++        /// locking). Let it go now and then in long searches: writers wait meanwhile
++        std::shared_lock<WritePreferringMutex> ReadLock() const { return std::shared_lock<WritePreferringMutex>(world_mutex); }
  
  #if PROTOCOL_VERSION < 358 /* < 1.13 */
          /// @brief Set biome of given block column. Does nothing if not loaded. Thread-safe
-@@ -377,7 +419,7 @@ namespace Botcraft
+@@ -377,7 +457,7 @@ namespace Botcraft
  
      private:
          std::unordered_map<std::pair<int, int>, Chunk> terrain;
@@ -167,7 +205,7 @@ index ab9bafc..817649e 100644
  #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
          std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..505517f 100644
+index 958521f..ae7ec3e 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -224,16 +262,28 @@ index 958521f..505517f 100644
              auto it = cost.find(new_pos);
              if (it == cost.end() || new_cost < it->second)
              {
-@@ -149,7 +170,7 @@ namespace Botcraft
+@@ -149,11 +170,19 @@ namespace Botcraft
  
          bool end_is_inside_solid = false;
          block = world->GetBlock(end);
 -        end_is_inside_solid = block != nullptr && block->IsSolid();
 +        end_is_inside_solid = block != nullptr && block->IsSolid() && !IsWoodenDoor(block);
  
++        // (bot patch) The world's read lock held over the search: its block reads then take no lock each. Let go
++        // every 256 nodes so chunk updates get in
++        std::shared_lock<WritePreferringMutex> reading = world->ReadLock();
          while (!nodes_to_explore.empty())
          {
-@@ -607,6 +628,17 @@ namespace Botcraft
+             count_visit++;
++            if (count_visit % 256 == 0)
++            {
++                reading.unlock();
++                reading.lock();
++            }
+             PathNode current_node = nodes_to_explore.top();
+             nodes_to_explore.pop();
+ 
+@@ -607,6 +636,17 @@ namespace Botcraft
  
                          if (block != nullptr && ((block->IsSolid() && !block->IsClimbable()) || (take_damage && block->IsHazardous())))
                          {
@@ -251,7 +301,7 @@ index 958521f..505517f 100644
                              break;
                          }
  
-@@ -960,6 +992,10 @@ namespace Botcraft
+@@ -960,6 +1000,10 @@ namespace Botcraft
          // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
          // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
          // climbable at the bottom, preventing fall damage
@@ -262,7 +312,7 @@ index 958521f..505517f 100644
          if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
              {
                  // Previous inputs have not been processed by physics thread yet
-@@ -984,8 +1020,48 @@ namespace Botcraft
+@@ -984,8 +1028,48 @@ namespace Botcraft
                      (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
                  local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
  
@@ -312,7 +362,7 @@ index 958521f..505517f 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1205,43 @@ namespace Botcraft
+@@ -1129,7 +1213,43 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
@@ -356,7 +406,7 @@ index 958521f..505517f 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1302,8 @@ namespace Botcraft
+@@ -1190,6 +1310,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -365,7 +415,7 @@ index 958521f..505517f 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1211,6 +1325,41 @@ namespace Botcraft
+@@ -1211,6 +1333,41 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().y + 0.25)),
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
@@ -407,7 +457,7 @@ index 958521f..505517f 100644
  
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
-@@ -1297,7 +1446,49 @@ namespace Botcraft
+@@ -1297,7 +1454,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal

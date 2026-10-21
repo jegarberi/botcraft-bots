@@ -40,4 +40,25 @@ int main()
     for (std::thread& t : readers) t.join();
     std::printf("world lock OK: worst write wait %lld us with 16 readers\n", worst);
     assert(worst < 50000);
+
+    // Reads inside a held read lock cost no locking: 28 threads, 2M reads each, a lock per read vs. one held lock
+    double ms[2] = {};
+    for (const bool held : { false, true })
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 28; ++i)
+        {
+            threads.emplace_back([&]()
+                {
+                    std::shared_lock<Botcraft::WritePreferringMutex> outer(m, std::defer_lock);
+                    if (held) outer.lock();
+                    for (int k = 0; k < 2000000; ++k) { std::shared_lock<Botcraft::WritePreferringMutex> read(m); }
+                });
+        }
+        for (std::thread& t : threads) t.join();
+        ms[held] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    }
+    std::printf("56M reads on 28 threads: %.0f ms with a lock each, %.0f ms inside a held lock\n", ms[0], ms[1]);
+    assert(ms[1] * 4 < ms[0]);
 }
