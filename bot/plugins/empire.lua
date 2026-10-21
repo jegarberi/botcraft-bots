@@ -273,10 +273,12 @@ local function split(names)
         end
     end
     for _, n in ipairs(names) do
-        if was[n] then
-            g[was[n]][#g[was[n]] + 1] = n; placed[n] = true
-        elseif keep[n] then
+        -- The roles given (the leader, the berry picker, the explorer, the village's supply crew, which follows the
+        -- food plan) before the trades they had: with them after, a crew's new food roles never reached a bot
+        if keep[n] then
             g[keep[n]][#g[keep[n]] + 1] = n; placed[n] = true
+        elseif was[n] then
+            g[was[n]][#g[was[n]] + 1] = n; placed[n] = true
         else
             for _, t in ipairs(TRADES) do
                 pairs_[#pairs_ + 1] = { n, t, fit(looks[n], t) + (was[n] == t and 1 or 0) }

@@ -72,4 +72,11 @@ local first = {}
 for n, role in pairs(state.support) do first[n] = role end
 crew()
 for n, role in pairs(state.support) do assert(first[n] == role, n .. " kept its role") end
+-- The crew's roles reach the bots even when they had a trade before
+-- (in village mode only the crew has trades: the house builders are not split)
+local traders = {}
+for n in pairs(state.support) do traders[#traders + 1] = n end
+state.groups = { miners = traders }
+g = split(traders)
+assert(#g.fishers == 1 and #g.farmers == 4, "the crew's food roles are its trades now: " .. #g.fishers .. " " .. #g.farmers)
 print("food OK: fishing first with water and rods, butchers up to the animals, the hungry fed, the empire and the village supply crew follow the plan")
