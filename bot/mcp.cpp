@@ -7429,6 +7429,18 @@ static Status UnstickStep(McpBot& c)
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
     const Position feet = BlockPos(player->GetPosition());
     const Vector3<double> front = player->GetFrontVector();
+    // Standing in a block that holds whoever is in it (a berry bush also hurts at every step): out of the way first
+    for (const Position& p : { feet, feet + Position(0, 1, 0) })
+    {
+        const Blockstate* b = world->GetBlock(p);
+        if (b != nullptr && (b->GetName() == "minecraft:sweet_berry_bush" || b->GetName() == "minecraft:cobweb" || b->GetName() == "minecraft:powder_snow"))
+        {
+            c.SetNote("stuck in " + b->GetName().substr(10) + ": breaking it");
+            Dig(c, p, true);
+            c.last_unstick = std::chrono::steady_clock::now();
+            return Status::Success;
+        }
+    }
     // Stuck again within two minutes, walled in on 3 sides or more: one block won't do, the bot is in a hole. Dig
     // stairs up and out, by hand if it has no pickaxe (slow, but it gets there). (Not "anything solid overhead": a
     // tree, a roof or a house left up in the air sent bots standing in the open digging stairs)
