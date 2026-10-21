@@ -35,7 +35,7 @@ local list = {
 }
 FOOD.feed(list, 1000)
 assert(calls[1].name == "goto" and calls[1].args.bot == "Hungry" and calls[1].args.x == 40, "the hungry one goes to the bot with most food")
-assert(calls[2].name == "give" and calls[2].args.bot == "Fisher" and calls[2].args.to == "Hungry" and calls[2].args.count == 16, "which hands it food")
+assert(calls[2].name == "give" and calls[2].args.bot == "Fisher" and calls[2].args.to == "Hungry" and calls[2].args.count == 16 and calls[2].args.x == 0, "which hands it food, told where it is")
 calls = {}
 FOOD.feed(list, 1060)
 assert(#calls == 0, "not again within 3 minutes")

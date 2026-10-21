@@ -181,8 +181,11 @@ local function feed(list, now)
         end
         bot.spawn("feed:" .. from, function()
             for _, t in ipairs(round) do
-                local to = t.st.name
-                local ok = call("give", { bot = from, to = to, item = "food", count = GIVE }) ~= nil
+                local to, where = t.st.name, t.st.position
+                -- Where the taker was (the giver goes there when it is out of sight); fed only if something was given
+                local r = call("give", { bot = from, to = to, item = "food", count = GIVE,
+                    x = math.floor(where.x), y = math.floor(where.y), z = math.floor(where.z) })
+                local ok = type(r) == "table" and (tonumber(r.given) or 0) > 0
                 table.insert(state.feeds, 1, os.date("%H:%M ") .. from .. (ok and " fed " or " could not feed ") .. to)
                 while #state.feeds > 20 do table.remove(state.feeds) end
             end
