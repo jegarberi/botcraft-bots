@@ -1064,6 +1064,33 @@ index 0e9ea35..290adb1 100644
                          should_update = true;
                      }
  
+diff --git a/botcraft/src/Utilities/Logger.cpp b/botcraft/src/Utilities/Logger.cpp
+index 2da7e3d..0770abe 100644
+--- a/botcraft/src/Utilities/Logger.cpp
++++ b/botcraft/src/Utilities/Logger.cpp
+@@ -1,3 +1,7 @@
++#ifdef __linux__
++#include <pthread.h>
++#include <unistd.h>
++#endif
+ #include "botcraft/Utilities/EnumUtilities.hpp"
+ #include "botcraft/Utilities/Logger.hpp"
+ 
+@@ -105,6 +109,14 @@ namespace Botcraft
+     {
+         std::lock_guard<std::mutex> lock(thread_mutex);
+         thread_names[std::this_thread::get_id()] = name;
++#ifdef __linux__
++        // The OS thread gets the name too (15 characters at most), so top -H and /proc show what each thread does
++        // (not the main thread: its name is the process's, which ps -C and pkill -x go by)
++        if (gettid() != getpid())
++        {
++            pthread_setname_np(pthread_self(), name.substr(0, 15).c_str());
++        }
++#endif
+ 
+         thread_local struct ThreadExiter
+         {
 diff --git a/protocolCraft/src/Utilities/Json.cpp b/protocolCraft/src/Utilities/Json.cpp
 index 8fa30ef..3165042 100644
 --- a/protocolCraft/src/Utilities/Json.cpp
