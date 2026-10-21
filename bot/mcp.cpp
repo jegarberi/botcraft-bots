@@ -1761,43 +1761,56 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 
 /// @brief Remembered places whose kind ends with this ("iron_ore" also finds deepslate_iron_ore, "_log" any log,
 /// "bed" any bed), nearest to the bot first
-static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, std::string kind, const int max_results)
+/// @brief The kinds in a places-like table that end in suffix (an id like iron_ore also matches deepslate_iron_ore).
+/// The tables hold tens of thousands of rows of a few dozen kinds: the kinds are listed once a minute (from the
+/// kind index) and matched here, so the lookups use the index instead of LIKE '%...' over every row (that scan,
+/// with ICU's LIKE, was 59% of the CPU). Called with the database's lock held
+static std::vector<std::string> KindsEnding(sqlite3* db, const char* table, const std::string& suffix)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    kind = kind.substr(kind.find(':') == std::string::npos ? 0 : kind.find(':') + 1);
-    const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
-    const std::string dimension = c.GetWorld()->GetCurrentDimension();
-    std::vector<std::pair<std::string, Position>> places;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
+    struct Listed { std::chrono::steady_clock::time_point at; std::vector<std::string> kinds; };
+    static std::mutex cache_mutex;
+    static std::map<std::pair<sqlite3*, std::string>, Listed> cache;
+    std::vector<std::string> all;
     {
-        return places;
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto found = cache.find({ db, table });
+        if (found != cache.end() && std::chrono::steady_clock::now() - found->second.at < std::chrono::minutes(1)) all = found->second.kinds;
     }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db,
-        "SELECT kind, x, y, z FROM places WHERE dimension = ?1 AND kind LIKE '%' || ?2"
-        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT ?6", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement, 2, kind.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
-    sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
-    sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
-    sqlite3_bind_int(statement, 6, max_results);
-    while (sqlite3_step(statement) == SQLITE_ROW)
+    if (all.empty())
     {
-        places.push_back({ reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)),
-            Position(sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_int(statement, 3)) });
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, (std::string("SELECT DISTINCT kind FROM ") + table).c_str(), -1, &statement, nullptr) == SQLITE_OK)
+        {
+            while (sqlite3_step(statement) == SQLITE_ROW) all.push_back(reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)));
+        }
+        sqlite3_finalize(statement);
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        cache[{ db, table }] = { std::chrono::steady_clock::now(), all };
     }
-    sqlite3_finalize(statement);
-    // And what the other bots reported (ReportFinds), the nearest of both
-    sqlite3* shared = SharedDb();
-    if (shared != nullptr && sqlite3_prepare_v2(shared,
-        "SELECT kind, x, y, z FROM finds WHERE dimension = ?1 AND kind LIKE '%' || ?2"
-        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT ?6", -1, &statement, nullptr) == SQLITE_OK)
+    std::vector<std::string> matching;
+    for (const std::string& k : all)
     {
+        if (k.size() >= suffix.size() && k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0) matching.push_back(k);
+    }
+    return matching;
+}
+
+/// @brief The nearest places of kinds ending in kind, from one places-like table (kind, x, y, z, dimension)
+static void RecallFrom(sqlite3* db, const char* table, const std::string& kind, const std::string& dimension, const Vector3<double>& me,
+    const int max_results, std::vector<std::pair<std::string, Position>>& places)
+{
+    const std::string sql = std::string("SELECT kind, x, y, z FROM ") + table + " WHERE kind = ?2 AND dimension = ?1"
+        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT ?6";
+    for (const std::string& exact : KindsEnding(db, table, kind))
+    {
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK)
+        {
+            sqlite3_finalize(statement);
+            continue;
+        }
         sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(statement, 2, kind.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement, 2, exact.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
         sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
         sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
@@ -1811,10 +1824,32 @@ static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, 
             }
         }
         sqlite3_finalize(statement);
-        const auto distance = [&](const Position& p) { return (p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) + (p.z - me.z) * (p.z - me.z); };
-        std::sort(places.begin(), places.end(), [&](const auto& a, const auto& b) { return distance(a.second) < distance(b.second); });
-        places.resize(std::min(places.size(), static_cast<size_t>(max_results)));
     }
+}
+
+static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, std::string kind, const int max_results)
+{
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    kind = kind.substr(kind.find(':') == std::string::npos ? 0 : kind.find(':') + 1);
+    const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
+    const std::string dimension = c.GetWorld()->GetCurrentDimension();
+    std::vector<std::pair<std::string, Position>> places;
+    {
+        std::lock_guard<std::mutex> lock(memory->mutex);
+        if (memory->db == nullptr)
+        {
+            return places;
+        }
+        RecallFrom(memory->db, "places", kind, dimension, me, max_results, places);
+    }
+    // And what the other bots reported (ReportFinds), the nearest of both
+    if (sqlite3* shared = SharedDb())
+    {
+        RecallFrom(shared, "finds", kind, dimension, me, max_results, places);
+    }
+    const auto distance = [&](const Position& p) { return (p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) + (p.z - me.z) * (p.z - me.z); };
+    std::sort(places.begin(), places.end(), [&](const auto& a, const auto& b) { return distance(a.second) < distance(b.second); });
+    places.resize(std::min(places.size(), static_cast<size_t>(max_results)));
     return places;
 }
 
