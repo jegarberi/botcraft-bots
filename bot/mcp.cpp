@@ -8721,6 +8721,18 @@ static bool ClearTrap(McpBot& c)
     const std::shared_ptr<LocalPlayer> player = c.GetLocalPlayer();
     const std::shared_ptr<World> world = c.GetWorld();
     if (!player || !world) return false;
+    // Still lying in bed in the daytime (woken by the server or not at all after a restart): a sleeper can't move
+    if (player->GetDataPose() == Pose::Sleeping && IsNightTime(c) == Status::Failure)
+    {
+        c.SetNote("still in bed in the daytime: getting up");
+        auto get_up = std::make_shared<ProtocolCraft::ServerboundPlayerCommandPacket>();
+        get_up->SetId_(player->GetEntityID());
+        get_up->SetAction(static_cast<int>(PlayerCommandAction::StopSleeping));
+        get_up->SetData(0);
+        c.GetNetworkManager()->Send(get_up);
+        Wait(c, 500);
+        return true;
+    }
     const Position feet = BlockPos(player->GetPosition());
     for (const Position& p : { feet, feet + Position(0, 1, 0) })
     {
