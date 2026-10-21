@@ -557,7 +557,7 @@ int main()
                 }
             };
         const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  T 🗑️ drop items  w 🚶 follow player  W ⏹️ stop following  "
-            "p 🔄 poll bot  o " + std::string(auto_poll ? "⏸️ poll on request only" : "🔁 poll all") + "  l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
+            "p 🔄 poll bot  o " + std::string(auto_poll ? "⏸️ poll on request only" : "🔁 poll all") + "  l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect (or to another server)  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
         int menu_rows = 0;
         for (size_t at = 0; at < menu.size();)
         {
@@ -765,9 +765,11 @@ int main()
         }
         else if (key == 'R')
         {
-            const std::string sure = ask("every bot stores everything, disconnects and joins again (a new build too)? (y/n) ");
+            const std::string address = ask("server for every bot, host:port (empty: the same one): ");
+            const std::string sure = ask("every bot stores everything, disconnects and joins " + (address.empty() ? std::string("again (a new build too)") : address) + "? (y/n) ");
             if (!sure.empty() && (sure[0] == 'y' || sure[0] == 'Y'))
             {
+                if (!address.empty()) { args["address"] = address; }
                 run("", "reconnect_all", args);
             }
         }
