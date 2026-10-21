@@ -51,6 +51,22 @@ remembers seeing, and its decision tree with the branch it is on.
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
 
+## Where the bots keep what they know
+
+Each bot's memory (places it saw, its own bed and field, what it was doing) and what the bots share (finds,
+chests and their contents, building sites, mines, trades) go to the store `BOTCRAFT_DB` names:
+
+| `BOTCRAFT_DB` | Store |
+|---|---|
+| unset (or `sqlite`) | SQLite files: `bot/memory/<bot>.sqlite` and `bot/botcraft.sqlite` (the default) |
+| `postgresql://user:password@host:5432/db` | PostgreSQL: one set of tables, the memories keyed by bot name (created on first use) |
+| `valkey://[:password@]host:6379[/db]` | Valkey (or Redis, also `redis://`): hashes and sets under `bc:` |
+
+`BOTCRAFT_DB_POOL` sets how many connections the program opens to a PostgreSQL or Valkey server (default 8). The
+two are built in when libpq and hiredis are installed at build time. Nothing is copied from one store to another:
+a new store starts empty: the bots learn their surroundings again within minutes and the groups plugin hands the
+trades out again from its own saved state, but building sites, mines and what the chests hold start over. `bot/test_store.sh` runs the same checks on all three, on a throwaway PostgreSQL and Valkey.
+
 ## Basics first
 
 A bot that joins covers its basics before anything else, in this order: a place for the night (a bed, or a 3×3

@@ -32,7 +32,6 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <regex>
-#include <sqlite3.h>
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -47,6 +46,7 @@
 #include "construction_policy.hpp"
 #include "spawn_names.hpp"
 #include "site_index.hpp"
+#include "store.hpp"
 #include "botcraft/AI/BehaviourTree.hpp"
 #include "botcraft/AI/Tasks/AllTasks.hpp"
 #include "botcraft/AI/TemplatedBehaviourClient.hpp"
@@ -997,7 +997,8 @@ static std::vector<Position> FindBlocks(BehaviourClient& c, const std::function<
 // database has its own lock (a scan writes for a while; one lock for all the bots had them queue for seconds)
 struct Memory
 {
-    sqlite3* db = nullptr;
+    // The bot's memory in the store BOTCRAFT_DB names (see store.hpp); nullptr if none is open
+    std::unique_ptr<store::Memory> db;
     std::mutex mutex;
 };
 static std::map<const BehaviourClient*, std::shared_ptr<Memory>> memories;
@@ -1025,195 +1026,73 @@ static void CloseMemory(const BehaviourClient& c)
         memories.erase(it);
     }
     std::lock_guard<std::mutex> lock(memory->mutex);
-    sqlite3_close(memory->db);
-    memory->db = nullptr;
+    memory->db.reset();
 }
 
 static void OpenMemory(const BehaviourClient& c, const std::string& bot_name)
 {
     CloseMemory(c);
-    sqlite3* memory_db = nullptr;
-    std::filesystem::create_directories("../memory");
-    if (sqlite3_open(("../memory/" + bot_name + ".sqlite").c_str(), &memory_db) != SQLITE_OK ||
-        sqlite3_exec(memory_db,
-            // Write-ahead log, never synced: the OS writes it out by itself. Synced at checkpoints, 100 bots writing every
-            // 10 seconds had the disk at 85% wait, every bot's lock held through a sync (status calls timed out). A crash
-            // of the program loses nothing; a power cut, the last seconds of what the bot saw (never a corrupt file)
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF;"
-            "CREATE TABLE IF NOT EXISTS places ("
-            "  kind TEXT NOT NULL, dimension TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL,"
-            "  seen INTEGER NOT NULL, PRIMARY KEY (dimension, x, y, z));"
-            "CREATE INDEX IF NOT EXISTS places_kind ON places (kind);"
-            // Single places that are the bot's own (its bed): not rewritten by the scans
-            "CREATE TABLE IF NOT EXISTS own (what TEXT PRIMARY KEY, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);"
-            // What the bot is doing (see SaveDoing): taken up again when it joins next time
-            "CREATE TABLE IF NOT EXISTS doing (key TEXT PRIMARY KEY, value TEXT NOT NULL);", nullptr, nullptr, nullptr) != SQLITE_OK)
+    const auto memory = std::make_shared<Memory>();
+    memory->db = store::OpenMemory(bot_name);
+    if (!memory->db)
     {
-        LOG_ERROR("Memory: can't open the database of " << bot_name << ": " << (memory_db ? sqlite3_errmsg(memory_db) : "out of memory"));
-        sqlite3_close(memory_db);
+        LOG_ERROR("Memory: can't open the memory of " << bot_name << " (" << store::Backend() << "): " << store::Error());
         return;
     }
-    const auto memory = std::make_shared<Memory>();
-    memory->db = memory_db;
     std::lock_guard<std::mutex> lock(memories_mutex);
     memories[&c] = memory;
+}
+
+/// @brief Run f(store) on the bot's memory under its lock; nothing (and def) if it has none
+template<class F, class R = std::invoke_result_t<F, store::Memory&>>
+static R WithMemory(const BehaviourClient& c, F&& f, R def = R())
+{
+    const std::shared_ptr<Memory> memory = MemoryOf(c);
+    std::lock_guard<std::mutex> lock(memory->mutex);
+    if (!memory->db)
+    {
+        return def;
+    }
+    return f(*memory->db);
 }
 
 /// @brief One line of what the bot is doing, in its memory; an empty value forgets it
 static void SaveDoing(const BehaviourClient& c, const std::string& key, const std::string& value)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
-    {
-        return;
-    }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db, value.empty() ? "DELETE FROM doing WHERE key = ?1" : "INSERT OR REPLACE INTO doing (key, value) VALUES (?1, ?2)", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, key.c_str(), -1, SQLITE_TRANSIENT);
-    if (!value.empty())
-    {
-        sqlite3_bind_text(statement, 2, value.c_str(), -1, SQLITE_TRANSIENT);
-    }
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    WithMemory(c, [&](store::Memory& m) { m.SaveDoing(key, value); return 0; });
 }
 
 static std::map<std::string, std::string> LoadDoing(const BehaviourClient& c)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::map<std::string, std::string> doing;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    sqlite3_stmt* statement = nullptr;
-    if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "SELECT key, value FROM doing", -1, &statement, nullptr) != SQLITE_OK)
-    {
-        return doing;
-    }
-    while (sqlite3_step(statement) == SQLITE_ROW)
-    {
-        doing[reinterpret_cast<const char*>(sqlite3_column_text(statement, 0))] = reinterpret_cast<const char*>(sqlite3_column_text(statement, 1));
-    }
-    sqlite3_finalize(statement);
-    return doing;
+    return WithMemory(c, [](store::Memory& m) { return m.LoadDoing(); });
 }
 
-// One database shared by all the bots, botcraft.sqlite: the construction sites, the chests, the mines.
-// Each thread has its own connection: with every bot in one process, one connection made all of them queue
-// (status calls waited seconds) and mixed one thread's statements into another's transaction. In WAL mode the
-// connections read side by side; the busy timeout makes writers wait for each other
-static sqlite3* OpenShared()
+/// @brief What all the bots share (botcraft.sqlite, or the store BOTCRAFT_DB names): the construction sites, the
+/// chests and what is in them, the mines, the roles, the finds. nullptr if it can't be opened
+static store::Shared* SharedDb()
 {
-    sqlite3* db = nullptr;
-    if (sqlite3_open("../botcraft.sqlite", &db) != SQLITE_OK ||
-        sqlite3_busy_timeout(db, 5000) != SQLITE_OK ||
-        sqlite3_exec(db,
-            // A small page cache per connection: there is one per thread
-            // Never synced, like the bots' memories (see OpenMemory): a power cut can lose the last seconds, nothing else
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF; PRAGMA cache_size = -512;"
-            // The log back to 64 MB at most after each checkpoint (it had grown to 1.6 GB)
-            "PRAGMA journal_size_limit = 67108864;"
-                    "CREATE TABLE IF NOT EXISTS sites (x1 INTEGER NOT NULL, y1 INTEGER NOT NULL, z1 INTEGER NOT NULL,"
-                    "  x2 INTEGER NOT NULL, y2 INTEGER NOT NULL, z2 INTEGER NOT NULL, name TEXT NOT NULL);"
-                    "CREATE TABLE IF NOT EXISTS chests (item TEXT PRIMARY KEY, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL);"
-                    "CREATE TABLE IF NOT EXISTS mines (x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, resources TEXT NOT NULL);"
-                    // Jobs the main program gives (feeders): given again after a restart
-                    "CREATE TABLE IF NOT EXISTS roles (bot TEXT NOT NULL, role TEXT NOT NULL, PRIMARY KEY (bot, role));"
-                    // What each bot reports to the others (see ReportFinds): ores, logs, crops, berry bushes and
-                    // farm animals, one place per kind and 16-block cell. Recall reads it with the bot's own memory
-                    "CREATE TABLE IF NOT EXISTS finds (kind TEXT NOT NULL, dimension TEXT NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL,"
-                    "  cz INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
-                    "  PRIMARY KEY (kind, dimension, cx, cy, cz));"
-                    "CREATE INDEX IF NOT EXISTS finds_kind ON finds (kind);"
-                    // What is in each chest, as the last bot that opened it saw it (see RememberChest): every bot
-                    // reads it. A row with item '' marks the chest itself, empty or not
-                    "CREATE TABLE IF NOT EXISTS chest_contents (dimension TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,"
-                    "  z INTEGER NOT NULL, item TEXT NOT NULL, count INTEGER NOT NULL, seen INTEGER NOT NULL, by TEXT NOT NULL,"
-                    "  PRIMARY KEY (dimension, x, y, z, item));"
-                    "CREATE INDEX IF NOT EXISTS chest_contents_item ON chest_contents (item);",
-            nullptr, nullptr, nullptr) != SQLITE_OK)
-    {
-        LOG_ERROR("Can't open the shared database: " << (db ? sqlite3_errmsg(db) : "out of memory"));
-        sqlite3_close(db);
-        db = nullptr;
-    }
-    return db;
-}
-
-static sqlite3* SharedDb()
-{
-    struct Connection
-    {
-        sqlite3* db = OpenShared();
-        ~Connection() { sqlite3_close(db); }
-    };
-    thread_local Connection connection;
-    return connection.db;
-}
-
-/// @brief End a write transaction on the shared database: rolled back if the commit fails. A transaction left
-/// open on a thread's connection would hold the write lock for good, every other writer waiting on it
-static void CommitShared(sqlite3* db)
-{
-    if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
-    {
-        sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
-    }
+    return store::SharedStore();
 }
 
 /// @brief Remember a place that belongs to the bot ("bed")
 static void SetOwn(const BehaviourClient& c, const std::string& what, const Position& p)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    sqlite3_stmt* statement = nullptr;
-    if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "INSERT OR REPLACE INTO own (what, x, y, z) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr) != SQLITE_OK)
-    {
-        return;
-    }
-    sqlite3_bind_text(statement, 1, what.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 2, p.x);
-    sqlite3_bind_int(statement, 3, p.y);
-    sqlite3_bind_int(statement, 4, p.z);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    WithMemory(c, [&](store::Memory& m) { m.SetOwn(what, p); return 0; });
 }
 
 static void ForgetOwn(const BehaviourClient& c, const std::string& what)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    sqlite3_stmt* statement = nullptr;
-    if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "DELETE FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
-    {
-        return;
-    }
-    sqlite3_bind_text(statement, 1, what.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    WithMemory(c, [&](store::Memory& m) { m.ForgetOwn(what); return 0; });
 }
 
 static bool GetOwn(const BehaviourClient& c, const std::string& what, Position& p)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    sqlite3_stmt* statement = nullptr;
-    if (memory_db == nullptr || sqlite3_prepare_v2(memory_db, "SELECT x, y, z FROM own WHERE what = ?1", -1, &statement, nullptr) != SQLITE_OK)
+    const std::optional<Position> own = WithMemory(c, [&](store::Memory& m) { return m.GetOwn(what); });
+    if (own)
     {
-        return false;
+        p = *own;
     }
-    sqlite3_bind_text(statement, 1, what.c_str(), -1, SQLITE_TRANSIENT);
-    const bool found = sqlite3_step(statement) == SQLITE_ROW;
-    if (found)
-    {
-        p = Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2));
-    }
-    sqlite3_finalize(statement);
-    return found;
+    return own.has_value();
 }
 
 /// @brief Blocks worth remembering: resources and things the bot can use
@@ -1238,23 +1117,8 @@ static bool MatchesAny(const std::string& block_name, const std::vector<std::str
 /// @brief Add one place to the memory (told by a teammate)
 static void RememberPlace(BehaviourClient& c, const std::string& kind, const Position& p)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
-    {
-        return;
-    }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db, "INSERT OR REPLACE INTO places (kind, dimension, x, y, z, seen) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 3, p.x);
-    sqlite3_bind_int(statement, 4, p.y);
-    sqlite3_bind_int(statement, 5, p.z);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    WithMemory(c, [&](store::Memory& m) { m.RememberPlace(dimension, kind, p); return 0; });
 }
 
 /// @brief Leader: put two members on a find, the one who saw it and the next in turn, and tell them in the chat
@@ -1462,7 +1326,6 @@ static void ReportFinds(const std::string& by, const std::string& dimension, con
 static void Remember(McpBot& c)
 {
     const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
     constexpr int radius = 24;
     const std::shared_ptr<World> world = c.GetWorld();
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
@@ -1538,23 +1401,7 @@ static void Remember(McpBot& c)
                 continue;
             }
         }
-        bool known = false;
-        {
-            std::lock_guard<std::mutex> lock(memory->mutex);
-            sqlite3_stmt* statement = nullptr;
-            if (memory_db != nullptr && sqlite3_prepare_v2(memory_db,
-                "SELECT 1 FROM places WHERE dimension = ?1 AND kind = ?2 AND x BETWEEN ?3 AND ?3 + 15 AND y BETWEEN ?4 AND ?4 + 15 AND z BETWEEN ?5 AND ?5 + 15 LIMIT 1",
-                -1, &statement, nullptr) == SQLITE_OK)
-            {
-                sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(statement, 2, kind.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_int(statement, 3, cell_x * 16);
-                sqlite3_bind_int(statement, 4, cell_y * 16);
-                sqlite3_bind_int(statement, 5, cell_z * 16);
-                known = sqlite3_step(statement) == SQLITE_ROW;
-            }
-            sqlite3_finalize(statement);
-        }
+        const bool known = WithMemory(c, [&](store::Memory& m) { return m.KnownInCell(dimension, kind, Position(cell_x * 16, cell_y * 16, cell_z * 16)); });
         if (!known)
         {
             std::lock_guard<std::mutex> lock(c.team_mutex);
@@ -1584,26 +1431,10 @@ static void Remember(McpBot& c)
         }
     }
 
-    // Its own memory's lock, for its own transaction only: the shared database's part below goes without it (held
-    // through it, every status and recall of the bot waited on the other bots' writes)
-    std::unique_lock<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
-    {
-        return;
-    }
-    sqlite3_exec(memory_db, "BEGIN", nullptr, nullptr, nullptr);
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db, "DELETE FROM places WHERE dimension = ?1 AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 2, center.x - radius);
-    sqlite3_bind_int(statement, 3, center.x + radius);
-    sqlite3_bind_int(statement, 4, center.y - radius);
-    sqlite3_bind_int(statement, 5, center.y + radius);
-    sqlite3_bind_int(statement, 6, center.z - radius);
-    sqlite3_bind_int(statement, 7, center.z + radius);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
-    sqlite3_prepare_v2(memory_db, "INSERT OR REPLACE INTO places (kind, dimension, x, y, z, seen) VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s', 'now'))", -1, &statement, nullptr);
+    // What the scan saw replaces what the bot remembered in the box (its own memory's lock for that only: the shared
+    // store's part below goes without it, or every status and recall of the bot waited on the other bots' writes)
+    std::vector<store::Place> places;
+    places.reserve(found.size());
     for (const Position& p : found)
     {
         const Blockstate* block = world->GetBlock(p);
@@ -1618,13 +1449,7 @@ static void Remember(McpBot& c)
         {
             continue;
         }
-        sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 3, p.x);
-        sqlite3_bind_int(statement, 4, p.y);
-        sqlite3_bind_int(statement, 5, p.z);
-        sqlite3_step(statement);
-        sqlite3_reset(statement);
+        places.push_back({ kind, p });
     }
     // Farm animals too (not penned ones: those are kept), for hunting and food: where they were last seen
     std::vector<Ent> seen_alive = monsters;
@@ -1637,21 +1462,11 @@ static void Remember(McpBot& c)
     }
     for (const Ent& m : seen_alive)
     {
-        const Position p = BlockPos(m.pos);
-        const std::string kind = "mob:" + m.name;
-        sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 3, p.x);
-        sqlite3_bind_int(statement, 4, p.y);
-        sqlite3_bind_int(statement, 5, p.z);
-        sqlite3_step(statement);
-        sqlite3_reset(statement);
+        places.push_back({ "mob:" + m.name, BlockPos(m.pos) });
     }
-    sqlite3_finalize(statement);
-    // Mobs wander off and despawn: a sighting older than half an hour is forgotten
-    sqlite3_exec(memory_db, "DELETE FROM places WHERE kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800", nullptr, nullptr, nullptr);
-    sqlite3_exec(memory_db, "COMMIT", nullptr, nullptr, nullptr);
-    lock.unlock();
+    const store::Box box{ Position(center.x - radius, center.y - radius, center.z - radius), Position(center.x + radius, center.y + radius, center.z + radius) };
+    // (and mob sightings older than half an hour are forgotten: mobs wander off and despawn)
+    WithMemory(c, [&](store::Memory& m) { m.ReplaceBox(dimension, box, places); return 0; });
 
     // And the finds worth sharing, for the other bots: everything but its own furniture (beds, tables, furnaces)
     // and the monsters (called out in the chat). Chests and barrels are shared: what is in them is known once
@@ -1668,40 +1483,15 @@ static void Remember(McpBot& c)
         }
     }
     // Chests remembered in this box that are not there any more: their contents are forgotten
+    if (store::Shared* shared = SharedDb())
     {
-        sqlite3* shared = SharedDb();
-        sqlite3_stmt* statement = nullptr;
-        std::vector<Position> gone;
-        if (shared != nullptr && sqlite3_prepare_v2(shared, "SELECT DISTINCT x, y, z FROM chest_contents WHERE dimension = ?1"
-            " AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7", -1, &statement, nullptr) == SQLITE_OK)
+        for (const Position& p : shared->ChestsIn(dimension, box))
         {
-            sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(statement, 2, center.x - radius);
-            sqlite3_bind_int(statement, 3, center.x + radius);
-            sqlite3_bind_int(statement, 4, center.y - radius);
-            sqlite3_bind_int(statement, 5, center.y + radius);
-            sqlite3_bind_int(statement, 6, center.z - radius);
-            sqlite3_bind_int(statement, 7, center.z + radius);
-            while (sqlite3_step(statement) == SQLITE_ROW)
+            const Blockstate* block = world->GetBlock(p);
+            if (block != nullptr && block->GetName().find("chest") == std::string::npos && block->GetName().find("barrel") == std::string::npos)
             {
-                const Position p(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2));
-                const Blockstate* block = world->GetBlock(p);
-                if (block != nullptr && block->GetName().find("chest") == std::string::npos && block->GetName().find("barrel") == std::string::npos)
-                {
-                    gone.push_back(p);
-                }
+                shared->ForgetChest(dimension, p);
             }
-            sqlite3_finalize(statement);
-        }
-        for (const Position& p : gone)
-        {
-            sqlite3_prepare_v2(shared, "DELETE FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4", -1, &statement, nullptr);
-            sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(statement, 2, p.x);
-            sqlite3_bind_int(statement, 3, p.y);
-            sqlite3_bind_int(statement, 4, p.z);
-            sqlite3_step(statement);
-            sqlite3_finalize(statement);
         }
     }
     for (size_t i = monsters.size(); i < seen_alive.size(); ++i)
@@ -1716,188 +1506,69 @@ static void Remember(McpBot& c)
 static void ReportFinds(const std::string& by, const std::string& dimension, const Position& center, const int radius,
     const std::vector<std::pair<std::string, Position>>& finds)
 {
-    sqlite3* db = SharedDb();
-    if (db == nullptr)
+    store::Shared* shared = SharedDb();
+    if (shared == nullptr)
     {
         return;
     }
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
-    {
-        return;     // the database stayed busy: done again next time
-    }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(db, "DELETE FROM finds WHERE dimension = ?1 AND x BETWEEN ?2 AND ?3 AND y BETWEEN ?4 AND ?5 AND z BETWEEN ?6 AND ?7"
-        " OR (kind LIKE 'mob:%' AND seen < strftime('%s', 'now') - 1800)", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 2, center.x - radius);
-    sqlite3_bind_int(statement, 3, center.x + radius);
-    sqlite3_bind_int(statement, 4, center.y - radius);
-    sqlite3_bind_int(statement, 5, center.y + radius);
-    sqlite3_bind_int(statement, 6, center.z - radius);
-    sqlite3_bind_int(statement, 7, center.z + radius);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
-    sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO finds (kind, dimension, cx, cy, cz, x, y, z, seen, by)"
-        " VALUES (?1, ?2, ?3 >> 4, ?4 >> 4, ?5 >> 4, ?3, ?4, ?5, strftime('%s', 'now'), ?6)", -1, &statement, nullptr);
-    std::set<std::tuple<std::string, int, int, int>> cells;
+    std::vector<store::Place> places;
+    places.reserve(finds.size());
     for (const auto& [kind, p] : finds)
     {
-        if (!cells.insert({ kind, p.x >> 4, p.y >> 4, p.z >> 4 }).second)
-        {
-            continue;
-        }
-        sqlite3_bind_text(statement, 1, kind.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(statement, 2, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 3, p.x);
-        sqlite3_bind_int(statement, 4, p.y);
-        sqlite3_bind_int(statement, 5, p.z);
-        sqlite3_bind_text(statement, 6, by.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(statement);
-        sqlite3_reset(statement);
+        places.push_back({ kind, p });
     }
-    sqlite3_finalize(statement);
-    CommitShared(db);
+    shared->ReportFinds(dimension, store::Box{ Position(center.x - radius, center.y - radius, center.z - radius),
+        Position(center.x + radius, center.y + radius, center.z + radius) }, places, by);
 }
 
 /// @brief Remembered places whose kind ends with this ("iron_ore" also finds deepslate_iron_ore, "_log" any log,
-/// "bed" any bed), nearest to the bot first
-/// @brief The kinds in a places-like table that end in suffix (an id like iron_ore also matches deepslate_iron_ore).
-/// The tables hold tens of thousands of rows of a few dozen kinds: the kinds are listed once a minute (from the
-/// kind index) and matched here, so the lookups use the index instead of LIKE '%...' over every row (that scan,
-/// with ICU's LIKE, was 59% of the CPU). Called with the database's lock held
-static std::vector<std::string> KindsEnding(sqlite3* db, const char* table, const std::string& suffix)
-{
-    struct Listed { std::chrono::steady_clock::time_point at; std::vector<std::string> kinds; };
-    static std::mutex cache_mutex;
-    static std::map<std::pair<sqlite3*, std::string>, Listed> cache;
-    std::vector<std::string> all;
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        const auto found = cache.find({ db, table });
-        if (found != cache.end() && std::chrono::steady_clock::now() - found->second.at < std::chrono::minutes(1)) all = found->second.kinds;
-    }
-    if (all.empty())
-    {
-        sqlite3_stmt* statement = nullptr;
-        if (sqlite3_prepare_v2(db, (std::string("SELECT DISTINCT kind FROM ") + table).c_str(), -1, &statement, nullptr) == SQLITE_OK)
-        {
-            while (sqlite3_step(statement) == SQLITE_ROW) all.push_back(reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)));
-        }
-        sqlite3_finalize(statement);
-        std::lock_guard<std::mutex> lock(cache_mutex);
-        cache[{ db, table }] = { std::chrono::steady_clock::now(), all };
-    }
-    std::vector<std::string> matching;
-    for (const std::string& k : all)
-    {
-        if (k.size() >= suffix.size() && k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0) matching.push_back(k);
-    }
-    return matching;
-}
-
-/// @brief The nearest places of kinds ending in kind, from one places-like table (kind, x, y, z, dimension)
-static void RecallFrom(sqlite3* db, const char* table, const std::string& kind, const std::string& dimension, const Vector3<double>& me,
-    const int max_results, std::vector<std::pair<std::string, Position>>& places)
-{
-    const std::string sql = std::string("SELECT kind, x, y, z FROM ") + table + " WHERE kind = ?2 AND dimension = ?1"
-        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT ?6";
-    for (const std::string& exact : KindsEnding(db, table, kind))
-    {
-        sqlite3_stmt* statement = nullptr;
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK)
-        {
-            sqlite3_finalize(statement);
-            continue;
-        }
-        sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(statement, 2, exact.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
-        sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
-        sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
-        sqlite3_bind_int(statement, 6, max_results);
-        while (sqlite3_step(statement) == SQLITE_ROW)
-        {
-            const Position p(sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_int(statement, 3));
-            if (std::none_of(places.begin(), places.end(), [&](const auto& known) { return known.second == p; }))
-            {
-                places.push_back({ reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)), p });
-            }
-        }
-        sqlite3_finalize(statement);
-    }
-}
-
+/// "bed" any bed), nearest to the bot first: its own memory and what the other bots reported
 static std::vector<std::pair<std::string, Position>> Recall(BehaviourClient& c, std::string kind, const int max_results)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
     kind = kind.substr(kind.find(':') == std::string::npos ? 0 : kind.find(':') + 1);
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
+    const Position at(static_cast<int>(me.x), static_cast<int>(me.y), static_cast<int>(me.z));
     const std::string dimension = c.GetWorld()->GetCurrentDimension();
-    std::vector<std::pair<std::string, Position>> places;
+    std::vector<store::Place> places = WithMemory(c, [&](store::Memory& m) { return m.Nearest(dimension, kind, at, max_results); });
+    if (store::Shared* shared = SharedDb())
     {
-        std::lock_guard<std::mutex> lock(memory->mutex);
-        if (memory->db == nullptr)
+        for (store::Place& f : shared->NearestFinds(dimension, kind, at, max_results))
         {
-            return places;
+            if (std::none_of(places.begin(), places.end(), [&](const store::Place& known) { return known.p == f.p; }))
+            {
+                places.push_back(std::move(f));
+            }
         }
-        RecallFrom(memory->db, "places", kind, dimension, me, max_results, places);
-    }
-    // And what the other bots reported (ReportFinds), the nearest of both
-    if (sqlite3* shared = SharedDb())
-    {
-        RecallFrom(shared, "finds", kind, dimension, me, max_results, places);
     }
     const auto distance = [&](const Position& p) { return (p.x - me.x) * (p.x - me.x) + (p.y - me.y) * (p.y - me.y) + (p.z - me.z) * (p.z - me.z); };
-    std::sort(places.begin(), places.end(), [&](const auto& a, const auto& b) { return distance(a.second) < distance(b.second); });
+    std::sort(places.begin(), places.end(), [&](const auto& a, const auto& b) { return distance(a.p) < distance(b.p); });
     places.resize(std::min(places.size(), static_cast<size_t>(max_results)));
-    return places;
+    std::vector<std::pair<std::string, Position>> out;
+    for (const store::Place& place : places)
+    {
+        out.push_back({ place.kind, place.p });
+    }
+    return out;
 }
 
 static void Forget(const BehaviourClient& c, const Position& p)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
-    {
-        return;
-    }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db, "DELETE FROM places WHERE x = ?1 AND y = ?2 AND z = ?3", -1, &statement, nullptr);
-    sqlite3_bind_int(statement, 1, p.x);
-    sqlite3_bind_int(statement, 2, p.y);
-    sqlite3_bind_int(statement, 3, p.z);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    WithMemory(c, [&](store::Memory& m) { m.Forget(p); return 0; });
     // Gone for the other bots too
-    if (sqlite3* shared = SharedDb(); shared != nullptr && sqlite3_prepare_v2(shared, "DELETE FROM finds WHERE x = ?1 AND y = ?2 AND z = ?3", -1, &statement, nullptr) == SQLITE_OK)
+    if (store::Shared* shared = SharedDb())
     {
-        sqlite3_bind_int(statement, 1, p.x);
-        sqlite3_bind_int(statement, 2, p.y);
-        sqlite3_bind_int(statement, 3, p.z);
-        sqlite3_step(statement);
-        sqlite3_finalize(statement);
+        shared->ForgetFind(p);
     }
 }
 
 /// @brief How many places of each kind are remembered, most numerous first
 static Value MemorySummary(const BehaviourClient& c)
 {
-    const std::shared_ptr<Memory> memory = MemoryOf(c);
-    sqlite3* const memory_db = memory->db;
     Value summary = Json::Object();
-    std::lock_guard<std::mutex> lock(memory->mutex);
-    if (memory_db == nullptr)
+    for (const auto& [kind, count] : WithMemory(c, [](store::Memory& m) { return m.Summary(40); }))
     {
-        return summary;
+        summary[kind] = count;
     }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(memory_db, "SELECT kind, COUNT(*) FROM places GROUP BY kind ORDER BY 2 DESC LIMIT 40", -1, &statement, nullptr);
-    while (sqlite3_step(statement) == SQLITE_ROW)
-    {
-        summary[reinterpret_cast<const char*>(sqlite3_column_text(statement, 0))] = sqlite3_column_int(statement, 1);
-    }
-    sqlite3_finalize(statement);
     return summary;
 }
 
@@ -1905,24 +1576,15 @@ static Value MemorySummary(const BehaviourClient& c)
 static Value StoredSummary(const std::string& dimension)
 {
     Value summary = Json::Object();
-    sqlite3* db = SharedDb();
-    sqlite3_stmt* statement = nullptr;
-    if (db == nullptr || sqlite3_prepare_v2(db, "SELECT item, SUM(count) FROM chest_contents"
-        " WHERE dimension = ?1 AND item != '' AND count > 0 GROUP BY item", -1, &statement, nullptr) != SQLITE_OK)
+    store::Shared* shared = SharedDb();
+    if (shared == nullptr)
     {
         return summary;
     }
-    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    while (sqlite3_step(statement) == SQLITE_ROW)
+    for (const auto& [id, count] : shared->Stored(dimension))
     {
-        std::string item = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
-        if (item.rfind("minecraft:", 0) == 0)
-        {
-            item = item.substr(10);
-        }
-        summary[item] = sqlite3_column_int(statement, 1);
+        summary[id.rfind("minecraft:", 0) == 0 ? id.substr(10) : id] = count;
     }
-    sqlite3_finalize(statement);
     return summary;
 }
 
@@ -2112,15 +1774,13 @@ static std::mutex sites_mutex;
 static std::vector<Site> LoadSites()
 {
     std::vector<Site> sites;
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "SELECT x1, y1, z1, x2, y2, z2, name FROM sites WHERE name NOT LIKE '%_road' ORDER BY rowid", -1, &statement, nullptr);
-    while (sqlite3_step(statement) == SQLITE_ROW)
+    if (store::Shared* shared = SharedDb())
     {
-        sites.push_back({ Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2)),
-            Position(sqlite3_column_int(statement, 3), sqlite3_column_int(statement, 4), sqlite3_column_int(statement, 5)),
-            reinterpret_cast<const char*>(sqlite3_column_text(statement, 6)) });
+        for (const store::Site& site : shared->Sites())
+        {
+            sites.push_back({ site.low, site.high, site.name });
+        }
     }
-    sqlite3_finalize(statement);
     return sites;
 }
 
@@ -2167,17 +1827,10 @@ static bool AddSite(const Position& a, const Position& b, const std::string& nam
             return false;
         }
     }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "INSERT INTO sites (x1, y1, z1, x2, y2, z2, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", -1, &statement, nullptr);
-    sqlite3_bind_int(statement, 1, low.x);
-    sqlite3_bind_int(statement, 2, low.y);
-    sqlite3_bind_int(statement, 3, low.z);
-    sqlite3_bind_int(statement, 4, high.x);
-    sqlite3_bind_int(statement, 5, high.y);
-    sqlite3_bind_int(statement, 6, high.z);
-    sqlite3_bind_text(statement, 7, name.empty() ? "build" : name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    if (store::Shared* shared = SharedDb())
+    {
+        shared->AddSite({ low, high, name.empty() ? "build" : name });
+    }
     return true;
 }
 
@@ -3287,18 +2940,16 @@ static std::mutex chests_mutex;
 
 static void LoadChests()
 {
-    sqlite3_stmt* statement = nullptr;
-    if (sqlite3_prepare_v2(SharedDb(), "SELECT item, x, y, z FROM chests", -1, &statement, nullptr) != SQLITE_OK)
+    store::Shared* shared = SharedDb();
+    if (shared == nullptr)
     {
         return;
     }
     chests.clear();
-    while (sqlite3_step(statement) == SQLITE_ROW)
+    for (const auto& [item, p] : shared->ChestFor())
     {
-        chests[reinterpret_cast<const char*>(sqlite3_column_text(statement, 0))] =
-            Position(sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2), sqlite3_column_int(statement, 3));
+        chests[item] = p;
     }
-    sqlite3_finalize(statement);
 }
 
 /// @brief Tools, weapons and armor: things the bot keeps on itself
@@ -3316,25 +2967,10 @@ static bool IsGear(const std::string& item)
 
 static void SaveChests()
 {
-    sqlite3* db = SharedDb();
-    if (db == nullptr || sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+    if (store::Shared* shared = SharedDb())
     {
-        return;     // the database stayed busy: saved with the next change
+        shared->SaveChestFor(std::map<std::string, store::Position>(chests.begin(), chests.end()));
     }
-    sqlite3_exec(db, "DELETE FROM chests", nullptr, nullptr, nullptr);
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(db, "INSERT INTO chests (item, x, y, z) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr);
-    for (const auto& [name, position] : chests)
-    {
-        sqlite3_bind_text(statement, 1, name.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 2, position.x);
-        sqlite3_bind_int(statement, 3, position.y);
-        sqlite3_bind_int(statement, 4, position.z);
-        sqlite3_step(statement);
-        sqlite3_reset(statement);
-    }
-    sqlite3_finalize(statement);
-    CommitShared(db);
 }
 
 /// @brief Which kind of thing an item is, for sorting a vault: food, weapons, armor, equipment (tools),
@@ -3529,12 +3165,12 @@ static short EmptySlot(const std::shared_ptr<Window>& window, const short begin,
 /// @brief Tell every bot what is in this chest (the shared chest_contents table), as the open window shows it
 static void RememberChest(BehaviourClient& c, const Position& p, const std::shared_ptr<Window>& window)
 {
-    sqlite3* db = SharedDb();
-    if (db == nullptr || window == nullptr)
+    store::Shared* shared = SharedDb();
+    if (shared == nullptr || window == nullptr)
     {
         return;
     }
-    std::map<std::string, int> contents = { { "", 0 } };
+    std::map<std::string, int> contents;
     for (const auto& [index, slot] : window->GetSlots())
     {
         if (index < window->GetFirstPlayerInventorySlot() && !slot.IsEmptySlot())
@@ -3542,36 +3178,7 @@ static void RememberChest(BehaviourClient& c, const Position& p, const std::shar
             contents[AssetsManager::getInstance().GetItem(slot.GetItemId())->GetName()] += slot.GetItemCount();
         }
     }
-    const std::string dimension = c.GetWorld()->GetCurrentDimension();
-    const std::string by = c.GetNetworkManager()->GetMyName();
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
-    {
-        return;     // the database stayed busy: done again next time
-    }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(db, "DELETE FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 2, p.x);
-    sqlite3_bind_int(statement, 3, p.y);
-    sqlite3_bind_int(statement, 4, p.z);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
-    sqlite3_prepare_v2(db, "INSERT INTO chest_contents (dimension, x, y, z, item, count, seen, by)"
-        " VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s', 'now'), ?7)", -1, &statement, nullptr);
-    for (const auto& [item, count] : contents)
-    {
-        sqlite3_bind_text(statement, 1, dimension.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 2, p.x);
-        sqlite3_bind_int(statement, 3, p.y);
-        sqlite3_bind_int(statement, 4, p.z);
-        sqlite3_bind_text(statement, 5, item.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 6, count);
-        sqlite3_bind_text(statement, 7, by.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(statement);
-        sqlite3_reset(statement);
-    }
-    sqlite3_finalize(statement);
-    CommitShared(db);
+    shared->RememberChest(c.GetWorld()->GetCurrentDimension(), p, contents, c.GetNetworkManager()->GetMyName());
 }
 
 /// @brief Close a chest, telling the other bots what is left in it
@@ -3584,25 +3191,14 @@ static void CloseChest(BehaviourClient& c, const short container_id, const Posit
 /// @brief The nearest chest within 96 blocks that some bot saw holding this item
 static bool ChestHolding(BehaviourClient& c, const std::string& item, Position& chest)
 {
-    sqlite3* db = SharedDb();
-    sqlite3_stmt* statement = nullptr;
+    store::Shared* shared = SharedDb();
     const Vector3<double> me = c.GetLocalPlayer()->GetPosition();
-    if (db == nullptr || sqlite3_prepare_v2(db, "SELECT x, y, z FROM chest_contents WHERE dimension = ?1 AND item = ?2 AND count > 0"
-        " ORDER BY (x - ?3) * (x - ?3) + (y - ?4) * (y - ?4) + (z - ?5) * (z - ?5) LIMIT 1", -1, &statement, nullptr) != SQLITE_OK)
-    {
-        return false;
-    }
-    sqlite3_bind_text(statement, 1, c.GetWorld()->GetCurrentDimension().c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement, 2, item.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement, 3, static_cast<int>(me.x));
-    sqlite3_bind_int(statement, 4, static_cast<int>(me.y));
-    sqlite3_bind_int(statement, 5, static_cast<int>(me.z));
-    const bool found = sqlite3_step(statement) == SQLITE_ROW;
+    const std::optional<Position> found = shared == nullptr ? std::nullopt
+        : shared->ChestHolding(c.GetWorld()->GetCurrentDimension(), item, Position(static_cast<int>(me.x), static_cast<int>(me.y), static_cast<int>(me.z)));
     if (found)
     {
-        chest = Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2));
+        chest = *found;
     }
-    sqlite3_finalize(statement);
     return found && me.SqrDist(Vector3<double>(chest.x, chest.y, chest.z)) <= 96.0 * 96.0;
 }
 
@@ -4194,14 +3790,13 @@ struct Mine
 static std::vector<Mine> LoadMines()
 {
     std::vector<Mine> mines;
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "SELECT x, y, z, resources FROM mines ORDER BY rowid", -1, &statement, nullptr);
-    while (sqlite3_step(statement) == SQLITE_ROW)
+    if (store::Shared* shared = SharedDb())
     {
-        mines.push_back({ Position(sqlite3_column_int(statement, 0), sqlite3_column_int(statement, 1), sqlite3_column_int(statement, 2)),
-            reinterpret_cast<const char*>(sqlite3_column_text(statement, 3)) });
+        for (const store::Mine& mine : shared->Mines())
+        {
+            mines.push_back({ mine.entrance, mine.resources });
+        }
     }
-    sqlite3_finalize(statement);
     return mines;
 }
 
@@ -4215,14 +3810,10 @@ static bool AddMine(const Position& entrance, const std::string& resources)
             return false;
         }
     }
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "INSERT INTO mines (x, y, z, resources) VALUES (?1, ?2, ?3, ?4)", -1, &statement, nullptr);
-    sqlite3_bind_int(statement, 1, entrance.x);
-    sqlite3_bind_int(statement, 2, entrance.y);
-    sqlite3_bind_int(statement, 3, entrance.z);
-    sqlite3_bind_text(statement, 4, resources.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    if (store::Shared* shared = SharedDb())
+    {
+        shared->AddMine({ entrance, resources });
+    }
     return true;
 }
 
@@ -9567,9 +9158,9 @@ static void SpawnBot(const std::string& login)
                         const std::shared_ptr<Memory> memory = MemoryOf(*bot);
                         {
                             std::lock_guard<std::mutex> lock(memory->mutex);
-                            if (memory->db != nullptr)
+                            if (memory->db)
                             {
-                                sqlite3_exec(memory->db, "BEGIN", nullptr, nullptr, nullptr);
+                                memory->db->Begin();
                             }
                         }
                         // (Not a passing tool action, like storing before leaving: what it was doing on its own)
@@ -9582,9 +9173,9 @@ static void SpawnBot(const std::string& login)
                         SaveDoing(*bot, "make", make_count > 0 ? make + " " + std::to_string(make_count) : "");
                         {
                             std::lock_guard<std::mutex> lock(memory->mutex);
-                            if (memory->db != nullptr)
+                            if (memory->db)
                             {
-                                sqlite3_exec(memory->db, "COMMIT", nullptr, nullptr, nullptr);
+                                memory->db->Commit();
                             }
                         }
                     }
@@ -9732,42 +9323,25 @@ static std::string elected_leader;
 /// @brief The jobs the main program keeps track of ("solo", "feeder"), in the shared database: they outlive a restart
 static void SaveRole(const std::string& bot, const std::string& role, const bool on)
 {
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), on ? "INSERT OR IGNORE INTO roles (bot, role) VALUES (?1, ?2)" : "DELETE FROM roles WHERE bot = ?1 AND role = ?2", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, bot.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement, 2, role.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_step(statement);
-    sqlite3_finalize(statement);
+    if (store::Shared* shared = SharedDb())
+    {
+        shared->SetRole(bot, role, on);
+    }
 }
 
 static std::vector<std::string> LoadRole(const std::string& role)
 {
-    std::vector<std::string> names;
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "SELECT bot FROM roles WHERE role = ?1 ORDER BY rowid", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, role.c_str(), -1, SQLITE_TRANSIENT);
-    while (sqlite3_step(statement) == SQLITE_ROW)
-    {
-        names.push_back(reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)));
-    }
-    sqlite3_finalize(statement);
-    return names;
+    store::Shared* shared = SharedDb();
+    return shared == nullptr ? std::vector<std::string>() : shared->WithRole(role);
 }
 
 /// @brief The bot's trade (the groups plugin's: bakers, miners...), "" if none: a "trade:..." role in the shared
 /// database, so each bot's own process reads it for its status (the panels show it)
 static std::string TradeOf(const std::string& bot)
 {
-    std::string trade;
-    sqlite3_stmt* statement = nullptr;
-    sqlite3_prepare_v2(SharedDb(), "SELECT role FROM roles WHERE bot = ?1 AND role LIKE 'trade:%'", -1, &statement, nullptr);
-    sqlite3_bind_text(statement, 1, bot.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(statement) == SQLITE_ROW)
-    {
-        trade = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)) + 6;
-    }
-    sqlite3_finalize(statement);
-    return trade;
+    store::Shared* shared = SharedDb();
+    const std::string role = shared == nullptr ? "" : shared->RoleStartingWith(bot, "trade:");
+    return role.empty() ? "" : role.substr(6);
 }
 
 static Value CallTool(const std::string& name, const Value& a)
@@ -9775,46 +9349,30 @@ static Value CallTool(const std::string& name, const Value& a)
     // What the bots know is in the chests (chest_contents): all of them, or those holding an item, fullest first
     if (name == "chests")
     {
-        sqlite3* db = SharedDb();
+        store::Shared* shared = SharedDb();
         const std::string item = a.is_object() && a.contains("item") ? Id(Str(a, "item")) : "";
         const int max = static_cast<int>(Num(a, "max", 20));
         Value list = Json::Array();
-        sqlite3_stmt* statement = nullptr;
-        if (db == nullptr || sqlite3_prepare_v2(db, item.empty()
-            ? "SELECT x, y, z, dimension, MAX(seen), MAX(by) FROM chest_contents GROUP BY dimension, x, y, z ORDER BY MAX(seen) DESC LIMIT ?2"
-            : "SELECT x, y, z, dimension, seen, by FROM chest_contents WHERE item = ?1 AND count > 0 ORDER BY count DESC LIMIT ?2", -1, &statement, nullptr) != SQLITE_OK)
+        if (shared == nullptr)
         {
             return list;
         }
-        sqlite3_bind_text(statement, 1, item.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(statement, 2, max);
-        while (sqlite3_step(statement) == SQLITE_ROW)
+        for (const store::ChestSeen& chest : item.empty() ? shared->Chests(max) : shared->ChestsWith(item, max))
         {
             Value o;
-            o["x"] = sqlite3_column_int(statement, 0);
-            o["y"] = sqlite3_column_int(statement, 1);
-            o["z"] = sqlite3_column_int(statement, 2);
-            o["dimension"] = reinterpret_cast<const char*>(sqlite3_column_text(statement, 3));
-            o["seen_minutes_ago"] = static_cast<int>((std::time(nullptr) - sqlite3_column_int64(statement, 4)) / 60);
-            o["by"] = reinterpret_cast<const char*>(sqlite3_column_text(statement, 5));
-            list.push_back(o);
-        }
-        sqlite3_finalize(statement);
-        for (size_t i = 0; i < list.size(); ++i)
-        {
+            o["x"] = chest.p.x;
+            o["y"] = chest.p.y;
+            o["z"] = chest.p.z;
+            o["dimension"] = chest.dimension;
+            o["seen_minutes_ago"] = static_cast<int>((std::time(nullptr) - chest.seen) / 60);
+            o["by"] = chest.by;
             Value contents = Json::Object();
-            sqlite3_prepare_v2(db, "SELECT item, count FROM chest_contents WHERE dimension = ?1 AND x = ?2 AND y = ?3 AND z = ?4 AND item <> ''", -1, &statement, nullptr);
-            sqlite3_bind_text(statement, 1, list[i]["dimension"].get_string().c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int(statement, 2, list[i]["x"].get_number<int>());
-            sqlite3_bind_int(statement, 3, list[i]["y"].get_number<int>());
-            sqlite3_bind_int(statement, 4, list[i]["z"].get_number<int>());
-            while (sqlite3_step(statement) == SQLITE_ROW)
+            for (const auto& [id, count] : shared->ChestItems(chest.dimension, chest.p))
             {
-                const std::string name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
-                contents[name.substr(name.find(':') + 1)] = sqlite3_column_int(statement, 1);
+                contents[id.substr(id.find(':') + 1)] = count;
             }
-            sqlite3_finalize(statement);
-            list[i]["contents"] = contents;
+            o["contents"] = contents;
+            list.push_back(o);
         }
         return list;
     }
@@ -10634,11 +10192,10 @@ static Value CallTool(const std::string& name, const Value& a)
         if (remove >= 1 && remove <= static_cast<int>(sites.size()))
         {
             sites.erase(sites.begin() + remove - 1);
-            sqlite3_stmt* statement = nullptr;
-            sqlite3_prepare_v2(SharedDb(), "DELETE FROM sites WHERE rowid = (SELECT rowid FROM sites ORDER BY rowid LIMIT 1 OFFSET ?1)", -1, &statement, nullptr);
-            sqlite3_bind_int(statement, 1, remove - 1);
-            sqlite3_step(statement);
-            sqlite3_finalize(statement);
+            if (store::Shared* shared = SharedDb())
+            {
+                shared->RemoveSite(static_cast<size_t>(remove - 1));
+            }
         }
         Value list = Json::Array();
         for (const Site& site : sites)
