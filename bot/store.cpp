@@ -111,10 +111,20 @@ namespace store
 
         std::string backend_error;
         std::mutex backend_mutex;
+        /// @brief An error of the store, logged (once a minute at most: a full server fails every write) and kept for Error()
         void Fail(const std::string& what)
         {
+            static std::chrono::steady_clock::time_point logged_at{};
+            static long long since = 0;
             std::lock_guard<std::mutex> lock(backend_mutex);
-            if (backend_error.empty()) std::cerr << "store: " << what << std::endl;
+            ++since;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - logged_at >= std::chrono::minutes(1))
+            {
+                std::cerr << "store: " << what << (since > 1 ? " (" + std::to_string(since) + " errors in the last minute)" : "") << std::endl;
+                logged_at = now;
+                since = 0;
+            }
             backend_error = what;
         }
 
@@ -1124,6 +1134,11 @@ namespace store
                         continue;
                     }
                     replies.emplace_back(static_cast<redisReply*>(reply), freeReplyObject);
+                    // A command the server refused (out of memory: maxmemory reached, wrong type...)
+                    if (replies.back() && replies.back()->type == REDIS_REPLY_ERROR)
+                    {
+                        Fail("valkey: " + std::string(replies.back()->str, replies.back()->len) + " (" + commands[i].front() + ")");
+                    }
                 }
                 commands.clear();
                 return replies;
