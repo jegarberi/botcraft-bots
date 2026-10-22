@@ -33,6 +33,7 @@
 #include <poll.h>
 #include <regex>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -12405,6 +12406,24 @@ int main(int argc, char* argv[])
             Renderer::Settings::Enable();
             Renderer::Settings::Headless(!show_gui);
             Renderer::Settings::SetResolution(854, 480);
+        }
+        // One program at a time: a second one logs the same bots in, the server kicks the first one's ("name already
+        // in use") and each bot kicked on its own leaves the roster (twice, two thirds of the bots were lost so). The
+        // lock goes with the process, however it ends
+        if (!is_child)
+        {
+            std::filesystem::create_directories("../run");
+            const int lock_fd = open("../run/bot_mcp.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+            if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB) != 0)
+            {
+                char other[32] = {};
+                if (lock_fd >= 0) { const ssize_t n = pread(lock_fd, other, sizeof(other) - 1, 0); other[n > 0 ? n : 0] = 0; }
+                LOG_FATAL("Another bot_mcp is already running" << (other[0] ? std::string(" (pid ") + other + ")" : std::string()) <<
+                    ": stop it first (kill -HUP it: the bots store their items and leave)");
+                return 1;
+            }
+            const std::string pid = std::to_string(getpid());
+            if (ftruncate(lock_fd, 0) == 0 && pwrite(lock_fd, pid.c_str(), pid.size(), 0) < 0) {}
         }
         // The game assets, built here. Every block's model has faces (~700 MB per process) needed only to draw: a
         // process without a window or views keeps none (and blocks with the same colliders share a model), ~60 MB
