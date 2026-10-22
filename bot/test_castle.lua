@@ -1,8 +1,19 @@
 -- Offline check of the castle plugin: every stage of the full plan and of the miniature must build its list
 -- without error. lua5.4 test_castle.lua plugins/castle.lua
-local tool, tick, orders, handed = nil, nil, {}, {}
+local tool, tick, orders, handed, sites = nil, nil, {}, {}, {}
 bot = { call = function(name, a)
-    if name == "team" then handed[#handed + 1] = a return {} end
+    if name == "team" then
+        handed[#handed + 1] = a
+        -- As the program does: the box goes into the stored sites
+        local b = a.site
+        if b then sites[#sites + 1] = { name = a.name, x1 = math.min(b[1], b[4]), y1 = math.min(b[2], b[5]), z1 = math.min(b[3], b[6]),
+            x2 = math.max(b[1], b[4]), y2 = math.max(b[2], b[5]), z2 = math.max(b[3], b[6]) } end
+        return {}
+    end
+    if name == "sites" then
+        if a.remove then table.remove(sites, a.remove) end
+        return sites
+    end
     if name == "team_member" then orders[#orders + 1] = a return {} end
     if name == "locate" then return { x = 40, z = 0 } end
     -- A pit 3 deep at x 5..6, z 5: the floor over it must stand on dirt down to the stone
@@ -24,7 +35,13 @@ assert(started.started)
 local filled = {}
 for _, b in ipairs(handed[1].blocks) do if b[1] == 5 and b[3] == 5 then filled[b[2]] = b[4] end end
 assert(filled[69] == "cobblestone" and filled[68] == "dirt" and filled[66] == "dirt" and filled[65] == nil, "the pit under the floor is filled")
+-- Started again elsewhere while still levelling: the old box goes, the new one stays; stopped: that one goes too
+sites[#sites + 1] = { name = "house", x1 = 0, y1 = 60, z1 = 0, x2 = 5, y2 = 70, z2 = 5 }
+assert(#sites == 2)
+assert(tool.run({ action = "start", x = 300, y = 70, z = 0 }).started)
+assert(#sites == 2 and sites[1].name == "house" and sites[2].x1 == 300 - 134, "the unbuilt castle's box is forgotten when it moves")
 tool.run({ action = "stop" })
+assert(#sites == 1 and sites[1].name == "house", "and when it is dropped")
 assert(tool.run({ action = "test", x = 0, y = 70, z = 0 }).started)
 tool.run({ action = "stop" })
 local roads = tool.run({ action = "roads" })

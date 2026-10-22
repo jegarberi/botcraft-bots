@@ -788,6 +788,25 @@ local function chunked(stages)
     return out
 end
 
+-- A job dropped before anything stood (still levelling or lighting) leaves no castle to protect: its box is
+-- forgotten, or no bot may ever dig there again (the team moved on 8 times and bots ended up walled in underground)
+local function forget_unbuilt_site(old)
+    if not old or not old.site or not old.stages then return end
+    local stage = old.stages[old.index]
+    if stage and not (stage.name:match("^levelling") or stage.name:match("^lighting")) then return end
+    local b = old.site
+    local x1, y1, z1 = math.min(b[1], b[4]), math.min(b[2], b[5]), math.min(b[3], b[6])
+    local x2, y2, z2 = math.max(b[1], b[4]), math.max(b[2], b[5]), math.max(b[3], b[6])
+    local ok, list = pcall(bot.call, "sites", {})
+    if not ok or type(list) ~= "table" then return end
+    for i = #list, 1, -1 do       -- from the end: removing one shifts the ones after it
+        local e = list[i]
+        if e.name == "castle" and e.x1 == x1 and e.y1 == y1 and e.z1 == z1 and e.x2 == x2 and e.y2 == y2 and e.z2 == z2 then
+            pcall(bot.call, "sites", { remove = i })
+        end
+    end
+end
+
 local function hand_over()
     local s = job.stages[job.index]
     -- With the site as a box: the bots take their stone, dirt and wood outside it, not out of what is built
@@ -1141,6 +1160,7 @@ local castle_tool = {
             local left = progress()
             return { building = true, stage = job.stages[job.index].name, stage_number = job.index, stages = #job.stages, blocks_left = left }
         elseif action == "stop" then
+            forget_unbuilt_site(job)
             job = nil
             return "castle job dropped"
         elseif action == "farms" then
@@ -1301,7 +1321,9 @@ local castle_tool = {
             -- Right after the levelling, before anything is built: the site and its margin, lit
             table.insert(stages, 1, { name = "lighting", blocks = lighting(cx, cz, OUTER, y) })
             table.insert(stages, 1, { name = "levelling", blocks = ground })
-            job = { stages = chunked(stages), index = 1, site = { cx - OUTER, y - 12, cz - OUTER, cx + OUTER, y + 40, cz + OUTER } }
+            local new_site = { cx - OUTER, y - 12, cz - OUTER, cx + OUTER, y + 40, cz + OUTER }
+            if job and job.site and table.concat(job.site, " ") ~= table.concat(new_site, " ") then forget_unbuilt_site(job) end
+            job = { stages = chunked(stages), index = 1, site = new_site }
             job_site = { x = cx, y = y, z = cz, plots = plots(cx, cz) }
             save_site()
             hand_over()
