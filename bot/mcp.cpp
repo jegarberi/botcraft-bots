@@ -1938,6 +1938,13 @@ static void PenalizeCrampedMine(BehaviourClient& c, const Position& feet, const 
 /// @param allow_hands Dig with bare hands if the bot has no pickaxe: very slow and nothing drops, only to get out of a hole
 static int CraftOne(BehaviourClient& c, const std::string& item, std::string& error);
 
+/// @brief Bedrock, barriers and the like. Air has no hardness in the block data, so it reads as negative too: left out
+/// (the climb up stopped at every cave, 83,000 times in 2 minutes)
+static bool Unbreakable(const Blockstate* b)
+{
+    return !b->IsAir() && b->GetHardness() < 0.0f;
+}
+
 /// @brief Make `at` a cobblestone stair climbing toward `up` (crafted from cobblestone when the bot has none)
 /// @return false without stairs, or when the spot can't be dug or placed
 static bool PutStair(BehaviourClient& c, const Position& at, const Position& up)
@@ -1949,7 +1956,7 @@ static bool PutStair(BehaviourClient& c, const Position& at, const Position& up)
         CraftOne(c, stairs, error);
     }
     const Blockstate* b = c.GetWorld()->GetBlock(at);
-    if (b == nullptr || CountItem(c, stairs) == 0 || LavaNear(c.GetWorld(), at) || b->IsFluid() || b->GetHardness() < 0.0f)
+    if (b == nullptr || CountItem(c, stairs) == 0 || LavaNear(c.GetWorld(), at) || b->IsFluid() || Unbreakable(b))
     {
         return b != nullptr && EndsWith(b->GetName(), "_stairs");
     }
@@ -1969,10 +1976,15 @@ static bool PutStair(BehaviourClient& c, const Position& at, const Position& up)
 static Status TunnelToward(BehaviourClient& c, const Position& target, const int max_steps, const bool allow_hands = false)
 {
     const std::shared_ptr<World> world = c.GetWorld();
+    const auto fail = [&](const char* why, const Position& at)
+        {
+            LOG_INFO(c.GetNetworkManager()->GetMyName() << ": tunnel toward " << target << " stopped at " << at << ": " << why);
+            return Status::Failure;
+        };
     const std::string pickaxe = HeldTool(c, "pickaxe");
     if (pickaxe.empty() && !allow_hands)
     {
-        return Status::Failure;
+        return fail("no pickaxe", BlockPos(c.GetLocalPlayer()->GetPosition()));
     }
     if (!pickaxe.empty())
     {
@@ -2019,7 +2031,7 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
         }
         if (slope == 2)
         {
-            return Status::Failure;
+            return fail("no floor ahead", me + side);
         }
         const Position next = me + side + Position(0, slope, 0);
         const Position across(std::abs(side.z), 0, std::abs(side.x));
@@ -2046,10 +2058,10 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             const Blockstate* block = world->GetBlock(cell);
             // Not into water, bedrock, or anything with lava against it: that is how a miner dies.
             // Nor through what the team is building
-            if (block == nullptr || block->IsFluid() || block->GetHardness() < 0.0f || LavaNear(world, cell) ||
+            if (block == nullptr || block->IsFluid() || Unbreakable(block) || LavaNear(world, cell) ||
                 (!block->IsAir() && builder != nullptr && builder->IsPlanned(cell)) || (!needed && in_site(cell)))
             {
-                if (needed) return Status::Failure;
+                if (needed) return fail(block == nullptr ? "unloaded" : block->IsFluid() ? "fluid" : Unbreakable(block) ? "unbreakable" : LavaNear(world, cell) ? "lava near" : "planned or in a site", cell);
                 continue;
             }
             if (!block->IsAir())
@@ -2058,7 +2070,7 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
                 {
                     if (!needed) continue;
                     if (changed) PenalizeCrampedMine(c, next, side, slope);
-                    return Status::Failure;
+                    return fail("dig failed", cell);
                 }
                 changed = true;
             }
@@ -2072,7 +2084,7 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
         if (floor == nullptr || floor->IsFluid() || GoTo(c, next) == Status::Failure)
         {
             if (changed) PenalizeCrampedMine(c, next, side, slope);
-            return Status::Failure;
+            return fail(floor == nullptr ? "floor unloaded" : floor->IsFluid() ? "floor is fluid" : "could not step there", next);
         }
         // Going down, under the spot just left
         if (slope < 0 && !pickaxe.empty())
@@ -2090,7 +2102,7 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             LightUp(c, me);
         }
     }
-    return Status::Failure;
+    return fail("out of steps", BlockPos(c.GetLocalPlayer()->GetPosition()));
 }
 
 /// @brief Rise one block where the bot stands: jump, and put a block under its feet
@@ -3847,7 +3859,7 @@ static int WideMine(McpBot& c, const Position& dir, const int steps, const bool 
             {
                 const Position cell(base.x + perp.x * w, floor_y + h, base.z + perp.z * w);
                 const Blockstate* b = world->GetBlock(cell);
-                if (b == nullptr || b->IsFluid() || b->GetHardness() < 0.0f || LavaNear(world, cell))
+                if (b == nullptr || b->IsFluid() || Unbreakable(b) || LavaNear(world, cell))
                 {
                     c.SetNote("wide mine: stopped before water, lava or bedrock");
                     return dug;
@@ -5303,7 +5315,7 @@ static Status BuildStep(McpBot& c)
         // Never what the bots live on
         const std::string& name = block->GetName();
         if (EndsWith(name, ":chest") || EndsWith(name, ":barrel") || EndsWith(name, ":furnace") || EndsWith(name, ":crafting_table") || (EndsWith(name, "_bed") && !EndsWith(item, "_bed")) ||
-            block->GetHardness() < 0.0f || SafeDig(c, p, true) == Status::Failure)
+            Unbreakable(block) || SafeDig(c, p, true) == Status::Failure)
         {
             give_up_on(p);
         }
@@ -7030,7 +7042,7 @@ static Status ClimbOutOfPit(McpBot& c)
             for (const Position& d : sides)
             {
                 const Blockstate* b = world->GetBlock(feet + d);
-                if (b == nullptr || !b->IsSolid() || b->GetHardness() < 0.0f || b->IsFluid() || EndsWith(b->GetName(), "sand") || EndsWith(b->GetName(), "gravel") ||
+                if (b == nullptr || !b->IsSolid() || Unbreakable(b) || b->IsFluid() || EndsWith(b->GetName(), "sand") || EndsWith(b->GetName(), "gravel") ||
                     EndsWith(b->GetName(), "chest") || EndsWith(b->GetName(), "barrel") || EndsWith(b->GetName(), "crafting_table") || EndsWith(b->GetName(), "furnace") ||
                     c.IsPlanned(feet + d) || LavaNear(world, feet + d))
                 {
@@ -7162,7 +7174,7 @@ static Status UnstickStep(McpBot& c)
         {
             const Position p = feet + side + Position(0, dy, 0);
             const Blockstate* block = world->GetBlock(p);
-            if (block == nullptr || !block->IsSolid() || block->GetHardness() < 0.0f)
+            if (block == nullptr || !block->IsSolid() || Unbreakable(block))
             {
                 continue;
             }
@@ -7597,6 +7609,11 @@ static void Compost(BehaviourClient& c, const int radius)
 /// @brief One step toward the first basic the bot lacks
 static Status BasicsStep(McpBot& c)
 {
+    // Starving with nothing to eat: food first, wherever it is (the basics can take hours underground)
+    if (c.GetLocalPlayer()->GetFood() <= 6 && FindFood(c).empty() && std::chrono::steady_clock::now() >= c.food_retry_at)
+    {
+        return GetFoodStep(c);
+    }
     const std::string what = NextBasic(c);
     c.basics_checked_at = {};
     if (what.empty()) return Status::Failure;
