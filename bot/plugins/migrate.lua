@@ -9,6 +9,8 @@
 --   migrate {}               what the last look saw, the last vote, the trip under way
 --   migrate { vote = true }  look and vote now
 --   migrate { stop = true }  end the trip and settle where the leader stands
+--   migrate { auto = true }  look every 20 minutes and move by itself (off by default: with little food anywhere the
+--                            trips went nowhere, 40 legs and back, and each restarted the castle where the leader stood)
 local FILE = "../migrate_job.lua"
 local CHECK = 1200          -- seconds between looks (one Minecraft day)
 local REST = 3600           -- after settling, no new proposal for an hour
@@ -25,7 +27,7 @@ local function call(tool, args)
     return ok and r or nil, (not ok) and tostring(r) or nil
 end
 
-local state = { trip = nil, settled_at = nil, last_look = nil, last_vote = nil, log = {} }
+local state = { trip = nil, settled_at = nil, last_look = nil, last_vote = nil, log = {}, auto = false }
 
 local function save()
     local function ser(v)
@@ -254,7 +256,7 @@ bot.every(30, function()
         local now = os.time()
         if now - loaded_at < 150 then return end      -- the bots are still joining
         if state.trip then return leg() end
-        if now - last_check >= CHECK and not (state.settled_at and now - state.settled_at < REST) then
+        if state.auto and now - last_check >= CHECK and not (state.settled_at and now - state.settled_at < REST) then
             last_check = now
             propose(false)
         end
@@ -265,16 +267,17 @@ end)
 
 bot.tool{
     name = "migrate",
-    description = "Moving the bots to a better place. Every 20 minutes each bot looks around (logs, berry bushes and animals within 32 blocks, how fed it is); if the place is poor in wood or food they vote, each bot yes if its own surroundings lack them or it is starving; with half + 1 yes votes they pick a direction (each points toward the wood and berries it remembers farther away), forget their beds, follow the leader that way a leg at a time and settle where there is wood and food, at least 150 blocks away: the empire's town (and a castle under way) starts again there and every bot goes back to its trade. No new proposal for an hour after settling. With no argument: the last look, the last vote, the trip. vote=true looks and votes now (whatever the place looks like); stop=true settles where the leader stands.",
-    params = { vote = "boolean", stop = "boolean" },
+    description = "Moving the bots to a better place. Off until auto=true: then every 20 minutes each bot looks around (logs, berry bushes and animals within 32 blocks, how fed it is); if the place is poor in wood or food they vote, each bot yes if its own surroundings lack them or it is starving; with half + 1 yes votes they pick a direction (each points toward the wood and berries it remembers farther away), forget their beds, follow the leader that way a leg at a time and settle where there is wood and food, at least 150 blocks away: the empire's town (and a castle under way) starts again there and every bot goes back to its trade. No new proposal for an hour after settling. With no argument: the last look, the last vote, the trip. vote=true looks and votes now (whatever the place looks like); stop=true settles where the leader stands; auto=true/false turns the looking by itself on or off.",
+    params = { vote = "boolean", stop = "boolean", auto = "boolean" },
     run = function(args)
+        if args.auto ~= nil then state.auto = args.auto == true; save() end
         if args.stop and state.trip then settle("stopped by hand") end
         if args.vote and not state.trip then
             local r = propose(true)
             if type(r) == "string" then return r end
         end
         local t = state.trip
-        return { migrating = t ~= nil, trip = t and { direction = DIRS[t.dir], leader = t.leader, legs = t.legs, from = t.from, bots = #t.bots } or nil,
+        return { auto = state.auto, migrating = t ~= nil, trip = t and { direction = DIRS[t.dir], leader = t.leader, legs = t.legs, from = t.from, bots = #t.bots } or nil,
             last_look = state.last_look, last_vote = state.last_vote, events = state.log,
             next_look_in = math.max(0, CHECK - (os.time() - last_check)) }
     end,

@@ -33,6 +33,9 @@ end, tool = function(t) tool = t end, every = function(_, f) ticks[#ticks + 1] =
 load(io.open(arg[1]):read("a"), "migrate")()
 local function tick() for _, f in ipairs(ticks) do f() end end
 
+clock = clock + 1300; tick()                                  -- off by default: no look, no vote
+assert(not tool.run({}).last_vote and not MIGRATING, "nothing happens until auto is on")
+assert(tool.run({ auto = true }).auto)
 clock = clock + 1300; tick()                                  -- the first look: poor, a vote
 local st = tool.run({})
 assert(st.last_vote and st.last_vote.passed and st.last_vote.yes == 5 and st.last_vote.need == 3, "all five vote yes, three needed")
