@@ -189,6 +189,7 @@ local counters = { sent_messages = 0, sent_lines = 0, received_messages = 0, bad
     unsigned = 0, rejected = 0, resent = 0, acks = 0, dropped_lines = 0 }
 local acks = {}          -- msg -> { from -> result }
 local next_msg = 0
+local building_receive
 local central_receive
 local mouth
 
@@ -236,7 +237,9 @@ local function deliver(p)
         if not KEY then counters.unsigned = counters.unsigned + 1 end
         counters.received_messages = counters.received_messages + 1
         peers[p.from].received = (peers[p.from].received or 0) + 1
-        if data:sub(1, 2) == "C1" and central_receive then
+        if data:sub(1, 2) == "B1" and building_receive then
+            result = KEY and building_receive(p.from, data:sub(3)) or "rejected:unsigned_build"
+        elseif data:sub(1, 2) == "C1" and central_receive then
             result = central_receive(p.from, data:sub(3))
         else
             local mine = call("brain", { export = true })
@@ -524,6 +527,19 @@ bot.every(60, function()
         if transmit("S" .. central .. string.pack(">I4", serial) .. raw) then outstanding[serial] = os.time() end
     end
 end)
+-- Shared by the construction council; build decisions require authenticated participating hosts.
+NETLINK_BUILD = {
+    id = ME, signed = KEY ~= nil, checksum = checksum,
+    send = function(raw) return send("B1" .. compress(raw)) end,
+    listen = function(fn)
+        building_receive = function(from, raw)
+            local unpacked = decompress(raw)
+            if not unpacked then return "rejected:compression" end
+            local ok, result = pcall(fn, from, unpacked)
+            return ok and result or "rejected:build_payload"
+        end
+    end,
+}
 bot.tool{
     name = "central",
     description = "Central community survival coordinator over signed, compressed base64 Minecraft chat. mode=leader makes this host the brain; mode=worker with central=leader netlink id follows it; mode=off returns local control. bot selects the local chat speaker. Reports health and hunger every minute; assigns trades across hosts for food, shelter and resource production. Requires a shared netlink_key.txt. Configure again after restart.",

@@ -534,7 +534,7 @@ local function level(cx, y, cz, fill, reach)
 end
 
 -- Everything but the levelling, which depends on the terrain
-local function structures(cx, y, cz, item, paving)
+local function structures(cx, y, cz, item, paving, creative)
     local stages = {}
     local function stage(name, fill)
         -- Towers and walls share their corner blocks: each spot once
@@ -563,6 +563,18 @@ local function structures(cx, y, cz, item, paving)
     stage("paths and fountain", function(l) paths(l, cx, y, cz, item); fountain(l, cx, y, cz, item) end)
     stage("second wall and towers", function(l) walled(l, cx, cz, R2, y, y + 3, item) end)
     stage("farm plots", function(l) for _, p in ipairs(plots(cx, cz)) do plot(l, p[1], y, p[2]) end end)
+    if creative then
+        stage("planted farms", function(l)
+            for _, p in ipairs(plots(cx, cz)) do
+                for dx = -4, 4 do for dz = -4, 4 do
+                    if dx ~= 0 or dz ~= 0 then
+                        add(l, p[1] + dx, y - 1, p[2] + dz, "farmland")
+                        add(l, p[1] + dx, y, p[2] + dz, "wheat")
+                    end
+                end end
+            end
+        end)
+    end
     stage("pens", function(l) for _, p in ipairs(pens(cx, cz)) do pen(l, p, y, "spruce_fence") end end)
     -- Once they stand, the bots go and fetch animals for them (see ranch below)
     stages[#stages].after = function() ranch_due = 0 end
@@ -808,9 +820,23 @@ local function forget_unbuilt_site(old)
 end
 
 local function hand_over()
+    CREATIVE_CONSTRUCTION = job.creative or false
     local s = job.stages[job.index]
     -- With the site as a box: the bots take their stone, dirt and wood outside it, not out of what is built
-    bot.call("team", { objective = "build", plan = "blocks", blocks = s.blocks, site = job.site, name = s.name:match("^road") and "road" or "castle" })
+    if job.creative then
+        local members = {}
+        for _, b in ipairs(bot.call("bots")) do
+            local ok, st = pcall(bot.call, "status", { bot = b.name })
+            if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then members[#members + 1] = b.name end
+        end
+        for _, name in ipairs(members) do
+            bot.call("team_member", { bot = name, objective = "build", plan = "blocks", blocks = s.blocks,
+                site = job.site, name = "castle", members = members, leader = members[1], solo = true })
+            bot.call("autopilot", { bot = name, enabled = true })
+        end
+    else
+        bot.call("team", { objective = "build", plan = "blocks", blocks = s.blocks, site = job.site, name = s.name:match("^road") and "road" or "castle" })
+    end
     pcall(bot.call, "chat", { message = "[castle] " .. s.name .. " (" .. job.index .. "/" .. #job.stages .. "): " .. #s.blocks .. " blocks" })
 end
 
@@ -821,7 +847,7 @@ local function progress()
     local left, lowest, working = {}, nil, 0
     for _, b in ipairs(bot.call("bots")) do
         local ok, st = pcall(bot.call, "status", { bot = b.name })
-        if ok and type(st) == "table" and st.build_left ~= nil then
+        if ok and type(st) == "table" and st.build_left ~= nil and (not job.creative or (st.game_mode == "creative" and st.dimension == "minecraft:overworld")) then
             local active = st.build_idle ~= nil and st.build_idle < 60
             left[b.name] = active and st.build_left or "away"
             if active then
@@ -1108,6 +1134,7 @@ bot.every(20, function()
     if job.index > #job.stages then
         pcall(bot.call, "chat", { message = "[castle] finished. Run castle farms to water, till and sow the plots" })
         job = nil
+        CREATIVE_CONSTRUCTION = false
         save(JOB_FILE, nil)
     else
         hand_over()
@@ -1152,16 +1179,17 @@ end
 local castle_tool = {
     name = "castle",
     description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), explore (the same road builder as an explorer: it finds the structures itself with /locate, from the origin and then from the end of each road it lays, so it reaches further and further: structures = what to look for, default villages, pillager outposts, ruined portals, desert and jungle temples, igloos, swamp huts, mineshafts, trail ruins, trial chambers; radius = how far from the origin, default 1500; each find is announced in the chat and gets a road with a signpost at both ends and a waypoint sign every 128 blocks saying where it leads and how far is left; stop=true gives the bot back), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
-    params = { action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string" },
+    params = { creative = "boolean", action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string" },
     run = function(args)
         local action = args.action or "status"
         if action == "status" then
-            if not job then return { building = false } end
+            if not job then return { building = false, site = job_site or load_site() } end
             local left = progress()
-            return { building = true, stage = job.stages[job.index].name, stage_number = job.index, stages = #job.stages, blocks_left = left }
+            return { building = true, stage = job.stages[job.index].name, stage_number = job.index, stages = #job.stages, blocks_left = left, site = job_site, creative = job.creative }
         elseif action == "stop" then
             forget_unbuilt_site(job)
             job = nil
+            CREATIVE_CONSTRUCTION = false
             return "castle job dropped"
         elseif action == "farms" then
             job_site = job_site or load_site()
@@ -1306,7 +1334,7 @@ local castle_tool = {
             hand_over()
             return { started = true, stages = #job.stages, levelling_blocks = #ground, unseen_columns = unseen }
         end
-        local stages = structures(cx, y, cz, item, args.floor or "stone_bricks")
+        local stages = structures(cx, y, cz, item, args.floor or "stone_bricks", args.creative)
         if action == "plan" then
             local out, total = {}, 0
             for _, s in ipairs(stages) do out[#out + 1] = { stage = s.name, blocks = #s.blocks }; total = total + #s.blocks end
@@ -1323,7 +1351,7 @@ local castle_tool = {
             table.insert(stages, 1, { name = "levelling", blocks = ground })
             local new_site = { cx - OUTER, y - 12, cz - OUTER, cx + OUTER, y + 40, cz + OUTER }
             if job and job.site and table.concat(job.site, " ") ~= table.concat(new_site, " ") then forget_unbuilt_site(job) end
-            job = { stages = chunked(stages), index = 1, site = new_site }
+            job = { stages = chunked(stages), index = 1, site = new_site, creative = args.creative }
             job_site = { x = cx, y = y, z = cz, plots = plots(cx, cz) }
             save_site()
             hand_over()

@@ -104,6 +104,7 @@ bot.every(5, function()
                 bot.spawn(name, function()
                     -- Still covering its basics (shelter, wood, workbench, furnace, seeds, water, its field, bread): no turn
                     local okst, st = pcall(bot.call, "status", { bot = name })
+                    if okst and type(st) == "table" and st.game_mode == "creative" and st.building then return end
                     if okst and type(st) == "table" and st.basics then
                         notes[name] = "basics first: " .. tostring(st.basics)
                         return

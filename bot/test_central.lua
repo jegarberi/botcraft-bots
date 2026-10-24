@@ -65,6 +65,19 @@ local before = #worker.assignments
 for _, line in ipairs(lines) do worker.chat('<Brain> ' .. line) end
 assert(#worker.assignments == before)
 for _, line in ipairs(lines) do assert(#line <= 256) end
+local received = {}
+leader.env.NETLINK_BUILD.listen(function(from, raw)
+    received[#received+1] = {from=from, raw=raw}
+    return 'ok'
+end)
+local ballot = 'V' .. string.rep('\0', 200)
+worker.env.NETLINK_BUILD.send(ballot)
+other.env.NETLINK_BUILD.send('Vforged')
+for _=1,40 do
+    now=now+2
+    for _, inst in ipairs(instances) do inst.timers[2]() end
+end
+assert(#received == 1 and received[1].from == 'bbbbbb' and received[1].raw == ballot, 'compressed construction messages require the shared key')
 worker.tools.central{mode='off'}
 assert(not worker.env.CENTRAL_ACTIVE)
 print('central coordination OK: multi-host reports, food priorities, signed authority, replay rejection, bounded compression')

@@ -1,6 +1,7 @@
 -- Offline check of the castle plugin: every stage of the full plan and of the miniature must build its list
 -- without error. lua5.4 test_castle.lua plugins/castle.lua
 local tool, tick, orders, handed, sites = nil, nil, {}, {}, {}
+local creative = false
 bot = { call = function(name, a)
     if name == "team" then
         handed[#handed + 1] = a
@@ -18,8 +19,8 @@ bot = { call = function(name, a)
     if name == "locate" then return { x = 40, z = 0 } end
     -- A pit 3 deep at x 5..6, z 5: the floor over it must stand on dirt down to the stone
     if name == "get_block" then return { block = (a.y < 70 and not (a.x >= 5 and a.x <= 6 and a.z == 5 and a.y >= 66)) and "minecraft:stone" or "minecraft:air" } end
-    if name == "status" then return { position = { x = 0, y = 70, z = 0 }, building = false, build_left = 0, build_idle = 0 } end
-    if name == "bots" then return { { name = "Bot1" } } end
+    if name == "status" then return { position = { x = 0, y = 70, z = 0 }, building = false, build_left = 0, build_idle = 0, game_mode = creative and a.bot ~= "Survival" and "creative" or "survival", dimension = "minecraft:overworld" } end
+    if name == "bots" then return creative and { { name = "Bot1" }, { name = "Survival" } } or { { name = "Bot1" } } end
     if name == "mines" then return { { x = 120, y = 70, z = 90, resources = "iron_ore,coal_ore" } } end
     if name == "vault" then return { chests = {}, full = false } end
     if name == "inventory" then return {} end
@@ -66,4 +67,13 @@ saved:close()
 tool.run({ action = "stop" })
 os.remove("../roadbot_job.lua")
 os.remove("../castle_job.lua")
+creative = true
+local creative_plan = tool.run({ action = "plan", x = 0, y = 70, z = 0, creative = true })
+local planted = false
+for _, stage in ipairs(creative_plan.stages) do if stage.stage == "planted farms" then planted = stage.blocks == 7 * 80 * 2 end end
+assert(planted, "creative plan includes tilled and planted farms")
+orders = {}
+assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
+assert(#orders == 1 and orders[1].bot == "Bot1", "only creative bots receive automatic build orders")
+tool.run({action = "stop"})
 print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")

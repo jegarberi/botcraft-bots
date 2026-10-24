@@ -51,6 +51,33 @@ remembers seeing, and its decision tree with the branch it is on.
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
 
+## Creative construction and a shared site
+
+For Minecraft Java 26.3, `status.game_mode` reflects the server's current mode. When at least one
+bot is creative, bots automatically choose where to build the castle, its seven-house village and
+seven planted wheat farms. Survival bots take part in choosing the site; creative bots do the building.
+
+After a two-minute join window, every overworld bot proposes coordinates based on terrain it can
+see. The council favors drier, flatter, better-observed ground and shorter travel for the community.
+Bots joining during deliberation are included. Proposals stay fixed while the vote settles.
+Hosts exchange compressed base64 proposals over Minecraft chat, and the host with the lowest netlink
+ID requests approval of the same vote set. Every participating host must approve before it announces
+`[build] ... bots agreed: castle, village and farms at X Y Z (overworld)` and starts construction.
+Use `creative_build {}` to inspect proposals, the decision and progress.
+
+Across hosts, install the same `bot/netlink_key.txt` and unique netlink IDs as described below.
+Without that key the council includes only local bots. Disconnected voting hosts expire after four
+minutes; agreement covers participating hosts, so disconnected or chat-isolated groups cannot vote
+together. Bots joining after agreement keep that decision; a new host joining after the vote can use
+the announced coordinates with the `castle` tool. Chat latency can delay agreement. Existing castle jobs and saved sites are retained instead
+of automatically replaced. `castle {action="stop"}` stops the current construction job.
+
+Creative builders use creative inventory packets to obtain materials, water, a hoe and seeds;
+operator commands are not required for inventory supply. Pre-existing inventory items are retained;
+when full, only stacks supplied by creative mode can be replaced. The existing placement and travel
+routines still determine which blocks can be reached. Terrain sampling does not guarantee a perfect
+269×269 site, and construction retains the castle planner's existing retry and stage timeout behavior.
+
 ## Central brain across hosts
 
 All hosts must connect to the same Minecraft Java server with shared global chat (the current

@@ -507,6 +507,7 @@ public:
     std::chrono::steady_clock::time_point give_ups_since{};
     std::atomic<bool> walled_in = false;
     bool basics_done = false;
+    std::set<ItemId> creative_supplies; // Items supplied by creative inventory, safe to replace when full.
     std::string GetBasics()
     {
         std::lock_guard<std::mutex> lock(basics_mutex);
@@ -1889,7 +1890,13 @@ static Status PlaceCheckedBlock(BehaviourClient& c, const std::string& item, con
     const auto world = c.GetWorld();
     const Blockstate* before = chest ? world->GetBlock(p) : nullptr;
     const bool already_there = before != nullptr && before->GetName() == item;
-    const Status result = Botcraft::PlaceBlock(c, item, p, face, wait_confirmation || chest, allow_midair_placing, allow_pathfinding);
+    const bool wheat = item == "minecraft:wheat_seeds";
+    const Status result = Botcraft::PlaceBlock(c, item, p, face, (wait_confirmation || chest) && !wheat, allow_midair_placing, allow_pathfinding);
+    if (wheat && result == Status::Success && wait_confirmation)
+    {
+        return Utilities::YieldForCondition([&]() { const Blockstate* crop = world->GetBlock(p); return crop != nullptr && crop->GetName() == "minecraft:wheat"; }, c, 2000)
+            ? Status::Success : Status::Failure;
+    }
     if (!chest || already_there || result != Status::Success) return result;
     const Blockstate* placed = world->GetBlock(p);
     if (placed == nullptr || placed->GetName() != item) return result;
@@ -4355,6 +4362,7 @@ static Status MakeToolStep(McpBot& c, const std::string& kind)
 /// @brief Before a team build: the wooden tools, and with --chests a chest to store what the bot digs out
 static bool ReadyToBuild(McpBot& c)
 {
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative) return true;
     return !c.gear || ((c.IsGearSkipped("wooden tools") || HasTools(c, any_tier)) &&
         (!auto_store || c.IsGearSkipped("chest") || CountItem(c, "minecraft:chest") > 0));
 }
@@ -5044,6 +5052,40 @@ static Status FishTask(BehaviourClient& c, const int casts, std::atomic<int>& ca
     return Status::Success;
 }
 
+/// @brief Creative inventory action, on the behaviour thread. Never replaces an occupied slot.
+static bool CreativeItem(McpBot& c, const std::string& item)
+{
+    if (c.GetLocalPlayer()->GetGameMode() != GameType::Creative) return false;
+    if (CountItem(c, item) > 0) return true;
+    const Item* definition = AssetsManager::getInstance().GetItem(item);
+    if (definition == nullptr) return false;
+    const auto inventory = c.GetInventoryManager()->GetPlayerInventory();
+    short target = -1;
+    for (short slot = Window::INVENTORY_STORAGE_START; slot < 45; ++slot)
+    {
+        if (inventory->GetSlot(slot).IsEmptySlot()) { target = slot; break; }
+    }
+    if (target < 0)
+    {
+        for (short slot = Window::INVENTORY_STORAGE_START; slot < 45; ++slot)
+        {
+            const auto contents = inventory->GetSlot(slot);
+            if (!contents.IsEmptySlot() && c.creative_supplies.count(contents.GetItemId())) { target = slot; break; }
+        }
+    }
+    if (target < 0) { c.SetNote("creative inventory full: make room for " + item); return false; }
+    ProtocolCraft::Slot stack;
+    stack.SetItemId(definition->GetId());
+    stack.SetItemCount(definition->GetStackSize());
+    auto packet = std::make_shared<ProtocolCraft::ServerboundSetCreativeModeSlotPacket>();
+    packet->SetSlotNum(target);
+    packet->SetItemStack(stack);
+    c.GetNetworkManager()->Send(packet);
+    const bool supplied = Utilities::YieldForCondition([&]() { return CountItem(c, item) > 0; }, c, 2000);
+    if (supplied) c.creative_supplies.insert(definition->GetId());
+    return supplied;
+}
+
 enum class Supply
 {
     Have,
@@ -5326,7 +5368,7 @@ static Status BuildStep(McpBot& c)
     // The block itself, without the text of a sign
     const Wanted wanted_next(next->second);
     std::string item = wanted_next.item;
-    if (CountItem(c, item) == 0 && !OtherWood(c, item).empty())
+    if (c.GetLocalPlayer()->GetGameMode() != GameType::Creative && CountItem(c, item) == 0 && !OtherWood(c, item).empty())
     {
         item = OtherWood(c, item);
     }
@@ -5362,7 +5404,8 @@ static Status BuildStep(McpBot& c)
         // Its chunk went out of view meanwhile (a teleport, the bot walked off): look again next time
         return Status::Success;
     }
-    if (!block->IsAir() && !block->IsFluid() && !(item != "minecraft:air" && block->GetName() == "minecraft:snow"))
+    if (!block->IsAir() && !block->IsFluid() && !(item != "minecraft:air" && block->GetName() == "minecraft:snow") &&
+        !(c.GetLocalPlayer()->GetGameMode() == GameType::Creative && item == "minecraft:farmland" && (block->GetName() == "minecraft:dirt" || block->GetName() == "minecraft:grass_block")))
     {
         // Never what the bots live on
         const std::string& name = block->GetName();
@@ -5387,6 +5430,21 @@ static Status BuildStep(McpBot& c)
         }
         return c.GetGoal().second > 0 && CountItem(c, "minecraft:bucket") + CountItem(c, "minecraft:water_bucket") == 0 ? Status::Failure : Status::Success;
     }
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && item == "minecraft:farmland")
+    {
+        if (CreativeItem(c, "minecraft:dirt"))
+        {
+            const Blockstate* soil = world->GetBlock(p);
+            if (soil != nullptr && soil->IsAir()) PlaceBlock(c, "minecraft:dirt", p, std::nullopt, true);
+            if (CreativeItem(c, "minecraft:diamond_hoe") && GoTo(c, p, 3) == Status::Success &&
+                SetItemInHand(c, "minecraft:diamond_hoe") == Status::Success)
+            {
+                InteractWithBlock(c, p, PlayerDiggingFace::Up);
+            }
+        }
+        return Status::Success;
+    }
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && item == "minecraft:wheat") item = "minecraft:wheat_seeds";
     // Keep the site lit where the bot works: every 8 seconds it checks the spot it stands on
     if (std::chrono::steady_clock::now() >= c.light_retry_at)
     {
@@ -6059,6 +6117,7 @@ static bool InfiniteWater(McpBot& c, const Position& middle, std::string& error)
 /// @return Failure only when the pouring itself did not work
 static Status PourStep(McpBot& c, const Position& p)
 {
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && !CreativeItem(c, "minecraft:water_bucket")) return Status::Failure;
     const std::shared_ptr<World> world = c.GetWorld();
     if (CountItem(c, "minecraft:water_bucket") == 0)
     {
@@ -6116,6 +6175,10 @@ static Status PourStep(McpBot& c, const Position& p)
 /// @param more One more round of making it even though the bot has some (a number to reach, not just "some")
 static Supply Obtain(McpBot& c, const std::string& item, const int depth, const bool more)
 {
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+    {
+        return CreativeItem(c, item) ? Supply::Have : Supply::Unavailable;
+    }
     if (!more && CountItem(c, item) > 0)
     {
         return Supply::Have;
@@ -7456,6 +7519,7 @@ static bool WaterBySoil(BehaviourClient& c)
 static std::vector<std::string> MissingBasics(McpBot& c)
 {
     std::vector<std::string> missing;
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative) return missing;
     Position farm, own;
     const bool has_farm = OwnFarm(c, farm);
     if (!c.basics_done)
@@ -7796,6 +7860,15 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     c.last_decision = std::chrono::steady_clock::now();
                     return Status::Failure;
                 })
+            .sequence("creative construction")
+                .leaf("creative bot with a build objective?", [](McpBot& c)
+                    {
+                        if (c.GetLocalPlayer()->GetGameMode() != GameType::Creative) return Status::Failure;
+                        std::lock_guard<std::mutex> lock(c.team_mutex);
+                        return c.team.building && std::chrono::steady_clock::now() >= c.build_retry_at ? Status::Success : Status::Failure;
+                    })
+                .leaf("build with creative inventory", BuildStep)
+            .end()
             .leaf("out of bed with its gear off? back on", [](McpBot& c)
                 {
                     // Woken in the night (a monster, the watchdog): it is not sleeping when the tree runs from the top
@@ -11677,7 +11750,8 @@ static bool CallFromLua(lua_State* L, const char* name)
             try { target = TargetBot(args); } catch (const std::exception&) {}
             // Except a starving bot walking to the one that feeds it
             const bool starving = target && name == std::string("goto") && target->GetLocalPlayer() && target->GetLocalPlayer()->GetFood() <= 6;
-            const std::string basics = target && !starving ? target->GetBasics() : "";
+            const bool creative = target && target->GetLocalPlayer() && target->GetLocalPlayer()->GetGameMode() == GameType::Creative;
+            const std::string basics = target && !starving && !creative ? target->GetBasics() : "";
             if (!basics.empty())
             {
                 throw std::runtime_error(target->GetNetworkManager()->GetMyName() + " is covering its basics first (" + basics + "): other work waits");
