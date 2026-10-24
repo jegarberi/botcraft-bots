@@ -165,7 +165,10 @@ end
 -- of the three other walls, and a pitched roof of wooden stairs: two rows on each side rising to a ridge
 -- of planks, the gable ends closed with the wall block
 -- door: the side of the doorway, as a step from the middle, { 0, -1 } north by default (the street side)
-local function house(list, x0, y, z0, item, door_side)
+local function house(list, x0, y, z0, item, door_side, creative)
+    if creative then item = "stone_bricks" end
+    local stairs = creative and "stone_brick_stairs" or (ROOF .. "_stairs")
+    local ridge = creative and "stone_bricks" or (ROOF .. "_planks")
     local ddx, ddz = table.unpack(door_side or { 0, -1 })
     for dy = 0, 2 do
         for dx = -2, 2 do
@@ -177,7 +180,7 @@ local function house(list, x0, y, z0, item, door_side)
                 -- Wooden posts at the corners, the walls between of stone, as in the reference picture
                 local corner = math.abs(dx) == 2 and math.abs(dz) == 2
                 if edge and not door then
-                    add(list, x0 + dx, y + dy, z0 + dz, window and "glass_pane" or (corner and (ROOF .. "_log") or item))
+                    add(list, x0 + dx, y + dy, z0 + dz, window and "glass_pane" or (corner and not creative and (ROOF .. "_log") or item))
                 end
             end
         end
@@ -187,11 +190,11 @@ local function house(list, x0, y, z0, item, door_side)
     add(list, x0 + 2 * ddx, y + 1, z0 + 2 * ddz, ROOF .. "_door[facing=" .. door_facing .. ",half=upper]")
     for dx = -2, 2 do
         -- A stair's high side is the way it faces: toward the ridge, so north on the south slope
-        add(list, x0 + dx, y + 3, z0 - 2, ROOF .. "_stairs[facing=south,half=bottom]")
-        add(list, x0 + dx, y + 3, z0 + 2, ROOF .. "_stairs[facing=north,half=bottom]")
-        add(list, x0 + dx, y + 4, z0 - 1, ROOF .. "_stairs[facing=south,half=bottom]")
-        add(list, x0 + dx, y + 4, z0 + 1, ROOF .. "_stairs[facing=north,half=bottom]")
-        add(list, x0 + dx, y + 5, z0, ROOF .. "_planks")
+        add(list, x0 + dx, y + 3, z0 - 2, stairs .. "[facing=south,half=bottom]")
+        add(list, x0 + dx, y + 3, z0 + 2, stairs .. "[facing=north,half=bottom]")
+        add(list, x0 + dx, y + 4, z0 - 1, stairs .. "[facing=south,half=bottom]")
+        add(list, x0 + dx, y + 4, z0 + 1, stairs .. "[facing=north,half=bottom]")
+        add(list, x0 + dx, y + 5, z0, ridge)
     end
     for _, dx in ipairs({ -2, 2 }) do
         for dz = -1, 1 do add(list, x0 + dx, y + 3, z0 + dz, item) end
@@ -548,7 +551,7 @@ local function structures(cx, y, cz, item, paving, creative)
     end
     stage("floor", function(l)
         floor(l, cx, y, cz, paving)
-        for _, p in ipairs(houses(cx, cz)) do house_floor(l, p[1], y, p[2], paving) end
+        for _, p in ipairs(houses(cx, cz)) do house_floor(l, p[1], y, p[2], creative and "stone_bricks" or paving) end
     end)
     stage("vault", function(l) vault(l, cx, y, cz, item) end)
     -- Once the vault stands, its chests are declared: from then on the bots sort what they store by category
@@ -559,7 +562,7 @@ local function structures(cx, y, cz, item, paving, creative)
     end
     stage("keep", function(l) keep(l, cx, y, cz, item) end)
     stage("first wall and towers", function(l) walled(l, cx, cz, R1, y, y + 3, item) end)
-    stage("village", function(l) for _, p in ipairs(houses(cx, cz)) do house(l, p[1], y, p[2], item, p[3]) end end)
+    stage("village", function(l) for _, p in ipairs(houses(cx, cz)) do house(l, p[1], y, p[2], item, p[3], creative) end end)
     stage("paths and fountain", function(l) paths(l, cx, y, cz, item); fountain(l, cx, y, cz, item) end)
     stage("second wall and towers", function(l) walled(l, cx, cz, R2, y, y + 3, item) end)
     stage("farm plots", function(l) for _, p in ipairs(plots(cx, cz)) do plot(l, p[1], y, p[2]) end end)

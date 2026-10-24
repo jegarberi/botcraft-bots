@@ -2,6 +2,7 @@
 // with a decision tree (autopilot), a live view/tree window, view snapshots and Lua plugins.
 // Usage: bot_mcp --help
 #include "creative_flight.hpp"
+#include "creative_inventory.hpp"
 
 #include <algorithm>
 #include <array>
@@ -5132,20 +5133,14 @@ static bool CreativeItem(McpBot& c, const std::string& item, const int minimum =
     const Item* definition = AssetsManager::getInstance().GetItem(item);
     if (definition == nullptr) return false;
     const auto inventory = c.GetInventoryManager()->GetPlayerInventory();
-    short target = -1;
-    for (short slot = Window::INVENTORY_STORAGE_START; slot < 45; ++slot)
-    {
-        if (inventory->GetSlot(slot).IsEmptySlot()) { target = slot; break; }
-    }
-    if (target < 0)
-    {
-        for (short slot = Window::INVENTORY_STORAGE_START; slot < 45; ++slot)
+    const short target = CreativeInventory::SupplySlot(inventory->GetSlots(), definition->GetId(), definition->GetStackSize(),
+        [&](const ProtocolCraft::Slot& contents)
         {
-            const auto contents = inventory->GetSlot(slot);
-            if (!contents.IsEmptySlot() && contents.GetItemId() != definition->GetId() && c.creative_supplies.count(contents.GetItemId())) { target = slot; break; }
-        }
-    }
-    if (target < 0) { c.SetNote("creative inventory full: make room for " + item); return false; }
+            if (!contents.GetComponents().GetMap().empty()) return false;
+            const Item* held = AssetsManager::getInstance().GetItem(contents.GetItemId());
+            return held != nullptr && (held->GetStackSize() > 1 || c.creative_supplies.count(contents.GetItemId()));
+        });
+    if (target < 0) { c.SetNote("creative inventory has no reusable slot: keep customized items safe; make room for " + item); return false; }
     ProtocolCraft::Slot stack;
     stack.SetItemId(definition->GetId());
     stack.SetItemCount(definition->GetStackSize());

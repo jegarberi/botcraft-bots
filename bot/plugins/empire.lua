@@ -380,7 +380,9 @@ end
 
 local BUILDINGS = {
     { name = "House", age = 1, cost = { wood = 16 }, house = true,
-      make = function(o) return hut(o, 5, 5, 3, "oak_planks", "oak_log", "spruce_planks") end },
+      make = function(o, creative)
+          return hut(o, 5, 5, 3, creative and "stone_bricks" or "oak_planks", creative and "stone_bricks" or "oak_log",
+              creative and "stone_bricks" or "spruce_planks") end },
     { name = "Lumber Camp", age = 1, cost = { wood = 32 },
       make = function(o) return with(hut(o, 7, 5, 3, nil, "oak_log", "spruce_planks", true), o,
           { { 2, 0, 2, "oak_log" }, { 3, 0, 2, "oak_log" }, { 4, 0, 2, "oak_log" }, { 3, 1, 2, "oak_log" }, { 1, 0, 1, "chest" } }) end },
@@ -698,8 +700,13 @@ end
 
 local HOME_PLAN = 5
 local function home(o, owner)
+    local status = call("status", {bot = owner})
+    local creative = type(status) == "table" and status.game_mode == "creative"
+    local wall = creative and "stone_bricks" or "oak_planks"
+    local post = creative and "stone_bricks" or "oak_log"
+    local stairs = creative and "stone_brick_stairs" or "oak_stairs"
     local H = 4
-    local b, put = hut(o, 7, 7, H, "oak_planks", "oak_log", "air")
+    local b, put = hut(o, 7, 7, H, wall, post, "air")
     for x = 1, 5 do
         if x ~= 3 then put(x, 0, 6, "cobblestone") end      -- the doorway in the middle of the south side
         put(x, 0, 0, "cobblestone"); put(0, 0, x, "cobblestone"); put(6, 0, x, "cobblestone")
@@ -707,13 +714,13 @@ local function home(o, owner)
     for k = 0, 3 do
         for x = -1, 7 do
             -- A stair's high side is the way it faces: toward the ridge
-            put(x, H - 1 + k, k - 1, "oak_stairs[facing=south,half=bottom]")
-            put(x, H - 1 + k, 7 - k, "oak_stairs[facing=north,half=bottom]")
+            put(x, H - 1 + k, k - 1, stairs .. "[facing=south,half=bottom]")
+            put(x, H - 1 + k, 7 - k, stairs .. "[facing=north,half=bottom]")
         end
         for z = k, 6 - k do
             if k == 0 then break end      -- the walls' top row
-            put(0, H - 1 + k, z, "oak_planks"); put(6, H - 1 + k, z, "oak_planks")
-            for x = 1, 5 do put(x, H - 1 + k, z, k < 3 and "air" or "oak_planks") end    -- the ridge on top
+            put(0, H - 1 + k, z, wall); put(6, H - 1 + k, z, wall)
+            for x = 1, 5 do put(x, H - 1 + k, z, k < 3 and "air" or wall) end    -- the ridge on top
         end
     end
     -- The ground levelled under it first: o.y is the ground's height at its middle, which stays as it was (the house
@@ -1249,7 +1256,8 @@ local function construct(names, now)
     if not who then return end
     pay(b.cost)
     local at = lot(leader)
-    state.work = { name = b.name, bot = who, at = at, blocks = b.make(at) }
+    local status = b.house and call("status", {bot = who}) or nil
+    state.work = { name = b.name, bot = who, at = at, blocks = b.make(at, type(status) == "table" and status.game_mode == "creative") }
     hand(state.work)
     last_split = 0
     announce(who .. " builds a " .. b.name .. " at " .. at.x .. " " .. at.z)

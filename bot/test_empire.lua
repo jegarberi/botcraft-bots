@@ -7,6 +7,7 @@ for i = 1, 15 do names[i] = { name = "Bot" .. i }; carry["Bot" .. i] = 0 end
 local brain_on, tool, tick = true, nil, nil
 local building, builds, build_names = {}, {}, {}
 local homes_called = {}
+local creative_home = false
 bot = { call = function(name, a)
     if name == "bots" then return names end
     if name == "status" then
@@ -15,7 +16,7 @@ bot = { call = function(name, a)
         if a.bot == "Bot10" then inv.iron_sword = 1; inv.iron_chestplate = 1 end
         local b = (building[a.bot] or 0) > 0
         if b then building[a.bot] = building[a.bot] - 1 end
-        return { inventory = inv, health = 20, building = b, build_name = build_names[a.bot], build_done = not b and building[a.bot] ~= nil, build_left = b and 10 or 0, position = { x = 0, y = 64, z = 0 } }
+        return { game_mode = creative_home and a.bot == "Bot1" and "creative" or "survival", inventory = inv, health = 20, building = b, build_name = build_names[a.bot], build_done = not b and building[a.bot] ~= nil, build_left = b and 10 or 0, position = { x = 0, y = 64, z = 0 } }
     end
     if name == "leader" then return "Bot4" end
     if name == "berries" then return { bot = "Bot15" } end
@@ -62,6 +63,7 @@ local ok, err = pcall(function()
     end
     -- The village: a house for every bot first, no trade meanwhile, then every bot in a trade again
     local before, splits = #builds, #assigned
+    creative_home = true
     tool.run({ village = true })
     t = t + 60; tick()
     local homes = {}
@@ -84,16 +86,18 @@ local ok, err = pcall(function()
     t = t + 200; tick()        -- it waits 150 s after a load for the bots to come back
     for i = said + 1, #chat do assert(not chat[i]:match("built its house"), "not built after a restart: " .. chat[i]) end
     assert(#builds - handed >= 10, "handed again after a restart, got " .. (#builds - handed))
-    local furnished = {}
+    local furnished, creative_materials = {}, {}
     for i = before + 1, #builds do
         for _, e in ipairs(builds[i].blocks) do furnished[e[4]:match("^[%a_]+")] = true end
         if builds[i].name == "Bot1's house" then
+            for _, e in ipairs(builds[i].blocks) do creative_materials[e[4]:match("^[%a_]+")] = true end
             local sign = false
             for _, e in ipairs(builds[i].blocks) do sign = sign or e[4] == "oak_sign|Bot1's|house" end
             assert(sign, "a sign with its name")
         end
     end
     for _, k in ipairs({ "white_bed", "chest", "furnace", "oak_stairs", "oak_fence", "oak_door", "campfire", "composter", "dirt", "torch" }) do assert(furnished[k], "a house has a " .. k) end
+    assert(creative_materials.stone_bricks and creative_materials.stone_brick_stairs and not creative_materials.oak_planks, "creative personal houses use brick walls and roofs")
     for _ = 1, 30 do
         t = t + 60; tick()
         local ready = true

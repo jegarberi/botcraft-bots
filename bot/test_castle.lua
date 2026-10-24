@@ -86,6 +86,18 @@ assert(planted, "creative plan includes tilled and planted farms")
 orders = {}
 assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
 assert(#orders == 1 and orders[1].bot == "Bot1", "only creative bots receive automatic build orders")
+for _ = 1, 100 do
+    if tool.run({action = "status"}).stage:match("^village") then break end
+    tick()
+end
+assert(tool.run({action = "status"}).stage:match("^village"), "creative village stage reached")
+local bricks, roof = false, false
+for _, b in ipairs(orders[#orders].blocks) do
+    assert(not b[4]:match("_log$") and not b[4]:match("_planks$"), "creative houses use masonry for their structure")
+    bricks = bricks or b[4] == "stone_bricks"
+    roof = roof or b[4]:match("^stone_brick_stairs%[") ~= nil
+end
+assert(bricks and roof, "creative houses have brick walls, posts and pitched roofs")
 eggs = true
 local ranch = tool.run({action = "ranch"})
 assert(ranch.stocked == 4 and #animals == 8, "creative spawn eggs stock all four pens with breeding pairs")

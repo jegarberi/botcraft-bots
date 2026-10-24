@@ -55,7 +55,9 @@ remembers seeing, and its decision tree with the branch it is on.
 
 For Minecraft Java 26.3, `status.game_mode` reflects the server's current mode. When at least one
 bot is creative, bots automatically choose where to build the castle, its seven-house village and
-seven planted wheat farms. Survival bots take part in choosing the site; creative bots do the building.
+seven planted wheat farms. Creative houses use stone-brick walls, corner posts and roofs, with
+stone-brick floors in the castle village; doors, windows and furnishings retain their functional materials.
+Survival bots take part in choosing the site; creative bots do the building.
 
 After a two-minute join window, every overworld bot proposes coordinates based on terrain it can
 see. The council favors drier, flatter, better-observed ground and shorter travel for the community.
@@ -75,8 +77,9 @@ of automatically replaced. `castle {action="stop"}` stops the current constructi
 Creative bots skip survival resource routines and resource trade policies. Explicit `gather`, `collect`
 and `make` requests supply items through creative inventory instead of searching, mining or crafting.
 Creative builders use creative inventory packets to obtain materials, water, a hoe and seeds;
-operator commands are not required for inventory supply. Pre-existing inventory items are retained;
-when full, only stacks supplied by creative mode can be replaced. Creative travel and construction
+operator commands are not required for inventory supply. Customized inventory items are retained. When full, plain stackable materials can be reused even
+after a restart, and partial stacks of the requested item are topped up first; previously supplied
+plain creative tools can also be reused. Equipment and offhand slots are excluded. Creative travel and construction
 use flight through loaded, clear space (directly or over obstacles), and try server-permitted teleportation
 for distant loaded destinations. A denied teleport falls back to flight and then normal navigation.
 After the pens stand, spawn eggs supply pairs of cows, sheep, chickens and pigs; closed gates and
