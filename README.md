@@ -57,6 +57,10 @@ All hosts must connect to the same Minecraft Java server with shared global chat
 project targets Java 26.3). Put the same secret in `bot/netlink_key.txt` on each host and keep each
 host's `bot/netlink_id.txt` unique. These files are read when the plugins load.
 
+In either terminal panel, press `J` (also in the Enter action list) to switch the central coordinator
+on or off for this host. Switching on asks which connected bot will coordinate. The shared key
+must already be installed; errors appear in the panel. Worker hosts still use the MCP configuration below.
+
 Use the MCP tools on each running host:
 
 1. Call `netlink {}` to read its six-digit host ID.

@@ -557,7 +557,7 @@ int main()
                 }
             };
         const std::string menu = "🤖 botcraft  " + std::to_string(bots.size()) + (all_bots ? " bots   A [ALL BOTS]" : " bots   A [picked bot]") + "   Enter action list  ↕ pick  a 🚀 autopilot  e 🔧 gear  G ⛏️ gather  m 🔨 make  s 📦 store  f 🌾 farm  T 🗑️ drop items  w 🚶 follow player  W ⏹️ stop following  "
-            "p 🔄 poll bot  o " + std::string(auto_poll ? "⏸️ poll on request only" : "🔁 poll all") + "  l 🧭 find  n 🧠 neural network  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect (or to another server)  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
+            "p 🔄 poll bot  o " + std::string(auto_poll ? "⏸️ poll on request only" : "🔁 poll all") + "  l 🧭 find  n 🧠 neural network  J 🧠 central coordinator  d 👋 disconnect  D 🚪 all store and disconnect  R 🔄 all reconnect (or to another server)  c 🔌 connect  C ➕ spawn N bots  t 👥 team  x 💔 disband  : 🛠️ tool  q leave the panel  Q 🛑 stop the program";
         int menu_rows = 0;
         for (size_t at = 0; at < menu.size();)
         {
@@ -651,7 +651,7 @@ int main()
                 { 'B', "Build castle (whole team)" }, { 'r', "Build roads to mines (whole team)" },
                 { 'F', "Create crop farm (near water)" }, { 'M', "Mine ores / open mine as needed" },
                 { 'H', "Build shelter" }, { 'V', "Plant castle farms" }, { 'P', "Stock castle animal pens" },
-                { 'T', "Drop items (keep armor and tools), wait 10 s" }, { 'p', "Poll this bot now" }, { 'w', "Follow a player" }, { 'W', "Stop following, back to work" }
+                { 'T', "Drop items (keep armor and tools), wait 10 s" }, { 'p', "Poll this bot now" }, { 'w', "Follow a player" }, { 'W', "Stop following, back to work" }, { 'J', "Central coordinator on/off (this host)" }
             };
             std::vector<std::string> labels;
             for (const auto& action : actions) labels.push_back(action.second);
@@ -734,6 +734,30 @@ int main()
                     std::lock_guard<std::mutex> lock(mutex);
                     message = "count must be an integer from 1 to 100";
                 }
+            }
+        }
+        else if (key == 'J')
+        {
+            const int choice = PickList("Central coordinator (this host)", { "Switch on", "Switch off" });
+            if (choice == 0)
+            {
+                const std::vector<std::string> connected = names();
+                if (connected.empty())
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    message = "no bot connected: connect a bot before enabling the coordinator";
+                    continue;
+                }
+                const int selected = PickList("Which bot will be the coordinator?", connected);
+                if (selected < 0) continue;
+                args["mode"] = "leader";
+                args["bot"] = connected[selected];
+                run("", "central", args);
+            }
+            else if (choice == 1)
+            {
+                args["mode"] = "off";
+                run("", "central", args);
             }
         }
         else if (key == 't')

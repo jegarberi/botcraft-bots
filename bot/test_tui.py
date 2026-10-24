@@ -41,6 +41,25 @@ class TuiTests(unittest.TestCase):
         self.assertTrue(any('q quit' in text for _, text in screen.lines))
         self.assertTrue(any('[ALL BOTS]' in text for _, text in screen.lines))
 
+    def test_central_coordinator(self):
+        cases = [([0, 1], [{"name": "One"}, {"name": "Two"}], {"mode": "leader", "bot": "Two"}),
+                 ([1], [], {"mode": "off"}),
+                 ([-1], [{"name": "One"}], None),
+                 ([0, -1], [{"name": "One"}], None),
+                 ([0], [], None)]
+        for choices, bots, expected in cases:
+            with self.subTest(choices=choices, bots=bots):
+                screen = Screen()
+                screen.keys = iter([ord('A'), ord('J'), ord('q')])
+                with patch.multiple(tui.curses, curs_set=lambda n: None, use_default_colors=lambda: None), \
+                        patch.object(tui, 'state', return_value={'bots': bots}), \
+                        patch.object(tui, 'choose_list', side_effect=choices), patch.object(tui, 'run') as run:
+                    tui.main(screen)
+                if expected is None:
+                    run.assert_not_called()
+                else:
+                    run.assert_called_once_with('central', expected)
+
     def test_action_list_cancel(self):
         screen = Screen()
         screen.keys = iter([tui.curses.KEY_DOWN, 27])

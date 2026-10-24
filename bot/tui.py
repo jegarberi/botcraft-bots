@@ -100,7 +100,7 @@ def choose_action(screen, target):
                ("B", "Build castle (whole team)"), ("r", "Build roads to mines (whole team)"),
                ("F", "Create crop farm (near water)"), ("M", "Mine ores / open mine as needed"),
                ("H", "Build shelter"), ("V", "Plant castle farms"), ("P", "Stock castle animal pens"),
-               ("T", "Drop items (keep armor and tools), wait 10 s"), ("w", "Follow a player"), ("W", "Stop following, back to work")]
+               ("T", "Drop items (keep armor and tools), wait 10 s"), ("w", "Follow a player"), ("W", "Stop following, back to work"), ("J", "Central coordinator on/off (this host)")]
     selected = choose_list(screen, "Action for " + target, [label for _, label in actions])
     return -1 if selected < 0 else ord(actions[selected][0])
 
@@ -123,7 +123,7 @@ def main(screen):
         h, w = screen.getmaxyx()
         screen.erase()
         line = lambda y, text, attr=0: y < h - 1 and screen.addnstr(y, 0, text, w - 1, attr)
-        menu = "botcraft  %s  %d bots   Enter action list  ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  T drop  w follow  W unfollow  l find  d disconnect  D all  A target all  c connect  t team  x disband  : tool  q quit" % (URL, len(bots))
+        menu = "botcraft  %s  %d bots   Enter action list  ↑↓ pick  a autopilot  e gear  G gather  m make  s store  f farm  T drop  w follow  W unfollow  l find  d disconnect  D all  A target all  J central coordinator  c connect  t team  x disband  : tool  q quit" % (URL, len(bots))
         menu = ("[ALL BOTS]  " if all_bots else "[picked bot]  ") + menu
         menu_lines = textwrap.wrap(menu, max(1, w - 1))
         for y, part in enumerate(menu_lines):
@@ -173,6 +173,18 @@ def main(screen):
             elif key == ord("c"):
                 who = ask(screen, "connect bot named: ")
                 who and run("connect", {"name": who})
+            elif key == ord("J"):
+                choice = choose_list(screen, "Central coordinator (this host)", ["Switch on", "Switch off"])
+                if choice == 0:
+                    connected = [b["name"] for b in bots]
+                    if not connected:
+                        shown["message"] = "no bot connected: connect a bot before enabling the coordinator"
+                        continue
+                    selected = choose_list(screen, "Which bot will be the coordinator?", connected)
+                    if selected >= 0:
+                        run("central", {"mode": "leader", "bot": connected[selected]})
+                elif choice == 1:
+                    run("central", {"mode": "off"})
             elif key == ord("t"):
                 order = ask(screen, "team: objective (gather/attack/build/follow) what count [x1 y1 z1 x2 y2 z2]: ").split()
                 if order:
