@@ -1,16 +1,18 @@
 diff --git a/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp b/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
-index 0f6cf12..9a2de33 100644
+index 0f6cf12..d1403eb 100644
 --- a/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
 +++ b/botcraft/include/botcraft/AI/Tasks/PathfindingTask.hpp
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,9 @@
  #include "botcraft/AI/Status.hpp"
  #include "botcraft/Game/Vector3.hpp"
  
++#include <algorithm>
++#include <cmath>
 +#include <functional>
  #include <memory>
  
  namespace Botcraft
-@@ -38,6 +39,10 @@ namespace Botcraft
+@@ -38,6 +41,10 @@ namespace Botcraft
      /// @param sprint If true, the bot will sprint/swim when possible
      /// @param speed_factor Multiply vanilla speed if different from 1.0
      /// @return Success if goal is reached, Failure otherwise
@@ -21,6 +23,36 @@ index 0f6cf12..9a2de33 100644
      Status GoTo(BehaviourClient& client, const Position& goal, const int dist_tolerance = 0, const int min_end_dist = 0, const int min_end_dist_xz = 0, const bool allow_jump = true, const bool sprint = true, const float speed_factor = 1.0f);
  
      /// @brief Same thing as GoTo, but reads its parameters from the blackboard
+@@ -94,3 +101,29 @@ namespace Botcraft
+     Status SyncPosRotToServer(BehaviourClient& client);
+ 
+ } // namespace Botcraft
++
++namespace Botcraft::WaterNavigation
++{
++    struct Inputs
++    {
++        double forward;
++        double left;
++        bool jump;
++        bool reached;
++    };
++
++    // Water keeps pushing between ticks: steer against sideways drift and keep swimming up on every tick.
++    inline Inputs Towards(const double dx, const double dy, const double dz,
++        const double vx, const double vz, const double yaw)
++    {
++        const double distance = std::hypot(dx, dz);
++        const double scale = distance > 0.2 ? 0.09 / distance : 0.0;
++        const double ax = (dx * scale - vx) * 12.0;
++        const double az = (dz * scale - vz) * 12.0;
++        const double radians = yaw * 0.017453292519943295;
++        const double cosine = std::cos(radians), sine = std::sin(radians);
++        return { std::clamp(az * cosine - ax * sine, -1.0, 1.0),
++            std::clamp(ax * cosine + az * sine, -1.0, 1.0),
++            dy >= -0.2, distance < 0.2 && dy >= -0.75 && dy <= 0.2 };
++    }
++}
 diff --git a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
 index 260a52e..234e5af 100644
 --- a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
@@ -205,7 +237,7 @@ index ab9bafc..300ff17 100644
  #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
          std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
-index 958521f..ae7ec3e 100644
+index 958521f..0f78990 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp
 +++ b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 @@ -1,5 +1,9 @@
@@ -301,7 +333,38 @@ index 958521f..ae7ec3e 100644
                              break;
                          }
  
-@@ -960,6 +1000,10 @@ namespace Botcraft
+@@ -858,6 +898,30 @@ namespace Botcraft
+ 
+         local_player->LookAt(look_at_target, true);
+ 
++        const Blockstate* start_block = world->GetBlock(Position(
++            static_cast<int>(std::floor(local_player->GetX())),
++            static_cast<int>(std::floor(local_player->GetY())),
++            static_cast<int>(std::floor(local_player->GetZ()))));
++        if (start_block != nullptr && start_block->IsWater())
++        {
++            return Utilities::YieldForCondition([&]() -> bool
++                {
++                    if (local_player->GetDirtyInputs()) return false;
++                    const Vector3<double> position = local_player->GetPosition();
++                    const Vector3<double> speed = local_player->GetSpeed();
++                    const auto input = WaterNavigation::Towards(target_position.x - position.x,
++                        target_position.y - position.y, target_position.z - position.z,
++                        speed.x, speed.z, local_player->GetYaw());
++                    if (input.reached) return true;
++                    local_player->SetInputsForward(input.forward);
++                    local_player->SetInputsLeft(input.left);
++                    local_player->SetInputsJump(input.jump);
++                    local_player->SetInputsSneak(!input.jump);
++                    local_player->SetInputsSprint(false);
++                    return false;
++                }, client, (2.0 + std::sqrt(motion_vector.SqrNorm())) * 40.0 * ms_per_tick);
++        }
++
+         // Move horizontally (with a jump if necessary)
+         if (std::abs(motion_vector.x) > 0.5 || std::abs(motion_vector.z) > 0.5)
+         {
+@@ -960,6 +1024,10 @@ namespace Botcraft
          // If we need to go down, let the gravity do it's job, unless we are in a scaffholding or water,
          // in which case we need to press sneak to go down. If free falling in air, press sneak to catch
          // climbable at the bottom, preventing fall damage
@@ -312,7 +375,7 @@ index 958521f..ae7ec3e 100644
          if (local_player->GetY() > target_position.y && !Utilities::YieldForCondition([&]() -> bool
              {
                  // Previous inputs have not been processed by physics thread yet
-@@ -984,8 +1028,48 @@ namespace Botcraft
+@@ -984,8 +1052,48 @@ namespace Botcraft
                      (feet_block->IsFluidOrWaterlogged() || feet_block->IsScaffolding() || (feet_block->IsAir() && motion_vector.y < -2.5)));
                  local_player->SetInputsJump(local_player->GetFlying()); // Stop flying
  
@@ -362,7 +425,7 @@ index 958521f..ae7ec3e 100644
                  {
                      local_player->LookAt(look_at_target, false);
                      local_player->SetInputsForward(1.0);
-@@ -1129,7 +1213,43 @@ namespace Botcraft
+@@ -1129,7 +1237,43 @@ namespace Botcraft
              }, client, 20.0 * ms_per_tick);
      }
  
@@ -406,7 +469,7 @@ index 958521f..ae7ec3e 100644
      {
          if (min_end_dist > dist_tolerance)
          {
-@@ -1190,6 +1310,8 @@ namespace Botcraft
+@@ -1190,6 +1334,8 @@ namespace Botcraft
          const float step_height = 0.6f;
  #endif
          Position current_position;
@@ -415,7 +478,7 @@ index 958521f..ae7ec3e 100644
          do
          {
              // Wait until we are on the ground or climbing
-@@ -1211,6 +1333,41 @@ namespace Botcraft
+@@ -1211,6 +1357,41 @@ namespace Botcraft
                  static_cast<int>(std::floor(local_player->GetPosition().y + 0.25)),
                  static_cast<int>(std::floor(local_player->GetPosition().z))
              );
@@ -457,7 +520,7 @@ index 958521f..ae7ec3e 100644
  
              std::vector<std::pair<Position, float>> path;
              const bool is_goal_loaded = world->IsLoaded(goal_block);
-@@ -1297,7 +1454,49 @@ namespace Botcraft
+@@ -1297,7 +1478,49 @@ namespace Botcraft
  
                  // If something went wrong, break and
                  // replan the whole path to the goal

@@ -78,6 +78,10 @@ when full, only stacks supplied by creative mode can be replaced. The existing p
 routines still determine which blocks can be reached. Terrain sampling does not guarantee a perfect
 269×269 site, and construction retains the castle planner's existing retry and stage timeout behavior.
 
+Navigation in water steers in both horizontal directions while repeatedly swimming upward or diving,
+so a sideways current cannot leave a bot waiting motionless for a higher waypoint. Dry-land movement
+continues through the existing path follower.
+
 ## Central brain across hosts
 
 All hosts must connect to the same Minecraft Java server with shared global chat (the current

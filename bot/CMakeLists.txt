@@ -76,3 +76,8 @@ target_compile_options(test_weather PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -W
 add_executable(test_store EXCLUDE_FROM_ALL test_store.cpp)
 target_link_libraries(test_store PRIVATE bot_store)
 target_compile_options(test_store PRIVATE -UNDEBUG)
+
+add_executable(test_water_navigation EXCLUDE_FROM_ALL test_water_navigation.cpp)
+target_link_libraries(test_water_navigation PRIVATE botcraft)
+target_compile_features(test_water_navigation PRIVATE cxx_std_17)
+target_compile_options(test_water_navigation PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
