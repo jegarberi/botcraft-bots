@@ -807,9 +807,12 @@ end
 local function act(name, role, members, groups)
     local spec = ROLES[role]
     if not spec then error("no trade " .. tostring(role)) end
-    local net = net_of(name, role)
     local st = call("status", { bot = name })
     if type(st) ~= "table" or not st.name then return { note = "no answer from " .. name } end
+    if st.game_mode == "creative" then
+        return { action = "creative inventory", note = "resources are available without gathering" }
+    end
+    local net = net_of(name, role)
     if st.building then
         return { action = "continue construction", note = "keeping the active building order" }
     end

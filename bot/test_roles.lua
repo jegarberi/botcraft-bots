@@ -5,8 +5,10 @@ os.remove("../roles_state.lua"); os.remove("../brain_state.lua")
 local tools, last_ore, ticks = {}, nil, {}
 local stats = { collected = 0 }
 local gives = {}
+local creative_calls = {}
 local hungry, building = false, false
 bot = { call = function(name, a)
+    if a and a.bot == "Creative" then creative_calls[#creative_calls + 1] = name end
     if name == "give" then gives[#gives + 1] = a end
     if name == "bots" and hungry then return { { name = "Hungry" } } end
     if name == "status" then
@@ -16,17 +18,24 @@ bot = { call = function(name, a)
         if a.bot == "Home1" then inv = {} end
         if hungry and a.bot == "Bot2" then inv.bread = 12 end
         local is_building = building or a.bot == "Home1"
-        return { name = a.bot or "Bot1", building = is_building, health = 20, food = a.bot == "Hungry" and 0 or 18, day_time = 1000, inventory = inv,
+        return { name = a.bot or "Bot1", game_mode = a.bot == "Creative" and "creative" or "survival", building = is_building, health = 20, food = a.bot == "Hungry" and 0 or 18, day_time = 1000, inventory = inv,
             stats = stats, deaths = 0, times_stuck = 0, memory = { iron_ore = 3 }, position = { x = 0, y = 64, z = 0 } }
     end
     if name == "team_member" then last_ore = a.block end
     if name == "entities" then return {} end
+    if name == "farms" and a.build then return {x = 0, y = 64, z = 0} end
     return {}
 end, tool = function(t) tools[t.name] = t end, every = function(_, f) ticks[#ticks + 1] = f end, on_chat = function() end, log = print }
 for i = 1, #arg do load(io.open(arg[i]):read("a"), arg[i])() end
 local roles = tools.roles
 local function want(action)
     for _, o in ipairs(roles.run({ network = "miners", bot = "Bot1" }).outputs) do if o.name == action then return o.percent end end
+end
+for _, trade in ipairs({"miners", "lumberjacks", "bakers", "blacksmiths", "farmers"}) do
+    creative_calls = {}
+    local result = roles.run({act = "Creative", role = trade, members = {"Creative"}})
+    assert(result.action == "creative inventory", "creative bots must not run resource trade policies")
+    assert(#creative_calls == 1 and creative_calls[1] == "status", "creative trade turn must not gather, craft or search")
 end
 local before = want("mine iron")
 for _ = 1, 300 do

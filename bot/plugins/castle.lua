@@ -577,7 +577,12 @@ local function structures(cx, y, cz, item, paving, creative)
     end
     stage("pens", function(l) for _, p in ipairs(pens(cx, cz)) do pen(l, p, y, "spruce_fence") end end)
     -- Once they stand, the bots go and fetch animals for them (see ranch below)
-    stages[#stages].after = function() ranch_due = 0 end
+    stages[#stages].after = function()
+        ranch_due = 0
+        if creative and bot.spawn then
+            bot.spawn("creative-pens", function() pcall(bot.call, "castle", {action = "ranch", creative = true}) end)
+        end
+    end
     stage("third wall and towers", function(l) walled(l, cx, cz, R3, y, y + 2, item) end)
     stage("gatehouse", function(l) gatehouse(l, cx, y, cz, item) end)
     -- Last: it is all digging, and the bots can still walk in and out everywhere while they build
@@ -892,6 +897,49 @@ local function ranch(args)
         if ok and b.state and b.state.open ~= nil and (b.state.open == "true") ~= open then
             try("interact_block", { x = p.gate_x, y = y, z = p.gate_z })
         end
+    end
+    local builder = args.bot
+    if not builder then
+        for _, b in ipairs(bot.call("bots")) do
+            local ok, st = pcall(bot.call, "status", {bot = b.name})
+            if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then builder = b.name; break end
+        end
+    end
+    local okst, st = pcall(bot.call, "status", {bot = builder})
+    if okst and st.game_mode == "creative" then
+        args.bot = builder
+        local report, stocked = {}, 0
+        for _, p in ipairs(pens(cx, cz)) do
+            local function animals()
+                local count = 0
+                local ok, list = try("entities", {type = p.type})
+                for _, animal in ipairs(ok and list or {}) do
+                    local at = animal.position
+                    if at and math.abs(at.x - p.x) < 4 and math.abs(at.z - p.z) < 4 and math.abs(at.y - y) < 3 then count = count + 1 end
+                end
+                return count
+            end
+            gate(p, false)
+            local okgate, entrance = try("get_block", {x = p.gate_x, y = y, z = p.gate_z})
+            local okfloor, ground = try("get_block", {x = p.x, y = y - 1, z = p.z})
+            local before = animals()
+            local r = {pen = p.type, at = p.x .. " " .. p.z, spawned = 0}
+            if okgate and entrance.block and entrance.block:match("_fence_gate$") and entrance.state and entrance.state.open == "false"
+                and okfloor and ground.block and ground.block ~= "minecraft:air" and ground.block ~= "minecraft:water" then
+                for _ = before + 1, 2 do
+                    local ok = try("use_item", {item = p.type .. "_spawn_egg", x = p.x, y = y - 1, z = p.z})
+                    if not ok then break end
+                end
+                local count = animals()
+                r.spawned = math.max(0, count - before)
+                if count >= 2 then stocked = stocked + 1 end
+                r.note = count >= 2 and "stocked with spawn eggs" or "waiting for animals; will retry"
+            else
+                r.note = "waiting for a closed pen and solid floor"
+            end
+            report[#report + 1] = r
+        end
+        return {pens = report, stocked = stocked}
     end
     local report, stocked = {}, 0
     for _, p in ipairs(pens(cx, cz)) do

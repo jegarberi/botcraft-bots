@@ -2,6 +2,7 @@
 -- without error. lua5.4 test_castle.lua plugins/castle.lua
 local tool, tick, orders, handed, sites = nil, nil, {}, {}, {}
 local creative = false
+local eggs, animals = false, {}
 bot = { call = function(name, a)
     if name == "team" then
         handed[#handed + 1] = a
@@ -18,6 +19,16 @@ bot = { call = function(name, a)
     if name == "team_member" then orders[#orders + 1] = a return {} end
     if name == "locate" then return { x = 40, z = 0 } end
     -- A pit 3 deep at x 5..6, z 5: the floor over it must stand on dirt down to the stone
+    if eggs and name == "get_block" and a.y == 70 then return {block = "minecraft:spruce_fence_gate", state = {open = "false"}} end
+    if eggs and name == "entities" then
+        local list = {}
+        for _, animal in ipairs(animals) do if animal.type == a.type then list[#list + 1] = animal end end
+        return list
+    end
+    if eggs and name == "use_item" then
+        animals[#animals + 1] = {type = a.item:gsub("_spawn_egg$", ""), position = {x = a.x, y = a.y + 1, z = a.z}}
+        return {}
+    end
     if name == "get_block" then return { block = (a.y < 70 and not (a.x >= 5 and a.x <= 6 and a.z == 5 and a.y >= 66)) and "minecraft:stone" or "minecraft:air" } end
     if name == "status" then return { position = { x = 0, y = 70, z = 0 }, building = false, build_left = 0, build_idle = 0, game_mode = creative and a.bot ~= "Survival" and "creative" or "survival", dimension = "minecraft:overworld" } end
     if name == "bots" then return creative and { { name = "Bot1" }, { name = "Survival" } } or { { name = "Bot1" } } end
@@ -75,5 +86,10 @@ assert(planted, "creative plan includes tilled and planted farms")
 orders = {}
 assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
 assert(#orders == 1 and orders[1].bot == "Bot1", "only creative bots receive automatic build orders")
+eggs = true
+local ranch = tool.run({action = "ranch"})
+assert(ranch.stocked == 4 and #animals == 8, "creative spawn eggs stock all four pens with breeding pairs")
+assert(tool.run({action = "ranch"}).stocked == 4 and #animals == 8, "already stocked pens do not receive more animals")
+eggs = false
 tool.run({action = "stop"})
 print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")

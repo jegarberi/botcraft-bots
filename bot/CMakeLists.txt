@@ -81,3 +81,7 @@ add_executable(test_water_navigation EXCLUDE_FROM_ALL test_water_navigation.cpp)
 target_link_libraries(test_water_navigation PRIVATE botcraft)
 target_compile_features(test_water_navigation PRIVATE cxx_std_17)
 target_compile_options(test_water_navigation PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(test_creative_flight EXCLUDE_FROM_ALL test_creative_flight.cpp)
+target_compile_features(test_creative_flight PRIVATE cxx_std_17)
+target_compile_options(test_creative_flight PRIVATE -UNDEBUG -Wall -Wextra -Wpedantic -Werror)

@@ -1,6 +1,8 @@
 // MCP server (stdio, newline-delimited JSON-RPC) exposing a Botcraft bot as tools for an LLM,
 // with a decision tree (autopilot), a live view/tree window, view snapshots and Lua plugins.
 // Usage: bot_mcp --help
+#include "creative_flight.hpp"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -64,6 +66,7 @@
 #include "botcraft/Network/NetworkManager.hpp"
 #include "botcraft/Renderer/Settings.hpp"
 #include "botcraft/Utilities/Logger.hpp"
+#include "botcraft/Utilities/MiscUtilities.hpp"
 #include "botcraft/Utilities/SleepUtilities.hpp"
 #include "protocolCraft/AllPackets.hpp"
 #include "protocolCraft/Utilities/Json.hpp"
@@ -2493,6 +2496,65 @@ static Status CollectTask(BehaviourClient& c, const std::string& id, const int c
     return CollectTask(c, [&](const Blockstate& b) { return b.GetName() == id; }, count, radius, done);
 }
 
+static bool TeleportNear(McpBot& c, const int x, const int y, const int z, const bool even_if_near);
+
+static Status CreativeMove(McpBot& c, const Position& goal, const int tolerance)
+{
+    const auto player = c.GetLocalPlayer();
+    if (player->GetGameMode() != GameType::Creative || !player->GetMayFly()) return Status::Failure;
+    const auto world = c.GetWorld();
+    const auto open = [&](int x, int y, int z)
+    {
+        const Blockstate* block = world->GetBlock(Position(x, y, z));
+        return block != nullptr && !block->IsSolid() && !block->IsLava();
+    };
+    const Vector3<double> position = player->GetPosition();
+    const CreativeFlight::Point from{position.x, position.y, position.z};
+    CreativeFlight::Point destination{goal.x + 0.5, static_cast<double>(goal.y), goal.z + 0.5};
+    bool safe = false;
+    for (int up = std::min(tolerance, 2); up >= 0; --up)
+    {
+        destination[1] = goal.y + up;
+        if (CreativeFlight::Clear(destination, destination, open)) { safe = true; break; }
+    }
+    if (!safe) return Status::Failure;
+    const Position landing(goal.x, static_cast<int>(destination[1]), goal.z);
+    if (position.SqrDist(Vector3<double>(destination[0], destination[1], destination[2])) > 64.0 * 64.0 &&
+        TeleportNear(c, landing.x, landing.y, landing.z, false)) return Status::Success;
+    const auto route = CreativeFlight::Route(from, destination, open);
+    if (route.empty() || StartFlying(c) == Status::Failure) return Status::Failure;
+    Utilities::OnEndScope release([&]()
+    {
+        player->SetInputsForward(0.0);
+        player->SetInputsLeft(0.0);
+        player->SetInputsJump(false);
+        player->SetInputsSneak(false);
+    });
+    for (const auto& waypoint : route)
+    {
+        bool blocked = false;
+        const bool reached = Utilities::YieldForCondition([&]()
+        {
+            if (player->GetDirtyInputs()) return false;
+            const auto at = player->GetPosition();
+            const double dx = waypoint[0] - at.x, dy = waypoint[1] - at.y, dz = waypoint[2] - at.z;
+            if (dx * dx + dz * dz < 0.36 && std::abs(dy) < 0.4) return true;
+            const double length = std::max(1.0, std::sqrt(dx * dx + dy * dy + dz * dz));
+            blocked = !CreativeFlight::Clear({at.x, at.y, at.z}, {at.x + dx / length, at.y + dy / length, at.z + dz / length}, open);
+            if (blocked) return true;
+            player->LookAt(Vector3<double>(waypoint[0], at.y + 1.6, waypoint[2]), false);
+            player->SetInputsForward(dx * dx + dz * dz > 0.36 ? 0.5 : 0.0);
+            player->SetInputsSprint(false);
+            player->SetInputsJump(dy > 0.3);
+            player->SetInputsSneak(dy < -0.3);
+            return false;
+        }, c, 30000);
+        if (!reached || blocked) return Status::Failure;
+    }
+    c.SetNote("flew to " + std::to_string(landing.x) + " " + std::to_string(landing.y) + " " + std::to_string(landing.z));
+    return Status::Success;
+}
+
 /// @brief Walk a long way toward x z in hops the pathfinder can plan (it only knows the loaded chunks)
 static Status TravelTask(BehaviourClient& c, const double x, const double z)
 {
@@ -2506,6 +2568,15 @@ static Status TravelTask(BehaviourClient& c, const double x, const double z)
         if (distance <= 12.0)
         {
             return Status::Success;
+        }
+        if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+        {
+            if (McpBot* creative = dynamic_cast<McpBot*>(&c))
+            {
+                const double hop = std::min(distance, 32.0);
+                const Position target(static_cast<int>(me.x + dx / distance * hop), static_cast<int>(me.y), static_cast<int>(me.z + dz / distance * hop));
+                if (CreativeMove(*creative, target, 3) == Status::Success) continue;
+            }
         }
         const double hop = std::min(distance, 32.0);
         GoTo(c, BlockPos(Vector3<double>(me.x + dx / distance * hop, me.y, me.z + dz / distance * hop)), 6);
@@ -5052,11 +5123,12 @@ static Status FishTask(BehaviourClient& c, const int casts, std::atomic<int>& ca
     return Status::Success;
 }
 
-/// @brief Creative inventory action, on the behaviour thread. Never replaces an occupied slot.
-static bool CreativeItem(McpBot& c, const std::string& item)
+/// @brief Supply a stack on the behaviour thread, reusing only other creative-supplied items when full.
+static bool CreativeItem(McpBot& c, const std::string& item, const int minimum = 1)
 {
     if (c.GetLocalPlayer()->GetGameMode() != GameType::Creative) return false;
-    if (CountItem(c, item) > 0) return true;
+    const int before = CountItem(c, item);
+    if (before >= minimum) return true;
     const Item* definition = AssetsManager::getInstance().GetItem(item);
     if (definition == nullptr) return false;
     const auto inventory = c.GetInventoryManager()->GetPlayerInventory();
@@ -5070,7 +5142,7 @@ static bool CreativeItem(McpBot& c, const std::string& item)
         for (short slot = Window::INVENTORY_STORAGE_START; slot < 45; ++slot)
         {
             const auto contents = inventory->GetSlot(slot);
-            if (!contents.IsEmptySlot() && c.creative_supplies.count(contents.GetItemId())) { target = slot; break; }
+            if (!contents.IsEmptySlot() && contents.GetItemId() != definition->GetId() && c.creative_supplies.count(contents.GetItemId())) { target = slot; break; }
         }
     }
     if (target < 0) { c.SetNote("creative inventory full: make room for " + item); return false; }
@@ -5081,9 +5153,9 @@ static bool CreativeItem(McpBot& c, const std::string& item)
     packet->SetSlotNum(target);
     packet->SetItemStack(stack);
     c.GetNetworkManager()->Send(packet);
-    const bool supplied = Utilities::YieldForCondition([&]() { return CountItem(c, item) > 0; }, c, 2000);
+    const bool supplied = Utilities::YieldForCondition([&]() { return CountItem(c, item) > before; }, c, 2000);
     if (supplied) c.creative_supplies.insert(definition->GetId());
-    return supplied;
+    return supplied && CountItem(c, item) >= minimum;
 }
 
 enum class Supply
@@ -5372,6 +5444,8 @@ static Status BuildStep(McpBot& c)
     {
         item = OtherWood(c, item);
     }
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && me.SqrDist(Vector3<double>(p.x, p.y, p.z)) > 16.0 &&
+        CreativeMove(c, p, 3) == Status::Success) return Status::Success;
     const bool far_sideways = (me.x - p.x) * (me.x - p.x) + (me.z - p.z) * (me.z - p.z) > 32.0 * 32.0;
     if (!far_sideways && std::abs(me.y - p.y) > 20.0)
     {
@@ -5921,6 +5995,7 @@ static bool TakeFromChest(McpBot& c, const std::string& item)
 /// (placed here if the team has none yet), where the bots that have none will find it
 static void ShareSurplus(McpBot& c, const std::string& item)
 {
+    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative) return;
     if (CountItem(c, item) <= 128 || std::chrono::steady_clock::now() < c.share_retry_at)
     {
         return;
@@ -6415,6 +6490,11 @@ static void LightUp(BehaviourClient& c, const Position& where, const bool on_the
         return;
     }
     const std::string torch = "minecraft:torch";
+    if (CountItem(c, torch) == 0 && c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+    {
+        McpBot* builder = dynamic_cast<McpBot*>(&c);
+        if (builder == nullptr || !CreativeItem(*builder, torch)) return;
+    }
     if (CountItem(c, torch) == 0)
     {
         if (CountItem(c, "minecraft:coal") == 0 && CountItem(c, "minecraft:charcoal") == 0)
@@ -7836,6 +7916,11 @@ static Status BasicsStep(McpBot& c)
 
 // Each branch of the root selector is "condition? -> action", tried in priority order every tick.
 // Action leaves publish the bot state; the --gui window shows this tree live with the active node.
+static Status SurvivalResources(McpBot& c)
+{
+    return c.GetLocalPlayer()->GetGameMode() == GameType::Creative ? Status::Failure : Status::Success;
+}
+
 static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
 {
     return Builder<McpBot>("autopilot")
@@ -7908,6 +7993,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("break the block over its head, or one beside", UnstickStep)
             .end()
             .sequence("survive")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("hungry and has food?", [](McpBot& c)
                     {
                         return c.GetLocalPlayer()->GetFood() < 14 && !FindFood(c).empty() ? Status::Success : Status::Failure;
@@ -7937,6 +8023,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("urgent food")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("hungry with no food?", [](McpBot& c)
                     {
                         return c.GetLocalPlayer()->GetFood() < 8 && FindFood(c).empty() &&
@@ -8005,6 +8092,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("fight them together", AssistStep)
             .end()
             .sequence("recover")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("died less than 5 minutes ago and lost what it carried?", [](McpBot& c)
                     {
                         if (!c.recover_items)
@@ -8029,10 +8117,12 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("go back for the items", RecoverStep)
             .end()
             .sequence("salvage")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("a bot just died close by?", [](McpBot& c) { return c.salvage ? Status::Success : Status::Failure; })
                 .leaf("pick up what it dropped", SalvageStep)
             .end()
             .sequence("sleep")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("night, and a bed to sleep in?", [](McpBot& c)
                     {
                         if (IsNightTime(c) == Status::Failure)
@@ -8054,6 +8144,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("sleep until morning", SleepStep)
             .end()
             .sequence("night shelter")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("night, no bed, and a shelter of its own?", [](McpBot& c)
                     {
                         Position shelter;
@@ -8062,6 +8153,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("spend the night in it", ShelterNightStep)
             .end()
             .sequence("basics")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("still lacks a shelter, wood, a workbench, a furnace, seeds, water, a wheat field or bread? (checked every minute: it scans 32 blocks around)", [](McpBot& c)
                     {
                         const auto now = std::chrono::steady_clock::now();
@@ -8098,6 +8190,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             {
                                 return Status::Failure;
                             }
+                            if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && !c.team.wanted.empty()) return Status::Failure;
                             allowed = c.team.follow_distance;
                         }
                         // Sideways only: a leader mining 30 blocks below is still "with" the bot above
@@ -8156,6 +8249,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
             // Before any work that picks things up (orders, hunting, building, gathering): what is mined with
             // a full inventory is lost
             .sequence("store when full")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("chests on and inventory full?", [](McpBot& c)
                     {
                         return auto_store && InventoryFull(c) && std::chrono::steady_clock::now() >= c.store_retry_at ? Status::Success : Status::Failure;
@@ -8209,6 +8303,12 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                             std::lock_guard<std::mutex> lock(c.team_mutex);
                             at = c.team.order_at;
                             what = c.team.order_what;
+                            if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && !what.empty())
+                            {
+                                c.team.has_order = false;
+                                c.SetNote("creative inventory replaces resource scouting orders");
+                                return Status::Success;
+                            }
                         }
                         c.SetNote("leader's order: " + (what.empty() ? std::string("come") : "mine " + what) + " at " + std::to_string(at.x) + " " + std::to_string(at.y) + " " + std::to_string(at.z));
                         // On foot, then by tunnel if it has a pickaxe. Once there (or if there is no way), the order is done:
@@ -8278,6 +8378,17 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         const auto [item, count] = c.GetMake();
                         // Craft, smelt, or make what the recipe lacks. A raw material missing: the gather
                         // branch, next in the tree, goes for it
+                        if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+                        {
+                            const int before = CountItem(c, item);
+                            CreativeItem(c, item, count);
+                            if (CountItem(c, item) <= before)
+                            {
+                                c.SetNote("creative supply unavailable or inventory full: " + item);
+                                c.SetMake("", 0);
+                            }
+                            return Status::Success;
+                        }
                         return Obtain(c, item, 0, true) == Supply::Gathering ? Status::Failure : Status::Success;
                     })
             .end()
@@ -8297,6 +8408,22 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                                 c.needs_store = true;
                                 return Status::Failure;
                             };
+                        if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+                        {
+                            const auto wanted = SplitSpec(spec);
+                            for (const auto& candidate : wanted)
+                            {
+                                const std::string item = Id(candidate);
+                                if (AssetsManager::getInstance().GetItem(item) == nullptr) continue;
+                                const int before = CountItem(c, item);
+                                CreativeItem(c, item, before + std::min(left, 2304));
+                                const int supplied = std::max(0, CountItem(c, item) - before);
+                                c.SetGoal(spec, supplied > 0 ? std::max(0, left - supplied) : 0);
+                                c.SetNote(supplied > 0 ? "supplied from creative inventory: " + item : "creative supply unavailable or inventory full: " + item);
+                                return Status::Success;
+                            }
+                            return give_up("no creative inventory item matches this resource");
+                        }
                         std::vector<std::string> wanted = SplitSpec(spec);
                         const bool ore = std::any_of(wanted.begin(), wanted.end(), [](const std::string& item) { return EndsWith(item, "_ore"); });
                         if (ore)
@@ -8380,6 +8507,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("food")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no food?", [](McpBot& c)
                     {
                         {
@@ -8394,6 +8522,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                 .leaf("get food", GetFoodStep)
             .end()
             .sequence("out of the mine")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("underground with no pickaxe nor wood to make one?", [](McpBot& c)
                     {
                         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
@@ -8409,6 +8538,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("wood")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no wood?", [](McpBot& c)
                     {
                         return c.gear && !c.IsGearSkipped("wood") && !HasWood(c) ? Status::Success : Status::Failure;
@@ -8421,22 +8551,27 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("pickaxe")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no pickaxe?", LacksTool, "pickaxe")
                 .leaf("make pickaxe", MakeToolStep, "pickaxe")
             .end()
             .sequence("axe")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no axe?", LacksTool, "axe")
                 .leaf("make axe", MakeToolStep, "axe")
             .end()
             .sequence("sword")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no sword?", LacksTool, "sword")
                 .leaf("make sword", MakeToolStep, "sword")
             .end()
             .sequence("shovel")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("has no shovel?", LacksTool, "shovel")
                 .leaf("make shovel", MakeToolStep, "shovel")
             .end()
             .sequence("better tools")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("still missing stone tools or an iron pickaxe?", [](McpBot& c)
                     {
                         {
@@ -8455,6 +8590,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("farm")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("ripe crops within 16 blocks?", [](McpBot& c)
                     {
                         return RipeCrops(c, 16, 1).empty() ? Status::Failure : Status::Success;
@@ -8469,6 +8605,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("store")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("chests on and something to store?", [](McpBot& c)
                     {
                         // (not a builder: what it gathered is for the build)
@@ -8493,6 +8630,7 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                     })
             .end()
             .sequence("armor")
+                .leaf("needs survival resources?", SurvivalResources)
                 .leaf("still missing a bed, leather armor or a shield?", [](McpBot& c)
                     {
                         {
@@ -10746,7 +10884,11 @@ static Value CallTool(const std::string& name, const Value& a)
     {
         const Position p = Pos(a);
         const int tolerance = static_cast<int>(Num(a, "tolerance", 0));
-        return Act(bot, 120, "goto", [=](McpBot& c) { return GoTo(c, p, tolerance); });
+        return Act(bot, 120, "goto", [=](McpBot& c)
+        {
+            if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative && CreativeMove(c, p, tolerance) == Status::Success) return Status::Success;
+            return GoTo(c, p, tolerance);
+        });
     }
     if (name == "look_at")
     {
@@ -10816,6 +10958,18 @@ static Value CallTool(const std::string& name, const Value& a)
         const auto stored = std::make_shared<std::atomic<int>>(0);
         const bool finished = Run(bot, 300, name, [=](McpBot& c)
             {
+                if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+                {
+                    const int before = CountItem(c, id);
+                    for (int attempt = 0; attempt < count && CountItem(c, id) - before < count; ++attempt)
+                    {
+                        const int previous = CountItem(c, id);
+                        CreativeItem(c, id, before + count);
+                        if (CountItem(c, id) <= previous) break;
+                    }
+                    *done = std::max(0, CountItem(c, id) - before);
+                    return *done >= count ? Status::Success : Status::Failure;
+                }
                 const Status result = CollectTask(c, id, count, radius, *done);
                 std::string error;
                 if (auto_store && *done > 0)
@@ -10848,7 +11002,7 @@ static Value CallTool(const std::string& name, const Value& a)
     {
         const std::string item = Id(Str(a, "item"));
         const int count = std::clamp(static_cast<int>(Num(a, "count", 1)), 0, 2304);
-        if (count > 0 && recipes.count(item) == 0 && smelt_inputs.count(item) == 0)
+        if (count > 0 && me->GetGameMode() != GameType::Creative && recipes.count(item) == 0 && smelt_inputs.count(item) == 0)
         {
             throw std::runtime_error(item + " is neither crafted nor smelted: use collect or the autopilot's gather for raw materials");
         }
@@ -11237,7 +11391,19 @@ static Value CallTool(const std::string& name, const Value& a)
             {
                 const ProtocolCraft::Slot held = c.GetInventoryManager()->GetHotbarSelected();
                 const std::string in_hand = held.IsEmptySlot() ? "" : AssetsManager::getInstance().GetItem(held.GetItemId())->GetName();
-                return UseHeldAt(c, item.empty() ? in_hand : item, at);
+                const std::string using_item = item.empty() ? in_hand : item;
+                if (EndsWith(using_item, "_spawn_egg") && c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
+                {
+                    const Position floor = BlockPos(at);
+                    const Blockstate* ground = c.GetWorld()->GetBlock(floor);
+                    if (!ground || !ground->IsSolid() || !CreativeItem(c, using_item)) return Status::Failure;
+                    if (CreativeMove(c, floor + Position(0, 1, 0), 2) == Status::Failure && GoTo(c, floor, 3) == Status::Failure) return Status::Failure;
+                    if (SetItemInHand(c, using_item) == Status::Failure) return Status::Failure;
+                    const Status result = InteractWithBlock(c, floor, PlayerDiggingFace::Up);
+                    Wait(c, 500);
+                    return result;
+                }
+                return UseHeldAt(c, using_item, at);
             });
     }
     if (name == "travel")

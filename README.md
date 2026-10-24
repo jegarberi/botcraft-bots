@@ -72,9 +72,15 @@ together. Bots joining after agreement keep that decision; a new host joining af
 the announced coordinates with the `castle` tool. Chat latency can delay agreement. Existing castle jobs and saved sites are retained instead
 of automatically replaced. `castle {action="stop"}` stops the current construction job.
 
+Creative bots skip survival resource routines and resource trade policies. Explicit `gather`, `collect`
+and `make` requests supply items through creative inventory instead of searching, mining or crafting.
 Creative builders use creative inventory packets to obtain materials, water, a hoe and seeds;
 operator commands are not required for inventory supply. Pre-existing inventory items are retained;
-when full, only stacks supplied by creative mode can be replaced. The existing placement and travel
+when full, only stacks supplied by creative mode can be replaced. Creative travel and construction
+use flight through loaded, clear space (directly or over obstacles), and try server-permitted teleportation
+for distant loaded destinations. A denied teleport falls back to flight and then normal navigation.
+After the pens stand, spawn eggs supply pairs of cows, sheep, chickens and pigs; closed gates and
+existing animals are checked so retries do not keep adding animals. The existing placement and travel
 routines still determine which blocks can be reached. Terrain sampling does not guarantee a perfect
 269×269 site, and construction retains the castle planner's existing retry and stage timeout behavior.
 
