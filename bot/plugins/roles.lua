@@ -571,8 +571,9 @@ table.insert(ROLES.farmers.actions, { name = "build animal pen", run = function(
         members = { ctx.bot }, leader = ctx.bot, solo = true, name = ctx.bot .. "'s animal pen" })
     return err and tostring(err) or "building an animal pen"
 end })
-local function gate(ctx, o, open)
-    local args = { bot = ctx.bot, x = o.x + 2, y = o.y, z = o.z + 5 }
+-- Open or shut the fence gate at `at` (the pen's, the egg collector's)
+local function gate(ctx, at, open)
+    local args = { bot = ctx.bot, x = at.x, y = at.y, z = at.z }
     local b = call("get_block", args)
     if not b or not tostring(b.block):match("_fence_gate") then return false end
     local state = b.state
@@ -587,9 +588,10 @@ for _, animal in ipairs({ { "cow", "wheat" }, { "sheep", "wheat" }, { "pig", "ca
     table.insert(ROLES.farmers.actions, { name = "gather " .. animal[1], run = function(ctx)
         local o = pen(ctx)
         if not o or count(ctx.st, animal[2]) == 0 then return "needs a pen and " .. animal[2] end
-        if not gate(ctx, o, true) then return "pen gate is not ready" end
+        local at = { x = o.x + 2, y = o.y, z = o.z + 5 }
+        if not gate(ctx, at, true) then return "pen gate is not ready" end
         local _, err = call("lure", { bot = ctx.bot, type = animal[1], food = animal[2], x = o.x + 2, y = o.y, z = o.z + 2 })
-        local closed = gate(ctx, o, false)
+        local closed = gate(ctx, at, false)
         return err and tostring(err) or (closed and "led animals into the pen" or "animals led; could not close the gate")
     end })
     table.insert(ROLES.farmers.actions, { name = "breed " .. animal[1], run = function(ctx)
@@ -598,6 +600,34 @@ for _, animal in ipairs({ { "cow", "wheat" }, { "sheep", "wheat" }, { "pig", "ca
         return err and tostring(err) or "bred " .. animal[1]
     end })
 end
+-- Automatic farms (farms plugin): one of each plan per bot, at a free spot near it
+local function farm_of(ctx, plan)
+    for _, f in ipairs(call("farms", { built = true }) or {}) do
+        if f.bot == ctx.bot and f.plan == plan then return f end
+    end
+end
+local function build_farm(ctx, plan)
+    local what = (plan:gsub("_", " "))
+    if farm_of(ctx, plan) then return "already has a " .. what end
+    -- In the village its house comes first: until it stands the house order is handed again and replaces any other
+    local h = call("empire", { residence = ctx.bot })
+    if type(h) == "table" and h.ready == false then return "builds its house first" end
+    local r, err = call("farms", { build = plan, bot = ctx.bot })
+    return err or ("building a " .. what .. " at " .. r.x .. " " .. r.y .. " " .. r.z)
+end
+table.insert(ROLES.farmers.actions, { name = "build cactus farm", run = function(ctx) return build_farm(ctx, "cactus_farm") end })
+table.insert(ROLES.farmers.actions, { name = "build egg collector", run = function(ctx) return build_farm(ctx, "egg_collector") end })
+table.insert(ROLES.farmers.actions, { name = "fill egg collector", run = function(ctx)
+    local f = farm_of(ctx, "egg_collector")
+    if not f or count(ctx.st, "wheat_seeds") == 0 then return "needs an egg collector and wheat_seeds" end
+    -- Its gate is on the south side of the one-block pen, the hopper in the middle
+    local at = { x = f.x + 1, y = f.y, z = f.z + 2 }
+    if not gate(ctx, at, true) then return "egg collector gate is not ready" end
+    local _, err = call("lure", { bot = ctx.bot, type = "chicken", food = "wheat_seeds", x = f.x + 1, y = f.y, z = f.z + 1 })
+    local closed = gate(ctx, at, false)
+    return err and tostring(err) or (closed and "led chickens into the egg collector" or "chickens led; could not close the gate")
+end })
+table.insert(ROLES.blacksmiths.actions, { name = "build auto smelter", run = function(ctx) return build_farm(ctx, "auto_smelter") end })
 
 local ORDER = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
 

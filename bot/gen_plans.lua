@@ -49,7 +49,7 @@ local SYMBOLS = {
     campfire = "&", composter = "K", cobblestone_wall = "!", hay_block = "H", oak_pressure_plate = "_", carved_pumpkin = "U",
     smoker = "S", blast_furnace = "F", anvil = "A", smithing_table = "T", grindstone = "G", cauldron = "u", white_wool = "w",
     raw_iron_block = "I", coal_block = "k", white_carpet = "-", bookshelf = "%", stone_brick_stairs = "^", stone_slab = "_",
-    coarse_dirt = ",", spruce_fence_gate = "=", spruce_sign = "s",
+    coarse_dirt = ",", spruce_fence_gate = "=", spruce_sign = "s", hopper = "V", sand = ":", glass = "o", cactus = "Y",
 }
 local function base(item) return (tostring(item):gsub("^minecraft:", ""):gsub("[%[|].*$", "")) end
 
@@ -156,6 +156,7 @@ Identical layers in a row are drawn once ("y 1 to 3").
   fountain, roads
 - [The empire town and the village](#the-empire-town-and-the-village): huts, homes, gardens, shops, pens, roads,
   village walls
+- [Automatic farms](#automatic-farms): cactus farm, egg collector, auto-smelter
 - [Built by the program itself](#built-by-the-program-itself): crop farms with their water, shelter, mines, tunnels
 - [How a plan is built](#how-a-plan-is-built)
 ]])
@@ -300,6 +301,21 @@ sheep, pigs or chickens in with their food, closes it and breeds them.
 ```
 `+` oak fence, `=` oak fence gate, `.` air
 ]])
+
+-- ------------------------------------------------------------------ farms: the automatic farms
+load_plugin("farms")
+local F = crawl({ tools.farms.run })
+say([[## Automatic farms
+
+`farms { build = "<plan>", x =, y =, z = }` (the team) or `farms { build = "<plan>", bot = "<name>" }` (that bot,
+at a free spot near it); `farms {}` lists them with their materials. The farmers build the cactus farm and the egg
+collector on their own and lead chickens into the collector; the blacksmiths build the smelter.
+]])
+local farm_o = { x = 0, y = 64, z = 0 }
+for _, name in ipairs({ "cactus_farm", "egg_collector", "auto_smelter" }) do
+    local p = F("PLANS")[name]
+    plan((name:gsub("_", " "):gsub("^%l", string.upper)), p.text, p.blocks(farm_o))
+end
 
 -- ------------------------------------------------------------------ the program's own
 say([[## Built by the program itself

@@ -14,6 +14,7 @@ Identical layers in a row are drawn once ("y 1 to 3").
   fountain, roads
 - [The empire town and the village](#the-empire-town-and-the-village): huts, homes, gardens, shops, pens, roads,
   village walls
+- [Automatic farms](#automatic-farms): cactus farm, egg collector, auto-smelter
 - [Built by the program itself](#built-by-the-program-itself): crop farms with their water, shelter, mines, tunnels
 - [How a plan is built](#how-a-plan-is-built)
 
@@ -1745,7 +1746,7 @@ with its owner's name by the door, and in front the lot's campfire with log seat
 (dirt, a composter, corner torches). Trees on the lot are cleared first, and dirt fills under the floor where the
 ground is lower.
 
-993 blocks, 16 x 12 x 8 (west-east x north-south x height). Layers bottom first; north is up.
+1005 blocks, 16 x 12 x 8 (west-east x north-south x height). Layers bottom first; north is up.
 
 ```
 y -1
@@ -1757,9 +1758,9 @@ y -1
  ccccccc ccccccc
  ccccccc ccccccc
  ccccccc ccccccc
-   c c
-  cc
- cc
+   ccc
+  ccc
+ cc c
   c
 
 y 0
@@ -1771,9 +1772,9 @@ y 0
  c..^+^c cdddddc
  c.....c cdddddc
  LccDccL ccccccc
-   s +
-  L+
- L&
+   s.+
+  L+.
+ L& .
   L
 
 y 1
@@ -1785,9 +1786,9 @@ y 1
  p..._.p .......
  p.....p .......
  LppDppL *.....*
-     *
-   *
-
+    .*
+   *.
+    .
 
 
 y 2
@@ -1799,9 +1800,9 @@ y 2
  p.....p .......
  p...*.p .......
  LpppppL .......
-
-
-
+    .
+    .
+    .
 
 
 y 3
@@ -2447,6 +2448,119 @@ sheep, pigs or chickens in with their food, closes it and breeds them.
 ++=+++
 ```
 `+` oak fence, `=` oak fence gate, `.` air
+
+## Automatic farms
+
+`farms { build = "<plan>", x =, y =, z = }` (the team) or `farms { build = "<plan>", bot = "<name>" }` (that bot,
+at a free spot near it); `farms {}` lists them with their materials. The farmers build the cactus farm and the egg
+collector on their own and lead chickens into the collector; the blacksmiths build the smelter.
+
+### Cactus farm
+
+Cactus on sand in the middle of a 5 x 5 basin. A fence beside the block the cactus grows into breaks each new block off as it grows; the drops fall into a ring of water that runs from one corner to the opposite one, where a hopper under the water passes them to a chest. No redstone. Some drops land on the cactus and burn (the wiki calls these farms not very efficient): build several for more.
+
+126 blocks, 5 x 5 x 6 (west-east x north-south x height). Layers bottom first; north is up.
+
+```
+y -2
+
+
+
+   C
+
+
+y -1
+ccccc
+ccccc
+ccccc
+cccVc
+ccccc
+
+y 0
+ccccc
+c~..c
+c.:.c
+c...c
+ccccc
+
+y 1
+ooooo
+o...o
+o.Y.+
+o...o
+ooooo
+
+y 2
+.....
+.....
+...++
+.....
+.....
+
+y 3
+.....
+.....
+.....
+.....
+.....
+```
+
+`.` air, `Y` cactus, `C` chest, `c` cobblestone, `o` glass, `V` hopper, `+` oak fence, `:` sand, `~` water
+
+### Egg collector
+
+A one-block pen of fences with a gate on the south side, its floor a hopper that drops into a chest below: every egg the chickens lay goes into the chest. Chickens are led in through the gate (lure), which is then shut. About 24 chickens fit before they crowd each other.
+
+37 blocks, 3 x 3 x 5 (west-east x north-south x height). Layers bottom first; north is up.
+
+```
+y -2
+
+ C
+
+
+y -1
+ccc
+cVc
+ccc
+
+y 0
++++
++.+
++=+
+
+y 1 to 2
+...
+...
+...
+```
+
+`.` air, `C` chest, `c` cobblestone, `V` hopper, `+` oak fence, `=` oak fence gate
+
+### Auto smelter
+
+A furnace that runs by itself: what goes in the top chest drops through a hopper into the furnace, fuel in the side chest reaches it through a hopper from the side, and the smelted items go down a hopper into the bottom chest.
+
+9 blocks, 2 x 1 x 5 (west-east x north-south x height). Layers bottom first; north is up.
+
+```
+y 0
+cC
+
+y 1
+cV
+
+y 2
+VF
+
+y 3
+CV
+
+y 4
+ C
+```
+
+`C` chest, `c` cobblestone, `F` furnace, `V` hopper
 
 ## Built by the program itself
 
