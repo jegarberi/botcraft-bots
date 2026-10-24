@@ -12913,11 +12913,28 @@ int main(int argc, char* argv[])
         // All the bots at once: each walks to its chests, one after the other took minutes per bot
         {
             std::vector<std::shared_ptr<Child>> leaving;
+            std::vector<std::shared_ptr<McpBot>> leaving_here;
             {
                 std::lock_guard<std::mutex> lock(bots_mutex);
                 leaving = children;
+                for (const BotSlot& slot : bots) leaving_here.push_back(slot.bot);
             }
             std::vector<std::thread> goodbyes;
+            // The bots of this process too: one after the other they took 2 minutes each (an hour for 31)
+            for (const std::shared_ptr<McpBot>& bot : leaving_here)
+            {
+                goodbyes.emplace_back([bot]()
+                    {
+                        try
+                        {
+                            LOG_INFO("Leaving: " << DisconnectBot(bot).Dump());
+                        }
+                        catch (const std::exception& e)
+                        {
+                            LOG_WARNING("Leaving: " << e.what());
+                        }
+                    });
+            }
             for (const std::shared_ptr<Child>& child : leaving)
             {
                 goodbyes.emplace_back([child]()
@@ -12939,26 +12956,6 @@ int main(int argc, char* argv[])
         }
         chat_thread.join();
         team_feed.join();
-        while (true)
-        {
-            std::shared_ptr<McpBot> bot;
-            {
-                std::lock_guard<std::mutex> lock(bots_mutex);
-                if (bots.empty())
-                {
-                    break;
-                }
-                bot = bots.front().bot;
-            }
-            try
-            {
-                LOG_INFO("Leaving: " << DisconnectBot(bot).Dump());
-            }
-            catch (const std::exception& e)
-            {
-                LOG_WARNING("Leaving: " << e.what());
-            }
-        }
     }
     catch (const std::exception& e)
     {
