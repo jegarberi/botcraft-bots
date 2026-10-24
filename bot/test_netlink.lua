@@ -35,7 +35,7 @@ local function instance(id, name, key, opts)
             end
             return {}
         end,
-        tool = function(t) inst.tool = t end,
+        tool = function(t) if t.name == "netlink" then inst.tool = t end end,
         every = function(s, fn) inst.every[#inst.every + 1] = { s = s, f = fn } end,
         on_chat = function(fn) listeners[#listeners + 1] = fn; inst.listener = fn end,
         log = print,

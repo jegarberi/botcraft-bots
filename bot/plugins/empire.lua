@@ -1333,6 +1333,7 @@ end
 -- ./run.sh --empire (BOTCRAFT_EMPIRE=1): plays from the start, once the bots are in; --village (=village) in village mode
 local auto = os.getenv("BOTCRAFT_EMPIRE")
 bot.every(60, function()
+    if CENTRAL_ACTIVE then return end
     if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if (auto == "1" or auto == "village") and not state.enabled and os.time() - loaded_at >= 150 then start() end
     if auto == "village" and state.enabled and not state.village then state.village, last_split = {}, 0 end

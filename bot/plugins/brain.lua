@@ -756,6 +756,7 @@ for name, net in pairs(state.nets or {}) do state.nets[name] = fit(net) end
 for _, cp in ipairs(state.checkpoints or {}) do cp.net = fit(cp.net) end
 state.merge_trial = nil
 bot.every(30, function()
+    if CENTRAL_ACTIVE then return end
     if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if not state.enabled or busy then return end
     busy = true

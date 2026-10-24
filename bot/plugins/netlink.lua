@@ -189,6 +189,8 @@ local counters = { sent_messages = 0, sent_lines = 0, received_messages = 0, bad
     unsigned = 0, rejected = 0, resent = 0, acks = 0, dropped_lines = 0 }
 local acks = {}          -- msg -> { from -> result }
 local next_msg = 0
+local central_receive
+local mouth
 
 local function queue(line)
     outbox[#outbox + 1] = line
@@ -200,10 +202,12 @@ end
 
 local function speaker()
     local bots = call("bots", {}) or {}
+    if mouth then for _, b in ipairs(bots) do if b.name == mouth then return mouth end end return nil end
     return bots[1] and bots[1].name or nil
 end
 
 local function send(data)
+    if #outbox + math.ceil(#data * 4 / 3 / SEGMENT) > OUTBOX_MAX then return nil, "chat queue full" end
     next_msg = next_msg + 1
     local msg = string.format("%x", (os.time() * 16 + next_msg) % 0xfffff)
     local text, chk, sig = b64encode(data), checksum(data), signature(data)
@@ -232,15 +236,19 @@ local function deliver(p)
         if not KEY then counters.unsigned = counters.unsigned + 1 end
         counters.received_messages = counters.received_messages + 1
         peers[p.from].received = (peers[p.from].received or 0) + 1
-        local mine = call("brain", { export = true })
-        local net, why = unpack_network(data, type(mine) == "table" and mine.arch or nil)
-        if not net then
-            result = "rejected:" .. why
-        elseif net.origin ~= p.from then
-            result = "rejected:origin"
+        if data:sub(1, 2) == "C1" and central_receive then
+            result = central_receive(p.from, data:sub(3))
         else
-            local r, err = call("brain", { merge = { w = net.w, samples = net.samples, origin = net.origin, arch = mine.arch } })
-            result = r and "ok" or ("rejected:" .. ((err or ""):match("rejected:(%S+)") or "brain"))
+            local mine = call("brain", { export = true })
+            local net, why = unpack_network(data, type(mine) == "table" and mine.arch or nil)
+            if not net then
+                result = "rejected:" .. why
+            elseif net.origin ~= p.from then
+                result = "rejected:origin"
+            else
+                local r, err = call("brain", { merge = { w = net.w, samples = net.samples, origin = net.origin, arch = mine.arch } })
+                result = r and "ok" or ("rejected:" .. ((err or ""):match("rejected:(%S+)") or "brain"))
+            end
         end
     end
     if result == "ok" then
@@ -285,7 +293,11 @@ bot.on_chat(function(line)
     if not (msg and position and chk and sig and data) then return end
     local seq, total = position:match("^(%d+)/(%d+)$")
     seq, total = tonumber(seq), tonumber(total)
-    if not seq or not total or total > 64 or seq < 1 or seq > total then return end
+    if not seq or not total or total < 1 or total > 64 or seq < 1 or seq > total or #data > SEGMENT then return end
+    if not pending[from .. " " .. msg] then
+        local count = 0 for _ in pairs(pending) do count = count + 1 end
+        if count >= 64 then return end
+    end
     local key = from .. " " .. msg
     if done[key] then return end
     local p = pending[key]
@@ -293,6 +305,7 @@ bot.on_chat(function(line)
         p = { from = from, msg = msg, total = total, chk = chk, sig = sig, parts = {}, first = os.time(), count = 0, times = 0 }
         pending[key] = p
     end
+    if p.total ~= total or p.chk ~= chk or p.sig ~= sig then return end
     if not p.parts[seq] then p.parts[seq] = data; p.count = p.count + 1 end
     if p.count == p.total then
         pending[key] = nil
@@ -340,7 +353,7 @@ local function share()
     last_samples = net.samples
     return send(pack_network(net))
 end
-bot.every(600, function() share() end)
+bot.every(600, function() if not CENTRAL_ACTIVE then share() end end)
 
 bot.tool{
     name = "netlink",
@@ -348,6 +361,7 @@ bot.tool{
     params = { send = "boolean" },
     run = function(args)
         if args.send then
+            if CENTRAL_ACTIVE then return "central coordination is using the chat transport" end
             last_samples = -1
             local msg, total = share()
             return msg and { message = msg, segments = total } or "the brain has no network to send"
@@ -360,6 +374,166 @@ bot.tool{
     end,
 }
 
+-- PackBits-style compression before the transport's base64 encoding. Bound expansion on input.
+-- Escape byte 255 and encode repeated bytes (including zero-valued telemetry).
+local function compress(data)
+    local out, i = {}, 1
+    while i <= #data do
+        local b, n = data:byte(i), 1
+        while n < 255 and data:byte(i + n) == b do n = n + 1 end
+        out[#out + 1] = (n >= 4 or b == 255) and string.char(255, n, b) or data:sub(i, i + n - 1)
+        i = i + n
+    end
+    return table.concat(out)
+end
+local function decompress(data)
+    local out, size, i = {}, 0, 1
+    while i <= #data do
+        local b = data:byte(i)
+        local n = 1
+        if b == 255 then
+            n, b = data:byte(i + 1, i + 2)
+            if not b or n == 0 then return nil end
+            i = i + 2
+        end
+        size = size + n
+        if size > 6000 then return nil end
+        out[#out + 1] = string.rep(string.char(b), n)
+        i = i + 1
+    end
+    return table.concat(out)
+end
+local trades = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
+local mode, central = "off", nil
+local reports, outstanding, serial, assigned = {}, {}, 0, nil
+local function transmit(raw) return send("C1" .. compress(raw)) end
+local function configure(args)
+    if args.mode ~= "off" and args.mode ~= "leader" and args.mode ~= "worker" then error("mode must be off, leader or worker") end
+    if args.mode ~= "off" and not KEY then error("central mode requires netlink_key.txt on every host") end
+    if args.mode == "worker" and (type(args.central) ~= "string" or not args.central:match("^%x%x%x%x%x%x$")) then error("central must be the leader's six-digit netlink id") end
+    if args.bot then
+        local found = false
+        for _, b in ipairs(call("bots", {}) or {}) do if b.name == args.bot then found = true end end
+        if not found then error("central chat bot must be local") end
+    end
+    mode, central, mouth = args.mode, args.central, args.bot
+    CENTRAL_ACTIVE = mode ~= "off"
+    reports, outstanding, assigned = {}, {}, nil
+end
+local function snapshot()
+    local rows = {}
+    for _, b in ipairs(call("bots", {}) or {}) do
+        if #rows >= 100 then break end
+        local st = call("status", { bot = b.name })
+        if type(st) == "table" and b.name:match("^[%w_]+$") and #b.name <= 16 then
+            rows[#rows + 1] = string.pack(">s1BB", b.name, math.max(0, math.min(20, math.floor(st.health or 0))), math.max(0, math.min(20, math.floor(st.food or 0))))
+        end
+    end
+    return table.concat(rows)
+end
+local function parse_rows(raw, command)
+    local rows, seen, pos = {}, {}, 1
+    while pos <= #raw do
+        local name, a, b
+        if command then name, a, pos = string.unpack(">s1B", raw, pos)
+        else name, a, b, pos = string.unpack(">s1BB", raw, pos) end
+        if #rows >= 100 or not name:match("^[%w_]+$") or #name > 16 or seen[name] or (command and not trades[a]) or (not command and (a > 20 or b > 20)) then error("invalid rows") end
+        seen[name] = true
+        rows[#rows + 1] = { name = name, health = a, food = b }
+    end
+    return rows
+end
+local function apply(rows)
+    local g, local_names = {}, {}
+    for _, t in ipairs(trades) do g[t] = {} end
+    for _, b in ipairs(call("bots", {}) or {}) do local_names[b.name] = true end
+    for _, row in ipairs(rows) do
+        if not local_names[row.name] then return "rejected:bot" end
+        local t = trades[row.health]
+        g[t][#g[t] + 1] = row.name
+        local_names[row.name] = nil
+    end
+    if next(local_names) then return "rejected:roster" end
+    local key = ""
+    for _, row in ipairs(rows) do key = key .. row.name .. ":" .. row.health .. ";" end
+    if assigned ~= key then
+        local r = call("groups", { assign = g })
+        if not r then return "rejected:groups" end
+        assigned = key
+    end
+    return "ok"
+end
+local function plan()
+    local counts, hungry = {}, false
+    local hosts = {}
+    for host, r in pairs(reports) do if os.time() - r.at < 240 then hosts[#hosts + 1] = host end end
+    table.sort(hosts)
+    for _, host in ipairs(hosts) do for _, row in ipairs(reports[host].rows) do
+        if row.food < 14 or row.health < 14 then hungry = true end
+    end end
+    -- Community basics first: food, shelter, wood, tools and ore; then defence and variety.
+    local priorities = hungry and {1, 2, 3, 9, 5, 10, 7, 4} or {2, 1, 5, 10, 4, 7, 3, 6, 9, 11, 8}
+    for _, host in ipairs(hosts) do
+        local r, parts, rows = reports[host], {}, {}
+        for _, row in ipairs(r.rows) do
+            local role = priorities[1]
+            for _, t in ipairs(priorities) do if (counts[t] or 0) < (counts[role] or 0) then role = t end end
+            counts[role] = (counts[role] or 0) + 1
+            parts[#parts + 1] = string.pack(">s1B", row.name, role)
+            rows[#rows + 1] = {name = row.name, health = role}
+        end
+        if host == ME then apply(rows)
+        else transmit("A" .. host .. string.pack(">I4", r.token) .. table.concat(parts)) end
+    end
+end
+central_receive = function(from, packed)
+    if mode == "off" or not KEY then return "rejected:central_disabled" end
+    local raw = decompress(packed)
+    if not raw then return "rejected:compression" end
+    local ok, result = pcall(function()
+        local kind, target, token, pos = string.unpack(">c1c6I4", raw)
+        if target ~= ME then return "rejected:target" end
+        if kind == "S" and mode == "leader" then
+            local rows = parse_rows(raw:sub(pos), false)
+            if reports[from] and token <= reports[from].token then return "rejected:stale" end
+            local n = 0 for _ in pairs(reports) do n = n + 1 end
+            if not reports[from] and n >= 32 then return "rejected:capacity" end
+            reports[from] = { rows = rows, token = token, at = os.time() }
+            return "ok"
+        elseif kind == "A" and mode == "worker" and from == central then
+            local at = outstanding[token]
+            if not at or os.time() - at > 180 then return "rejected:stale" end
+            local rows = parse_rows(raw:sub(pos), true)
+            local result = apply(rows)
+            if result == "ok" then outstanding = {} end
+            return result
+        end
+        return "rejected:authority"
+    end)
+    return ok and result or "rejected:payload"
+end
+bot.every(60, function()
+    if mode == "off" then return end
+    serial = math.max(serial + 1, os.time())
+    local raw = snapshot()
+    if mode == "leader" then
+        reports[ME] = { rows = parse_rows(raw, false), token = serial, at = os.time() }
+        plan()
+    else
+        for token, at in pairs(outstanding) do if os.time() - at > 180 then outstanding[token] = nil end end
+        if transmit("S" .. central .. string.pack(">I4", serial) .. raw) then outstanding[serial] = os.time() end
+    end
+end)
+bot.tool{
+    name = "central",
+    description = "Central community survival coordinator over signed, compressed base64 Minecraft chat. mode=leader makes this host the brain; mode=worker with central=leader netlink id follows it; mode=off returns local control. bot selects the local chat speaker. Reports health and hunger every minute; assigns trades across hosts for food, shelter and resource production. Requires a shared netlink_key.txt. Configure again after restart.",
+    params = { mode = "string", central = "string", bot = "string" },
+    run = function(args)
+        if args.mode then configure(args) end
+        return { mode = mode, id = ME, central = central, bot = mouth, reports = reports, objectives = {"community survival", "bot survival", "food", "health", "shelter", "resources"} }
+    end,
+}
+
 -- For the offline check
 return { b64encode = b64encode, b64decode = b64decode, checksum = checksum, sha256 = sha256, hmac = hmac, hex = hex,
-    pack = pack_network, unpack = unpack_network, id = ME }
+    compress = compress, decompress = decompress, pack = pack_network, unpack = unpack_network, id = ME }

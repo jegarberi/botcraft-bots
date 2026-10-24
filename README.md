@@ -51,6 +51,39 @@ remembers seeing, and its decision tree with the branch it is on.
 - `bot/web/` the web panel
 - `bot/test_*` offline checks of the plugins (`lua5.4 test_castle.lua plugins/castle.lua`, ...)
 
+## Central brain across hosts
+
+All hosts must connect to the same Minecraft Java server with shared global chat (the current
+project targets Java 26.3). Put the same secret in `bot/netlink_key.txt` on each host and keep each
+host's `bot/netlink_id.txt` unique. These files are read when the plugins load.
+
+Use the MCP tools on each running host:
+
+1. Call `netlink {}` to read its six-digit host ID.
+2. On the central host, call `central {mode="leader", bot="BrainBot"}` with a connected local bot name.
+3. On every worker host, call `central {mode="worker", central="aaaaaa"}` with the central host's ID.
+4. Call `central {}` for reports, or `central {mode="off"}` to return to local control.
+
+The central bot speaks for its host; one bot on every worker host speaks for that host's bots.
+Reports contain each bot's name, health and hunger. Every minute the coordinator balances trades
+across hosts, prioritizing food when any reported bot has health or food below 14/20, then shelter,
+wood, tools, mining and other production. Existing individual survival, eating, healing and shelter
+routines remain responsible for immediate needs; this mode does not guarantee full health or food.
+Local neural trade selection and empire reassignment pause while central mode is active; the trade
+policies still execute the assigned jobs.
+
+The wire format is bounded binary records, run-length compression, then base64 over the existing
+signed, checksummed and numbered netlink chat segments. Lines leave each host at most once every
+two seconds. Missing segments are requested again; commands must come from the pinned central ID,
+match a recent report and target only local bots. No remote Lua or arbitrary tool calls are accepted.
+A shared key authenticates the participating hosts; base64 does not hide the reports from chat readers.
+
+Configure the mode again after restart. Reports older than four minutes are excluded from planning;
+workers retain their last trades if the brain goes offline, and local survival routines continue.
+Chat delivery and server rate limits constrain fleet size (at most 32 reporting hosts, 100 bots per
+report); a full queue rejects new messages and the next reporting cycle retries. Use only on servers
+that allow these bots and their coordination messages.
+
 ## Where the bots keep what they know
 
 Each bot's memory (places it saw, its own bed and field, what it was doing) and what the bots share (finds,
