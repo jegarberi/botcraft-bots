@@ -1983,7 +1983,18 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
     const std::shared_ptr<World> world = c.GetWorld();
     const auto fail = [&](const char* why, const Position& at)
         {
-            LOG_INFO(c.GetNetworkManager()->GetMyName() << ": tunnel toward " << target << " stopped at " << at << ": " << why);
+            // Once a minute per bot (each has its own behaviour thread): a stuck bot logged 590,000 of these in 11 hours
+            thread_local std::chrono::steady_clock::time_point logged_at{};
+            thread_local long long since = 0;
+            ++since;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - logged_at >= std::chrono::minutes(1))
+            {
+                LOG_INFO(c.GetNetworkManager()->GetMyName() << ": tunnel toward " << target << " stopped at " << at << ": " << why <<
+                    (since > 1 ? " (" + std::to_string(since) + " stops in the last minute)" : ""));
+                logged_at = now;
+                since = 0;
+            }
             return Status::Failure;
         };
     const std::string pickaxe = HeldTool(c, "pickaxe");
