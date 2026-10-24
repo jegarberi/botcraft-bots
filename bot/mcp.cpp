@@ -497,6 +497,8 @@ public:
     /// @brief When each basic that failed gets another try, and when they were last looked at (behaviour thread only)
     std::map<std::string, std::chrono::steady_clock::time_point> basics_retry_at;
     std::chrono::steady_clock::time_point basics_checked_at{};
+    /// @brief When digging up to the surface gets another try after every way was blocked (behaviour thread only)
+    std::chrono::steady_clock::time_point dig_up_retry_at{};
     /// @brief Walks the pathfinder gave up on (planned again and again without moving); and, for the watchdog (stepper
     /// thread only), where and since when it counts them: many in a small area is a bot walled in
     std::atomic<int> path_give_ups = 0;
@@ -1973,6 +1975,9 @@ static bool PutStair(BehaviourClient& c, const Position& at, const Position& up)
     return PlaceBlock(c, stairs, at, PlayerDiggingFace::Up, true, false, false) == Status::Success;
 }
 
+static bool PillarUp(BehaviourClient& c, const std::string& item);
+static std::string BuildingBlock(BehaviourClient& c);
+
 static Status TunnelToward(BehaviourClient& c, const Position& target, const int max_steps, const bool allow_hands = false)
 {
     const std::shared_ptr<World> world = c.GetWorld();
@@ -2031,7 +2036,26 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
         }
         if (slope == 2)
         {
-            return fail("no floor ahead", me + side);
+            // A drop on that side (a cave, a ravine, water): make the floor instead of giving up (bots stood
+            // on the same ledge for hours, 300,000 tries). Up a pillar when the target is above, else a block ahead
+            const std::string block = BuildingBlock(c);
+            const Position under = me + side + Position(0, -1, 0);
+            const Blockstate* below = world->GetBlock(under);
+            if (block.empty())
+            {
+                return fail("no floor ahead", me + side);
+            }
+            if (dy > 0)
+            {
+                if (!PillarUp(c, block)) return fail("no floor ahead, could not pillar", me);
+                continue;
+            }
+            if (below == nullptr || !(below->IsAir() || below->IsFluid()) ||
+                PlaceCheckedBlock(c, block, under, std::nullopt, true, false, false) == Status::Failure || !is_floor(under))
+            {
+                return fail("no floor ahead, could not bridge", under);
+            }
+            slope = 0;
         }
         const Position next = me + side + Position(0, slope, 0);
         const Position across(std::abs(side.z), 0, std::abs(side.x));
@@ -4057,21 +4081,29 @@ static void Check(McpBot& c, const Status result)
 /// @brief Mine one matching block with the best tool of this kind in hand, or explore to find some
 /// @brief Up toward the sky, a staircase: each way in turn until one gets the bot somewhere (one way can run
 /// into lava, which the tunnel stops before: always the same way, a bot stayed put for good)
-static void DigUp(McpBot& c)
+/// @return false when every way is blocked, then for 2 minutes without trying (it was tried every tick)
+static bool DigUp(McpBot& c)
 {
     static const Position ways[] = { Position(6, 12, 0), Position(0, 12, 6), Position(-6, 12, 0), Position(0, 12, -6) };
+    if (std::chrono::steady_clock::now() < c.dig_up_retry_at)
+    {
+        return false;
+    }
     const Vector3<double> start = c.GetLocalPlayer()->GetPosition();
     for (int i = 0; i < 4; ++i)
     {
         const Position feet = BlockPos(c.GetLocalPlayer()->GetPosition());
         TunnelToward(c, feet + ways[(c.explorations + i) % 4], 24, true);
-        if (c.GetLocalPlayer()->GetPosition().SqrDist(start) > 2.0 * 2.0)
+        // Higher up, not just elsewhere: a bot went round three spots at the same depth, each try "a move"
+        if (c.GetLocalPlayer()->GetPosition().y > start.y + 1.5)
         {
-            return;
+            return true;
         }
     }
     // Every way blocked: start from another one next time
     ++c.explorations;
+    c.dig_up_retry_at = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+    return false;
 }
 
 static void MineOne(McpBot& c, const std::function<bool(const Blockstate&)>& match, const std::string& what, const std::string& tool_kind, const std::string& stage, const std::string& remembered_kind = "")
@@ -7629,8 +7661,7 @@ static Status BasicsStep(McpBot& c)
     if (feet.y < 60 && c.GetWorld()->GetSkyLight(feet + Position(0, 1, 0)) == 0 && what != "bread")
     {
         c.SetNote("basics: underground, digging up to the surface first");
-        DigUp(c);
-        return Status::Success;
+        return DigUp(c) ? Status::Success : later("underground, every way up blocked");
     }
     std::string why;
     if (what == "shelter")
