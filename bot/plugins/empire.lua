@@ -504,10 +504,15 @@ local function lot_index(at) return (at.z - state.town.z) // 18 * COLS + (at.x -
 
 local function lot(leader)
     if not state.town then
+        -- Every bot votes where (settle plugin); east of the castle, or by the leader, only if none could
+        local voted = call("settle", { vote = true })
         local f = io.open("../castle_site.txt", "r")
         local cx, cy, cz
         if f then cx, cy, cz = f:read("a"):match("(-?%d+) (-?%d+) (-?%d+)"); f:close() end
-        if cx then
+        if type(voted) == "table" and voted.winner then
+            state.town = { x = voted.winner.x, y = voted.winner.y, z = voted.winner.z }
+            note(string.format("%d bots voted: the town goes at %d %d", voted.voters, state.town.x, state.town.z))
+        elseif cx then
             state.town = { x = tonumber(cx) + 144, y = tonumber(cy), z = tonumber(cz) - 30 }
         else
             local st = call("status", { bot = leader })
