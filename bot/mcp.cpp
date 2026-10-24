@@ -1906,6 +1906,15 @@ static Status PlaceCheckedBlock(BehaviourClient& c, const std::string& item, con
     return result;
 }
 
+/// @brief Hold or let go of the sneak key (the server reads it from the input packet; Botcraft never sends one).
+/// No wait: the server handles the packets in the order they come
+static void Sneak(BehaviourClient& c, const bool on)
+{
+    std::shared_ptr<ProtocolCraft::ServerboundPlayerInputPacket> input = std::make_shared<ProtocolCraft::ServerboundPlayerInputPacket>();
+    input->SetShift(on);
+    c.GetNetworkManager()->Send(input);
+}
+
 /// @brief A mine slice just dug: a penalty if it is cramped (under 3 wide or 3 high), and another if it
 /// climbs or drops a block (`slope`) without a stair to walk it
 static void PenalizeCrampedMine(BehaviourClient& c, const Position& feet, const Position& direction, const int slope = 0)
@@ -5400,7 +5409,9 @@ static Status BuildStep(McpBot& c)
         return supply == Supply::Gathering ? Status::Failure : Status::Success;
     }
     const auto facing = wanted_next.state.find("facing");
-    if (facing != wanted_next.state.end())
+    // A hopper points into the block it is placed against (down: placed on top of one), whichever way the bot looks
+    const bool hopper = item == "minecraft:hopper";
+    if (facing != wanted_next.state.end() && !hopper)
     {
         // Stairs and the like face the way the player looks when placing them: stand on the opposite side,
         // two blocks back, so that looking at the spot is looking that way
@@ -5420,8 +5431,20 @@ static Status BuildStep(McpBot& c)
             }
         }
     }
-    const std::optional<PlayerDiggingFace> face = (EndsWith(item, "_door") || EndsWith(item, "_fence_gate")) ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
-    if (PlaceCheckedBlock(c, item, p, face, true, false, facing == wanted_next.state.end()) == Status::Failure)
+    std::optional<PlayerDiggingFace> face = (EndsWith(item, "_door") || EndsWith(item, "_fence_gate")) ? std::optional<PlayerDiggingFace>(PlayerDiggingFace::Up) : std::nullopt;
+    if (hopper && facing != wanted_next.state.end())
+    {
+        // The face clicked is the one of the block it points into that looks back at it
+        static const std::map<std::string, PlayerDiggingFace> against = { { "down", PlayerDiggingFace::Up }, { "north", PlayerDiggingFace::South },
+            { "south", PlayerDiggingFace::North }, { "west", PlayerDiggingFace::East }, { "east", PlayerDiggingFace::West } };
+        const auto f = against.find(facing->second);
+        if (f != against.end()) face = f->second;
+    }
+    // Sneaking, or clicking a chest, furnace or hopper to place against it opens it instead
+    Sneak(c, true);
+    const Status placed_status = PlaceCheckedBlock(c, item, p, face, true, false, facing == wanted_next.state.end() || hopper);
+    Sneak(c, false);
+    if (placed_status == Status::Failure)
     {
         give_up_on(p);
         return Status::Success;
