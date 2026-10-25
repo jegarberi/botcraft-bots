@@ -130,7 +130,13 @@ two seconds. Missing segments are requested again; commands must come from the p
 match a recent report and target only local bots. No remote Lua or arbitrary tool calls are accepted.
 A shared key authenticates the participating hosts; base64 does not hide the reports from chat readers.
 
-Configure the mode again after restart. Reports older than four minutes are excluded from planning;
+The mode is kept across restarts (`bot/central_job.lua`).
+
+Every 5 minutes each worker also reports where its bots stand and what each sees there (trees, ores,
+water, lava, food, monsters, biome). The leader has every bot of every host vote where to settle
+(the `settle` plugin: majority, else a second round) and sends the winning place to the workers: each
+host's empire town moves there, and bots farther than 256 blocks walk there (at most once every 20
+minutes each). The settlement stays until `central {settle=true}` votes again. Reports older than four minutes are excluded from planning;
 workers retain their last trades if the brain goes offline, and local survival routines continue.
 Chat delivery and server rate limits constrain fleet size (at most 32 reporting hosts, 100 bots per
 report); a full queue rejects new messages and the next reporting cycle retries. Use only on servers

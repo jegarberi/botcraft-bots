@@ -409,7 +409,20 @@ end
 local trades = { "bakers", "farmers", "butchers", "miners", "builders", "soldiers", "blacksmiths", "explorers", "fishers", "lumberjacks", "carpenters" }
 local mode, central = "off", nil
 local reports, outstanding, serial, assigned = {}, {}, 0, nil
+-- Where every host's bots live: the leader's vote of all of them (settle plugin), sent to the workers
+local locations, settlement, revote, ticks, gathered = {}, nil, false, 0, {}
+local GATHER = 256          -- a bot farther than this from the settlement walks there (once every 20 minutes at most)
+local CENTRAL_FILE = "../central_job.lua"
 local function transmit(raw) return send("C1" .. compress(raw)) end
+-- The mode outlives a restart (a restart left the workers' reports rejected until it was set again by hand)
+local function save_central()
+    local f = io.open(CENTRAL_FILE, "w")
+    if not f then return end
+    local s = settlement and string.format("{x=%d,y=%d,z=%d}", settlement.x, settlement.y, settlement.z) or "nil"
+    f:write(string.format("return {mode=%q,central=%s,bot=%s,settlement=%s}", mode, central and string.format("%q", central) or "nil",
+        mouth and string.format("%q", mouth) or "nil", s))
+    f:close()
+end
 local function configure(args)
     if args.mode ~= "off" and args.mode ~= "leader" and args.mode ~= "worker" then error("mode must be off, leader or worker") end
     if args.mode ~= "off" and not KEY then error("central mode requires netlink_key.txt on every host") end
@@ -421,7 +434,85 @@ local function configure(args)
     end
     mode, central, mouth = args.mode, args.central, args.bot
     CENTRAL_ACTIVE = mode ~= "off"
-    reports, outstanding, assigned = {}, {}, nil
+    reports, outstanding, assigned, locations = {}, {}, nil, {}
+    save_central()
+end
+do
+    local f = io.open(CENTRAL_FILE, "r")
+    if f then
+        local chunk = load(f:read("a") or "", CENTRAL_FILE, "t", {})
+        f:close()
+        local ok, t = pcall(chunk or function() end)
+        if ok and type(t) == "table" and (t.mode == "leader" or t.mode == "worker") and KEY and
+            (t.mode == "leader" or (type(t.central) == "string" and t.central:match("^%x%x%x%x%x%x$"))) then
+            mode, central, mouth = t.mode, t.central, t.bot
+            if type(t.settlement) == "table" and tonumber(t.settlement.x) then settlement = t.settlement end
+            CENTRAL_ACTIVE = true
+        end
+    end
+end
+-- Each local bot farther than GATHER from the settlement walks there, on its own thread
+local function gather()
+    if not settlement or MIGRATING then return end
+    for _, b in ipairs(call("bots", {}) or {}) do
+        local st = call("status", { bot = b.name })
+        local p = type(st) == "table" and st.position
+        if p and (p.x - settlement.x) ^ 2 + (p.z - settlement.z) ^ 2 > GATHER * GATHER and
+            os.time() - (gathered[b.name] or 0) >= 1200 and not bot.busy("gather:" .. b.name) then
+            gathered[b.name] = os.time()
+            local x, z = settlement.x, settlement.z
+            bot.spawn("gather:" .. b.name, function() pcall(bot.call, "travel", { bot = b.name, x = x, z = z }) end)
+        end
+    end
+end
+-- The settlement moves here: this host's town too, and its far bots walk there
+local function settle_at(p)
+    local changed = not settlement or settlement.x ~= p.x or settlement.z ~= p.z
+    settlement = { x = p.x, y = p.y, z = p.z }
+    if changed then
+        save_central()
+        gathered = {}
+        call("empire", { town = settlement })
+    end
+    gather()
+end
+-- Each local bot where it stands, its trade and what it sees there (settle plugin): name, trade, x, y, z, and
+-- the place it puts forward (7 features of 0..255) if it stands on the surface
+local FEATURES = { "wood", "ore", "water", "food", "biome", "hostile", "lava" }
+local function locate_rows()
+    local rows = {}
+    for _, r in ipairs(call("settle", { survey = true }) or {}) do
+        if #rows >= 100 then break end
+        if type(r.name) == "string" and r.name:match("^[%w_]+$") and #r.name <= 16 then
+            local t = 0
+            for i, name in ipairs(trades) do if name == r.trade then t = i end end
+            local row = string.pack(">s1Bi4i2i4B", r.name, t, math.floor(r.x), math.max(-32768, math.min(32767, math.floor(r.y))), math.floor(r.z), r.place and 1 or 0)
+            if r.place then
+                for _, k in ipairs(FEATURES) do row = row .. string.char(math.max(0, math.min(255, math.floor((tonumber(r.place[k]) or 0) * 255 + 0.5)))) end
+            end
+            rows[#rows + 1] = row
+        end
+    end
+    return table.concat(rows)
+end
+local function parse_locations(raw)
+    local rows, seen, pos = {}, {}, 1
+    while pos <= #raw do
+        local name, t, x, y, z, has
+        name, t, x, y, z, has, pos = string.unpack(">s1Bi4i2i4B", raw, pos)
+        if #rows >= 100 or not name:match("^[%w_]+$") or #name > 16 or seen[name] or t > #trades or has > 1 or
+            math.abs(x) > 30000000 or math.abs(z) > 30000000 then error("invalid rows") end
+        seen[name] = true
+        local row = { name = name, trade = trades[t], x = x, y = y, z = z }
+        if has == 1 then
+            if pos + #FEATURES - 1 > #raw then error("invalid rows") end
+            row.place = {}
+            for i, k in ipairs(FEATURES) do row.place[k] = raw:byte(pos + i - 1) / 255 end
+            pos = pos + #FEATURES
+        end
+        rows[#rows + 1] = row
+    end
+    return rows
 end
 local function snapshot()
     local rows = {}
@@ -503,6 +594,15 @@ central_receive = function(from, packed)
             if not reports[from] and n >= 32 then return "rejected:capacity" end
             reports[from] = { rows = rows, token = token, at = os.time() }
             return "ok"
+        elseif kind == "P" and mode == "leader" then
+            if not reports[from] then return "rejected:unknown_host" end
+            locations[from] = { rows = parse_locations(raw:sub(pos)), at = os.time() }
+            return "ok"
+        elseif kind == "T" and mode == "worker" and from == central then
+            local x, y, z = string.unpack(">i4i2i4", raw, pos)
+            if math.abs(x) > 30000000 or math.abs(z) > 30000000 then return "rejected:payload" end
+            settle_at({ x = x, y = y, z = z })
+            return "ok"
         elseif kind == "A" and mode == "worker" and from == central then
             local at = outstanding[token]
             if not at or os.time() - at > 180 then return "rejected:stale" end
@@ -519,12 +619,46 @@ bot.every(60, function()
     if mode == "off" then return end
     serial = math.max(serial + 1, os.time())
     local raw = snapshot()
+    ticks = ticks + 1
     if mode == "leader" then
         reports[ME] = { rows = parse_rows(raw, false), token = serial, at = os.time() }
         plan()
+        -- Every 5 minutes: the settlement, voted by every bot of every host once their places are in (or again
+        -- when asked), sent to each host that reports
+        if ticks % 5 == 0 or revote then
+            -- (the first vote waits for every reporting host's places, 15 minutes at most: a host on older code sends none)
+            local waiting = false
+            for host, r in pairs(reports) do
+                if host ~= ME and os.time() - r.at < 240 and not locations[host] then waiting = true end
+            end
+            if (not settlement and (not waiting or ticks >= 15)) or revote then
+                local remote = {}
+                for host, l in pairs(locations) do
+                    if os.time() - l.at < 900 then for _, r in ipairs(l.rows) do remote[#remote + 1] = r end end
+                end
+                local r = call("settle", { vote = true, remote = remote })
+                if type(r) == "table" and r.winner then settle_at(r.winner) end
+                revote = false
+            else
+                gather()
+            end
+            if settlement then
+                for host, r in pairs(reports) do
+                    if host ~= ME and os.time() - r.at < 240 then
+                        transmit("T" .. host .. string.pack(">I4i4i2i4", serial, settlement.x, settlement.y, settlement.z))
+                    end
+                end
+            end
+        end
     else
         for token, at in pairs(outstanding) do if os.time() - at > 180 then outstanding[token] = nil end end
         if transmit("S" .. central .. string.pack(">I4", serial) .. raw) then outstanding[serial] = os.time() end
+        -- Where its bots are and what they see, every 5 minutes (the first at once)
+        if ticks % 5 == 1 then
+            local rows = locate_rows()
+            if #rows > 0 then transmit("P" .. central .. string.pack(">I4", serial) .. rows) end
+        end
+        if ticks % 5 == 0 then gather() end
     end
 end)
 -- Shared by the construction council; build decisions require authenticated participating hosts.
@@ -542,11 +676,18 @@ NETLINK_BUILD = {
 }
 bot.tool{
     name = "central",
-    description = "Central community survival coordinator over signed, compressed base64 Minecraft chat. mode=leader makes this host the brain; mode=worker with central=leader netlink id follows it; mode=off returns local control. bot selects the local chat speaker. Reports health and hunger every minute; assigns trades across hosts for food, shelter and resource production. Requires a shared netlink_key.txt. Configure again after restart.",
-    params = { mode = "string", central = "string", bot = "string" },
+    description = "Central community survival coordinator over signed, compressed base64 Minecraft chat. mode=leader makes this host the brain; mode=worker with central=leader netlink id follows it; mode=off returns local control. bot selects the local chat speaker. Reports health and hunger every minute; assigns trades across hosts for food, shelter and resource production. Every 5 minutes the workers also report where each bot stands and what it sees there; the leader has every bot of every host vote where to settle (settle plugin) and sends the winning place to the workers: each host's town moves there and its bots farther than 256 blocks walk there. settle=true votes again. The mode and the settlement are kept across restarts. Requires a shared netlink_key.txt.",
+    params = { mode = "string", central = "string", bot = "string", settle = "boolean" },
     run = function(args)
         if args.mode then configure(args) end
-        return { mode = mode, id = ME, central = central, bot = mouth, reports = reports, objectives = {"community survival", "bot survival", "food", "health", "shelter", "resources"} }
+        if args.settle then
+            if mode ~= "leader" then error("only the leader votes where to settle") end
+            revote = true
+        end
+        local located = {}
+        for host, l in pairs(locations) do located[host] = { bots = #l.rows, seconds_ago = os.time() - l.at } end
+        return { mode = mode, id = ME, central = central, bot = mouth, reports = reports, settlement = settlement, located = located,
+            objectives = {"community survival", "bot survival", "food", "health", "shelter", "resources"} }
     end,
 }
 

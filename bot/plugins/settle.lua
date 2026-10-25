@@ -92,15 +92,35 @@ local function score(trade, at, place)
         w.hostile * place.hostile + w.lava * place.lava + w.distance * math.min(d, 500) / 500
 end
 
-local function vote()
-    local voters, places = {}, {}
+-- This host's bots: where each stands, its trade, and the place it puts forward (nil in a cave)
+local function survey_all()
+    local out = {}
     for _, b in ipairs(call("bots", {}) or {}) do
         local st = call("status", { bot = b.name })
         if type(st) == "table" and type(st.position) == "table" then
-            voters[#voters + 1] = { name = b.name, trade = st.trade, at = st.position }
-            local s = survey(b.name, st)
-            if s then s.by = b.name; places[#places + 1] = s end
+            out[#out + 1] = { name = b.name, trade = st.trade, x = st.position.x, y = st.position.y, z = st.position.z, place = survey(b.name, st) }
         end
+    end
+    return out
+end
+
+-- remote: the bots of the other hosts, as survey_all gives them (central plugin): they vote and put places forward too
+local function vote(remote)
+    local voters, places = {}, {}
+    local rows = survey_all()
+    for _, r in ipairs(type(remote) == "table" and remote or {}) do
+        if type(r) == "table" and type(r.name) == "string" and tonumber(r.x) and tonumber(r.z) then
+            local place = nil
+            if type(r.place) == "table" then
+                place = { x = math.floor(r.x), y = math.floor(tonumber(r.y) or 64), z = math.floor(r.z), biome_name = "(another host)" }
+                for _, k in ipairs({ "wood", "ore", "water", "food", "biome", "hostile", "lava" }) do place[k] = tonumber(r.place[k]) or 0 end
+            end
+            rows[#rows + 1] = { name = r.name, trade = r.trade, x = r.x, y = tonumber(r.y) or 64, z = r.z, place = place }
+        end
+    end
+    for _, r in ipairs(rows) do
+        voters[#voters + 1] = { name = r.name, trade = r.trade, at = { x = r.x, y = r.y, z = r.z } }
+        if r.place then r.place.by = r.name; places[#places + 1] = r.place end
     end
     if #voters == 0 then return nil, "no bot in the world" end
     places = merge(places)
@@ -152,10 +172,11 @@ end
 bot.tool{
     name = "settle",
     description = "Where the bots settle, by vote of all of them. Each bot on the surface puts forward the place where it stands, with what it sees within 32 blocks: trees, ores (iron and diamonds count more), water, lava, berry bushes and wheat, animals and hostile mobs, and the biome; places within 48 blocks are one. Every bot scores every place by its trade (miners: ores; lumberjacks and carpenters: wood; farmers, bakers, butchers: food and water; fishers: water; soldiers mind monsters less; explorers don't mind the distance) and votes for the best; more than half the votes wins, else the top two go to a second round. With no argument: the last vote. vote=true: vote now; go=true too: the empire's town (and village) moves to the winner. The empire calls it by itself when its town has no place yet.",
-    params = { vote = "boolean", go = "boolean" },
+    params = { vote = "boolean", go = "boolean", survey = "boolean", remote = "object" },
     run = function(args)
+        if args.survey then return survey_all() end
         if not args.vote then return last or "no vote yet" end
-        local r, err = vote()
+        local r, err = vote(args.remote)
         if not r then error(err) end
         if args.go then call("empire", { town = { x = r.winner.x, y = r.winner.y, z = r.winner.z } }) end
         return r
