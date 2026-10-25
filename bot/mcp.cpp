@@ -11107,13 +11107,17 @@ static Value CallTool(const std::string& name, const Value& a)
         {
             throw std::runtime_error(item + " is neither crafted nor smelted: use collect or the autopilot's gather for raw materials");
         }
-        std::lock_guard<std::mutex> lock(bot.run_mutex);
+        // (A running tool action keeps the tree: the goal is taken up when it ends, see team_member)
+        std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
         bot.SetMake(item, count);
         if (count > 0)
         {
             bot.autopilot = true;
         }
-        bot.ResumeDefault();
+        if (lock.owns_lock())
+        {
+            bot.ResumeDefault();
+        }
         Value o;
         o["making"] = count > 0 ? item : "";
         o["until_it_has"] = count;
@@ -11371,8 +11375,8 @@ static Value CallTool(const std::string& name, const Value& a)
         {
             throw std::runtime_error("missing boolean argument: enabled");
         }
-        // Not while a tool action (e.g. from a Lua chat handler) owns the tree
-        std::lock_guard<std::mutex> lock(bot.run_mutex);
+        // Not while a tool action (e.g. from a Lua chat handler) owns the tree: then the settings wait for it to end
+        std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
         bot.autopilot = a["enabled"].get<bool>();
         if (a.contains("gear") && a["gear"].is_bool())
         {
@@ -11391,7 +11395,10 @@ static Value CallTool(const std::string& name, const Value& a)
             bot.explorations = 0;
             bot.SetNote("");
         }
-        bot.ResumeDefault();
+        if (lock.owns_lock())
+        {
+            bot.ResumeDefault();
+        }
         Value o;
         o["autopilot"] = bot.autopilot.load();
         o["gear"] = bot.gear.load();
@@ -11682,8 +11689,10 @@ static Value CallTool(const std::string& name, const Value& a)
             // The site keeps a building team together, not the leader (who may be off getting wood)
             team.follow_distance = 1.0e9;
         }
-        // Not while a tool action owns the tree
-        std::lock_guard<std::mutex> run_lock(bot.run_mutex);
+        // A tool action (a walk can take minutes) owns the tree: the order is stored without waiting, and the tool
+        // hands the bot back to its default tree, which takes it up, when it ends. Waiting held the plugins' lock
+        // (the caller's) all that time: every plugin stood still while bots walked to the settlement
+        std::unique_lock<std::mutex> run_lock(bot.run_mutex, std::try_to_lock);
         {
             std::lock_guard<std::mutex> lock(bot.team_mutex);
             static std::atomic<int> plans = 0;
@@ -11714,7 +11723,10 @@ static Value CallTool(const std::string& name, const Value& a)
             bot.autopilot = true;
         }
         bot.SetNote(objective == "disband" ? "team disbanded" : "team objective: " + objective + (team.leader == bot.GetNetworkManager()->GetMyName() ? " (leader)" : ", following " + team.leader));
-        bot.ResumeDefault();
+        if (run_lock.owns_lock())
+        {
+            bot.ResumeDefault();
+        }
         return "ok";
     }
     if (name == "give")
