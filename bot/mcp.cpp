@@ -1067,6 +1067,10 @@ static R WithMemory(const BehaviourClient& c, F&& f, R def = R())
 }
 
 /// @brief One line of what the bot is doing, in its memory; an empty value forgets it
+/// @brief Calls made by a plugin, on this thread (the tools they call in turn included): their build orders are
+/// not kept for the next join, the plugin hands them over again
+static thread_local int lua_calls = 0;
+
 static void SaveDoing(const BehaviourClient& c, const std::string& key, const std::string& value)
 {
     WithMemory(c, [&](store::Memory& m) { m.SaveDoing(key, value); return 0; });
@@ -5289,8 +5293,11 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
     }
     // Cells off the blueprint that already hold the wanted block (the air around a slope being levelled)
     // change nothing when filled: in the box they let it grow past the blueprint's ragged edges
+    const int min_y = world->GetMinY(), max_y = world->GetMinY() + world->GetHeight() - 1;
     const auto has = [&](const CreativeBuild::Cell& cell)
     {
+        // (Above the build limit the world reads as air: a box reaching there is refused by the server)
+        if (cell[1] < min_y || cell[1] > max_y) return false;
         if (eligible.count(cell)) return true;
         const Blockstate* block = world->GetBlock(Position(cell[0], cell[1], cell[2]));
         return block != nullptr && block->GetName() == wanted.item && wanted.StateMatches(*block);
@@ -5303,7 +5310,18 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
     }
     const auto coordinates = [](const CreativeBuild::Cell& p)
     { return std::to_string(p[0]) + " " + std::to_string(p[1]) + " " + std::to_string(p[2]); };
-    c.SendPaced(true, "minecraft:fill " + coordinates(batch.low) + " " + coordinates(batch.high) + " " + selected.second);
+    const std::string command = "minecraft:fill " + coordinates(batch.low) + " " + coordinates(batch.high) + " " + selected.second;
+    {
+        // The bots share one world and pick the same seed: the first one to send a box sends it, the others
+        // wait for it to show up (5 seconds) instead of sending it again
+        static std::mutex sent_mutex;
+        static std::map<std::string, std::chrono::steady_clock::time_point> sent;
+        std::lock_guard<std::mutex> lock(sent_mutex);
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = sent.begin(); it != sent.end();) it = now - it->second > std::chrono::seconds(5) ? sent.erase(it) : std::next(it);
+        if (!sent.emplace(command, now).second) return false;
+    }
+    c.SendPaced(true, command);
     const bool confirmed = Utilities::YieldForCondition([&]()
     {
         for (int x = batch.low[0]; x <= batch.high[0]; ++x)
@@ -10717,7 +10735,11 @@ static Value CallTool(const std::string& name, const Value& a)
 
     if (const std::shared_ptr<Child> child = TargetChild(a))
     {
-        return name == "disconnect" ? DisconnectChild(child) : Forward(*child, name, a);
+        if (name == "disconnect") return DisconnectChild(child);
+        // A plugin's call stays one in the child (see lua_calls)
+        Value forwarded = a;
+        if (lua_calls > 0 && forwarded.is_object()) forwarded["from_plugin"] = true;
+        return Forward(*child, name, forwarded);
     }
     const std::shared_ptr<McpBot> target = TargetBot(a);
     McpBot& bot = *target;
@@ -11533,10 +11555,14 @@ static Value CallTool(const std::string& name, const Value& a)
     {
         if (a.is_object() && a.contains("objective") && a["objective"].is_string())
         {
-            // The order, for the next time it joins. Not a build plan: the castle (or whoever gave it) hands it over again
+            // The order, for the next time it joins. A build too when given from outside (the panel, MCP) or with
+            // keep=true; not a plugin's own (the castle's, a house): the plugin hands it over again, maybe moved
+            // (an old one taken up again would build in the old place)
             const std::string objective = a["objective"].get_string();
             const bool solo = a.contains("solo") && a["solo"].is_bool() && a["solo"].get<bool>();
-            if (objective == "build" || (objective == "disband" && !solo))
+            const bool keep = a.contains("keep") && a["keep"].is_bool() && a["keep"].get<bool>();
+            const bool from_plugin = lua_calls > 0 || a.contains("from_plugin");
+            if ((objective == "build" && from_plugin && !keep) || (objective == "disband" && !solo))
             {
                 SaveDoing(bot, "team", "");
             }
@@ -11544,6 +11570,7 @@ static Value CallTool(const std::string& name, const Value& a)
             {
                 Value order = a;
                 order.get_object().erase("bot");
+                order.get_object().erase("from_plugin");
                 SaveDoing(bot, "team", order.Dump());
             }
         }
@@ -11979,6 +12006,7 @@ static std::set<lua_State*> lua_spawned_states;
 
 static bool CallFromLua(lua_State* L, const char* name)
 {
+    struct InLua { InLua() { ++lua_calls; } ~InLua() { --lua_calls; } } in_lua;
     try
     {
         if (stopping)

@@ -158,10 +158,10 @@ local function build(args)
     local name = args.build:gsub("_", " ") .. (args.bot and (" of " .. args.bot) or "")
     local _, err
     if args.bot then
-        _, err = call("team_member", { bot = args.bot, objective = "build", plan = "blocks", blocks = p.blocks(o),
+        _, err = call("team_member", { bot = args.bot, objective = "build", plan = "blocks", blocks = p.blocks(o), keep = true,
             members = { args.bot }, leader = args.bot, solo = true, name = name })
     else
-        _, err = call("team", { objective = "build", plan = "blocks", blocks = p.blocks(o), name = name })
+        _, err = call("team", { objective = "build", plan = "blocks", blocks = p.blocks(o), name = name, keep = true })
     end
     if err then error(err) end
     built[#built + 1] = { plan = args.build, bot = args.bot, x = o.x, y = o.y, z = o.z }
