@@ -5,6 +5,9 @@ local ballots, acknowledgements = {}, {}
 local local_vote, changed, last_sent, registered = nil, loaded, 0, false
 local decision, approved, started, announced = nil, nil, false, false
 local site_sent
+-- Bots on other hosts, for sharing the work: host -> { names = {creative bots}, at = when }, and the site each
+-- host says it builds (S). Kept 3 minutes after the last word
+local rosters, host_sites, roster_sent = {}, {}, 0
 local note = "waiting for bots to join"
 local function call(tool, args)
     local ok, result = pcall(bot.call, tool, args or {})
@@ -83,11 +86,23 @@ local function receive(from, raw)
     local kind = raw:sub(1, 1)
     -- S: the site of a team already building. A host still undecided joins it (a decided one keeps its own:
     -- two teams can't pull each other back and forth)
+    if kind == "R" then
+        local names, pos = {}, 2
+        while pos <= #raw do
+            local name
+            name, pos = string.unpack(">s1", raw, pos)
+            if #names >= 100 or not name:match("^[%w_]+$") or #name > 16 then return "rejected:payload" end
+            names[#names + 1] = name
+        end
+        rosters[from] = {names = names, at = os.time()}
+        return "ok"
+    end
     if kind == "S" then
-        if decision then return "ok:already_decided" end
         if #raw ~= 13 then return "rejected:payload" end
         local x, y, z, voters = string.unpack(">i4i2i4I2", raw, 2)
         if math.abs(x) > 29999000 or math.abs(z) > 29999000 or y < -48 or y > 270 then return "rejected:payload" end
+        host_sites[from] = {x = x, z = z, at = os.time()}
+        if decision then return "ok:already_decided" end
         decision = {host = from, hosts = {from}, site = {name = "team", creative = true, x = x, y = y, z = z}, voters = voters, joined = true}
         note = "joined the team of host " .. from
         return "ok"
@@ -153,6 +168,16 @@ bot.every(20, function()
         local p = decision.site
         NETLINK_BUILD.send("S" .. string.pack(">i4i2i4I2", p.x, p.y, p.z, math.min(decision.voters or 0, 65535)))
         site_sent = now
+    end
+    -- Every minute: this host's creative bots, so the other hosts building the same site share the work with them
+    if NETLINK_BUILD.signed and now - roster_sent >= 60 then
+        local parts = {}
+        for _, b in ipairs(call("bots") or {}) do
+            local st = call("status", {bot = b.name})
+            if st and st.game_mode == "creative" and st.dimension == "minecraft:overworld" and #parts < 100 then parts[#parts + 1] = string.pack(">s1", b.name) end
+        end
+        if #parts > 0 then NETLINK_BUILD.send("R" .. table.concat(parts)) end
+        roster_sent = now
     end
     if not local_vote and not decision then
         local rows, roster = {}, call("bots") or {}
@@ -223,10 +248,30 @@ bot.every(20, function()
     note = decision and note or "collecting site proposals and host approvals"
     build()
 end)
+-- Every creative bot building this host's site, on every host: "host:name", sorted the same on every host (so
+-- they all cut the work the same way). local_names: this host's own, as of now. Hosts silent for 3 minutes, or
+-- building another site, are left out
+function TEAM_CREW(local_names)
+    local id, now, crew = NETLINK_BUILD and NETLINK_BUILD.id or "local", os.time(), {}
+    for _, name in ipairs(local_names or {}) do crew[#crew + 1] = id .. ":" .. name end
+    local site = decision and decision.site
+    for host, r in pairs(rosters) do
+        local there = host_sites[host]
+        if host ~= id and now - r.at <= 180 and site and there and now - there.at <= 180 and there.x == site.x and there.z == site.z then
+            for _, name in ipairs(r.names) do crew[#crew + 1] = host .. ":" .. name end
+        end
+    end
+    table.sort(crew)
+    return crew
+end
 bot.tool{
     name = "creative_build",
     description = "Automatic creative construction council: every overworld bot proposes a location; authenticated hosts approve the same vote set before creative bots build the castle, village and planted farms. Reports the votes, agreed coordinates and current progress. Existing castles are retained.",
     params = {},
-    run = function() return {note = note, started = started, decision = decision, ballots = ballots, signed = NETLINK_BUILD and NETLINK_BUILD.signed or false} end,
+    run = function()
+        local hosts = {}
+        for host, r in pairs(rosters) do hosts[host] = {bots = #r.names, seconds_ago = os.time() - r.at, site = host_sites[host]} end
+        return {note = note, started = started, decision = decision, ballots = ballots, hosts = hosts, signed = NETLINK_BUILD and NETLINK_BUILD.signed or false}
+    end,
 }
 return {encode = encode, decode = decode, election = election}

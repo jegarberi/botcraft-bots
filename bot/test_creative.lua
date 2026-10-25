@@ -32,6 +32,7 @@ local function instance(id, roster, signed)
         every = function(_, fn) inst.tick = fn end,
         tool = function(t) inst.tool = t.run end,
     }
+    inst.env = env
     inst.lib = assert(load(source, 'creative', 't', env))()
     instances[#instances+1] = inst
     return inst
@@ -82,6 +83,14 @@ D.roster[1].position = nil
 pump(160)
 assert(D.tool().decision and D.tool().decision.existing and D.tool().decision.site.x == 7, 'a standing castle is the site after a restart')
 assert(#D.builds == 0 and D.tool().started, 'the standing castle is kept, not started again')
+-- The hosts of one site know each other's bots, in the same order everywhere; a host on another site is left out
+pump(120)
+local crewA, crewC = A.env.TEAM_CREW({'CreativeA'}), C.env.TEAM_CREW({'CreativeC'})
+assert(table.concat(crewA, ' ') == table.concat(crewC, ' '), 'every host lists the crew alike: ' .. table.concat(crewA, ' ') .. ' / ' .. table.concat(crewC, ' '))
+assert(table.concat(crewA, ' ') == 'aaaaaa:CreativeA bbbbbb:CreativeB cccccc:CreativeC', table.concat(crewA, ' '))
+for _, key in ipairs(D.env.TEAM_CREW({'CreativeD'})) do assert(key == 'dddddd:CreativeD', 'another site does not share: ' .. key) end
+now = now + 400
+assert(#A.env.TEAM_CREW({'CreativeA'}) == 1, 'silent hosts drop out')
 local packed = A.lib.encode({{name='Valid',x=0,y=70,z=0,score=0,creative=true}})
 assert(A.lib.decode(packed)[1].creative)
 assert(not pcall(A.lib.decode, packed:sub(1,-2)), 'truncation rejected')

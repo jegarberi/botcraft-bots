@@ -131,5 +131,31 @@ local stage_blocks
 for _, c in ipairs(chats) do stage_blocks = stage_blocks or tonumber(c.message:match("^%[castle%] .-%(%d+/%d+%): (%d+) blocks")) end
 assert(stage_blocks and stage_blocks > 0 and total == stage_blocks, "the parts hold every block of the stage: " .. total .. " of " .. tostring(stage_blocks))
 tool.run({action = "stop"})
+-- With a bot of another host on the site: strips of the same width, one per bot of every host; this host's
+-- bots build only theirs, the other host's strip is left to it
+TEAM_CREW = function(names)
+    local c = { "zzzzzz:Remote1" }
+    for _, n in ipairs(names) do c[#c + 1] = "local:" .. n end
+    table.sort(c)
+    return c
+end
+orders, chats = {}, {}
+assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
+assert(#orders >= 1 and #orders <= 3, "only this host's three bots get strips: " .. #orders)
+for _, c in ipairs(chats) do
+    local i, n, a, b = c.message:match("takes part (%d+)/(%d+) of .-: x (%-?%d+)%.%.(%-?%d+)")
+    if i then
+        assert(tonumber(n) == 4 and tonumber(i) <= 3, "four strips, the fourth for the other host: " .. c.message)
+    end
+end
+for _, o in ipairs(orders) do
+    local lo, hi = math.huge, -math.huge
+    for _, b in ipairs(o.blocks) do lo, hi = math.min(lo, b[1]), math.max(hi, b[1]) end
+    for _, other in ipairs(orders) do
+        if other ~= o then for _, b in ipairs(other.blocks) do assert(b[1] < lo or b[1] > hi, "strips do not overlap") end end
+    end
+end
+TEAM_CREW = nil
+tool.run({action = "stop"})
 crew = false
 print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")

@@ -848,6 +848,23 @@ local function split_parts(blocks, n)
     return parts
 end
 
+-- The blocks of a stage in n strips of the same width across x1..x2 (blocks outside go to the nearest end):
+-- the same cut on every host for the same site, whatever blocks each one planned
+local function strip_parts(blocks, n, x1, x2)
+    local parts, width = {}, (x2 - x1 + 1) / n
+    for i = 1, n do
+        parts[i] = { blocks = {}, x1 = math.floor(x1 + (i - 1) * width), x2 = math.floor(x1 + i * width) - 1, z1 = math.huge, z2 = -math.huge }
+    end
+    for _, b in ipairs(blocks) do
+        local i = math.max(1, math.min(n, math.floor((b[1] - x1) / width) + 1))
+        local p = parts[i]
+        p.blocks[#p.blocks + 1] = b
+        p.z1, p.z2 = math.min(p.z1, b[3]), math.max(p.z2, b[3])
+    end
+    for _, p in ipairs(parts) do if #p.blocks == 0 then p.z1, p.z2 = 0, 0 end end
+    return parts
+end
+
 local function hand_over()
     CREATIVE_CONSTRUCTION = job.creative or false
     local s = job.stages[job.index]
@@ -858,18 +875,34 @@ local function hand_over()
             local ok, st = pcall(bot.call, "status", { bot = b.name })
             if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then members[#members + 1] = b.name end
         end
-        -- One part per bot, never two bots on one: strips across the site (by x, then z) with as many blocks each
-        local parts = split_parts(s.blocks, #members)
+        -- One part per bot, never two bots on one. Alone: strips across the site (by x, then z) with as many blocks
+        -- each. With bots of other hosts on the same site (creative plugin): strips of the site of the same width,
+        -- one per bot of every host in the same order everywhere, so the hosts cut it alike though each plans the
+        -- stage from its own view of the ground; this host's bots take theirs
+        local crew = TEAM_CREW and TEAM_CREW(members) or {}
+        local parts, index, total = nil, {}, #members
+        if #crew > #members then
+            parts, total = strip_parts(s.blocks, #crew, job.site[1], job.site[4]), #crew
+            local id = NETLINK_BUILD and NETLINK_BUILD.id or "local"
+            for i, key in ipairs(crew) do
+                local host, name = key:match("^(.-):(.*)$")
+                if host == id then index[name] = i end
+            end
+        else
+            parts = split_parts(s.blocks, #members)
+            for i, name in ipairs(members) do index[name] = i end
+        end
         job.parts = {}
-        for i, name in ipairs(members) do
-            local p = parts[i]
+        for _, name in ipairs(members) do
+            local i = index[name]
+            local p = i and parts[i] or { blocks = {}, x1 = 0, x2 = 0, z1 = 0, z2 = 0 }
             job.parts[name] = { index = i, blocks = #p.blocks, done = #p.blocks == 0 }
             if #p.blocks > 0 then
                 bot.call("team_member", { bot = name, objective = "build", plan = "blocks", blocks = p.blocks,
                     site = job.site, name = "castle", members = { name }, leader = name, solo = true })
                 bot.call("autopilot", { bot = name, enabled = true })
                 pcall(bot.call, "chat", { bot = name, message = string.format("[castle] %s takes part %d/%d of %s: x %d..%d z %d..%d, %d blocks",
-                    name, i, #members, s.name, p.x1, p.x2, p.z1, p.z2, #p.blocks) })
+                    name, i, total, s.name, p.x1, p.x2, p.z1, p.z2, #p.blocks) })
             end
         end
     else
