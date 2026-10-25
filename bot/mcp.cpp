@@ -9677,7 +9677,14 @@ static Value DisconnectBot(const std::shared_ptr<McpBot>& bot)
 {
     const auto stored = std::make_shared<std::atomic<int>>(0);
     const auto error = std::make_shared<std::string>();
-    if (!bot->GetShouldBeClosed())
+    // In creative there is nothing to keep: its items come back for nothing, and storing took up to 2 minutes
+    const std::shared_ptr<LocalPlayer> player = bot->GetLocalPlayer();
+    const bool creative = player && player->GetGameMode() == GameType::Creative;
+    if (creative)
+    {
+        *error = "creative: nothing stored";
+    }
+    else if (!bot->GetShouldBeClosed())
     {
         Run(*bot, 120, "store before disconnecting", [=](McpBot& c) { return StoreTask(c, true, *stored, *error); });
     }
@@ -12718,7 +12725,7 @@ static void Usage()
         << "  --plugins DIR        directory of Lua plugins (default: plugins/ next to the sources)\n"
         << "  --headless           no window, no views, no MCP on stdin (use --web, bin/bot_tui or tui.py);\n"
         << "                       runs until Ctrl-C or SIGTERM. Without a display this is the default for views\n"
-        << "SIGHUP, SIGUSR1 or SIGUSR2 (any mode): the bots store everything in chests, disconnect, and it exits.\n"
+        << "SIGHUP, SIGUSR1 or SIGUSR2 (any mode): the bots store everything in chests (not in creative), disconnect, and it exits.\n"
         << "Then speaks MCP (JSON-RPC) on stdin/stdout. When stdin is closed (headless: on Ctrl-C/SIGTERM),\n"
         << "the bots store their inventory in chests and disconnect." << std::endl;
 }
