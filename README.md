@@ -91,6 +91,14 @@ Navigation in water steers in both horizontal directions while repeatedly swimmi
 so a sideways current cannot leave a bot waiting motionless for a higher waypoint. Dry-land movement
 continues through the existing path follower.
 
+Creative construction runs at the 50 ms game-tick cadence instead of the survival 200 ms cadence,
+and checks stage completion every two seconds instead of twenty. Where the bot has `/fill` permission,
+loaded runs of matching blueprint cells are grouped into horizontal rectangles of at most 4096 blocks.
+Batches exclude occupied cells, containers and protected blocks, use a server-side source-block filter,
+and count progress only after block states are confirmed. If a batch is rejected or unconfirmed, the
+bot uses normal creative placement and waits a minute before trying bulk commands again.
+`stats.creative_fill_batches` counts confirmed batches. Existing command chat pacing remains in effect.
+
 ## Central brain across hosts
 
 All hosts must connect to the same Minecraft Java server with shared global chat (the current

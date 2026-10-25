@@ -1151,7 +1151,9 @@ local function road_tick()
     pcall(bot.call, "team_member", order)
 end
 
--- Every 20 seconds: when no bot has anything left of the stage, start the next one
+local advance_castle
+
+-- Every 20 seconds: roads, vault and survival construction maintenance
 bot.every(20, function()
     if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     local ok, err = pcall(road_tick)
@@ -1167,6 +1169,11 @@ bot.every(20, function()
             ranch_due = (ok and r.stocked >= 4 or ranch_tries >= 6) and nil or 30
         end
     end
+    if job and not job.creative then advance_castle() end
+end)
+
+
+advance_castle = function()
     if not job then return end
     local over, why = stage_over()
     if not over then return end
@@ -1190,6 +1197,9 @@ bot.every(20, function()
     else
         hand_over()
     end
+end
+bot.every(2, function()
+    if not MIGRATING and job and job.creative then advance_castle() end
 end)
 
 -- Water, till and sow the plots, with the bot the tool is called for: needs one water_bucket per plot, a hoe, seeds

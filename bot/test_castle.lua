@@ -3,6 +3,7 @@
 local tool, tick, orders, handed, sites = nil, nil, {}, {}, {}
 local creative = false
 local eggs, animals = false, {}
+local timers = {}
 bot = { call = function(name, a)
     if name == "team" then
         handed[#handed + 1] = a
@@ -36,13 +37,16 @@ bot = { call = function(name, a)
     if name == "vault" then return { chests = {}, full = false } end
     if name == "inventory" then return {} end
     return {}
-end, tool = function(t) tool = t end, every = function(_, f) local before = tick; tick = before and function() before(); f() end or f end, on_chat = function() end, log = print }
+end, tool = function(t) tool = t end, every = function(seconds, f) timers[seconds] = timers[seconds] or {}; timers[seconds][#timers[seconds] + 1] = f; local before = tick; tick = before and function() before(); f() end or f end, on_chat = function() end, log = print }
 load(io.open(arg[1]):read("a"), "castle")()
 local plan = tool.run({ action = "plan", x = 0, y = 70, z = 0 })
 assert(#plan.stages >= 10, "the full plan has all its stages")
 for _, s in ipairs(plan.stages) do assert(s.blocks > 0, s.stage .. " is empty") end
 local started = tool.run({ action = "start", x = 0, y = 70, z = 0 })
 assert(started.started)
+assert(timers[2], "creative completion has a two-second timer")
+for _, f in ipairs(timers[2]) do f() end
+assert(tool.run({action = "status"}).stage_number == 1, "survival stages retain their normal cadence")
 -- The first stage handed over is the levelling: the pit is filled, cobblestone on top, dirt under it to the stone
 local filled = {}
 for _, b in ipairs(handed[1].blocks) do if b[1] == 5 and b[3] == 5 then filled[b[2]] = b[4] end end
@@ -86,6 +90,8 @@ assert(planted, "creative plan includes tilled and planted farms")
 orders = {}
 assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
 assert(#orders == 1 and orders[1].bot == "Bot1", "only creative bots receive automatic build orders")
+for _, f in ipairs(timers[2]) do f() end
+assert(tool.run({action = "status"}).stage_number == 2, "creative stages advance on the two-second timer")
 for _ = 1, 100 do
     if tool.run({action = "status"}).stage:match("^village") then break end
     tick()

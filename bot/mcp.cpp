@@ -1,6 +1,7 @@
 // MCP server (stdio, newline-delimited JSON-RPC) exposing a Botcraft bot as tools for an LLM,
 // with a decision tree (autopilot), a live view/tree window, view snapshots and Lua plugins.
 // Usage: bot_mcp --help
+#include "creative_build.hpp"
 #include "creative_flight.hpp"
 #include "creative_inventory.hpp"
 
@@ -511,6 +512,7 @@ public:
     std::chrono::steady_clock::time_point give_ups_since{};
     std::atomic<bool> walled_in = false;
     bool basics_done = false;
+    std::chrono::steady_clock::time_point creative_fill_retry_at{};
     std::set<ItemId> creative_supplies; // Items supplied by creative inventory, safe to replace when full.
     std::string GetBasics()
     {
@@ -5250,9 +5252,77 @@ static std::string OtherWood(BehaviourClient& c, const std::string& item)
     return best;
 }
 
+// Operator-only acceleration. Rejected commands fall back to the normal creative inventory builder.
+static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, std::string>& selected)
+{
+    if (std::chrono::steady_clock::now() < c.creative_fill_retry_at) return false;
+    const Wanted wanted(selected.second);
+    if (!CreativeBuild::Batchable(wanted.item) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
+    const auto world = c.GetWorld();
+    const Blockstate* source = world->GetBlock(selected.first);
+    if (!source) return false;
+    const std::string replacing = source->GetName();
+    std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
+    {
+        auto entities = c.GetEntityManager()->GetEntities();
+        for (const auto& entry : *entities) if (entry.second && entry.second->IsLivingEntity()) occupied.push_back(entry.second->GetCollider());
+    }
+    std::set<CreativeBuild::Cell> eligible;
+    for (const auto& entry : team.blueprint)
+    {
+        if (entry.second != selected.second) continue;
+        const Position& p = entry.first;
+        const auto failed = team.build_failed.find(p);
+        if (failed != team.build_failed.end() && !Construction::RetryReady(failed->second.first,
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - failed->second.second).count())) continue;
+        const Blockstate* block = world->GetBlock(p);
+        if (!block || block->GetName() != replacing || block->IsLava() || Unbreakable(block)) continue;
+        if (block->GetName() == wanted.item && wanted.StateMatches(*block)) continue;
+        if (!block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName())) continue;
+        bool touches_entity = false;
+        for (const auto& box : occupied)
+        {
+            const auto low = box.GetMin(), high = box.GetMax();
+            if (low.x < p.x + 1 && high.x > p.x && low.y < p.y + 1 && high.y > p.y && low.z < p.z + 1 && high.z > p.z)
+            { touches_entity = true; break; }
+        }
+        if (!touches_entity) eligible.insert({p.x, p.y, p.z});
+    }
+    const auto batch = CreativeBuild::Rectangle(eligible, {selected.first.x, selected.first.y, selected.first.z});
+    if (batch.count < 16) return false;
+    {
+        std::lock_guard<std::mutex> lock(c.team_mutex);
+        if (c.team.plan_id != team.plan_id) return false;
+    }
+    const auto coordinates = [](const CreativeBuild::Cell& p)
+    { return std::to_string(p[0]) + " " + std::to_string(p[1]) + " " + std::to_string(p[2]); };
+    c.SendPaced(true, "minecraft:fill " + coordinates(batch.low) + " " + coordinates(batch.high) + " " + selected.second + " replace " + replacing);
+    const bool confirmed = Utilities::YieldForCondition([&]()
+    {
+        for (int x = batch.low[0]; x <= batch.high[0]; ++x)
+            for (int z = batch.low[2]; z <= batch.high[2]; ++z)
+            {
+                const Blockstate* block = world->GetBlock(Position(x, batch.low[1], z));
+                if (!block || block->GetName() != wanted.item || !wanted.StateMatches(*block)) return false;
+            }
+        return true;
+    }, c, 2000);
+    if (!confirmed)
+    {
+        c.creative_fill_retry_at = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+        c.SetNote("bulk build unavailable; using creative inventory placement");
+        return false;
+    }
+    Count(c, "built", batch.count);
+    Count(c, "creative_fill_batches");
+    c.SetNote("creative bulk build: " + std::to_string(batch.count) + " confirmed blocks");
+    return true;
+}
+
 static Status BuildStep(McpBot& c)
 {
     c.SetState("building");
+    const bool creative = c.GetLocalPlayer()->GetGameMode() == GameType::Creative;
     // Placing block after block from one spot, waiting at a furnace: standing still is the work here.
     // (Taken for stuck, the bot would break a block beside it, the wall it just built as likely as not)
     const WorkingInPlace at_work(c);
@@ -5268,7 +5338,7 @@ static Status BuildStep(McpBot& c)
     Vector3<double> focus = me;
     {
         Vector3<double> leader;
-        if (LeaderPosition(c, leader))
+        if (!creative && LeaderPosition(c, leader))
         {
             focus = leader;
         }
@@ -5431,6 +5501,7 @@ static Status BuildStep(McpBot& c)
         c.SetNote(sealed ? "build finished: penalty for no entrance" : narrow > 0 ? "build finished: penalty for one-block road" : "build finished");
         return Status::Success;
     }
+    if (creative && CreativeFill(c, team, *next)) return Status::Success;
     const Position& p = next->first;
     // The block itself, without the text of a sign
     const Wanted wanted_next(next->second);
@@ -5580,7 +5651,7 @@ static Status BuildStep(McpBot& c)
     if (!wanted_next.state.empty())
     {
         // Did it end up the right way round? If not, take it out: the spot is tried again in a minute
-        Wait(c, 300);
+        if (!creative) Wait(c, 300);
         const Blockstate* placed = world->GetBlock(p);
         if (placed != nullptr && placed->GetName() == item && !wanted_next.StateMatches(*placed))
         {
@@ -7929,13 +8000,18 @@ static std::shared_ptr<BehaviourTree<McpBot>> MakeAutopilotTree()
                         Wait(c, 500);
                         return Status::Success;
                     }
-                    // At most 5 decisions a second. An action that fails instantly (a craft with a missing
-                    // ingredient, a block that can't be placed) would otherwise be retried a hundred times a
-                    // second, each try sending packets: servers kick clients for that
-                    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-                    if (now - c.last_decision < std::chrono::milliseconds(200))
+                    // Creative construction runs at tick rate; survival and failed actions remain paced.
+                    bool creative_build = false;
+                    if (c.GetLocalPlayer()->GetGameMode() == GameType::Creative)
                     {
-                        Wait(c, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::milliseconds(200) - (now - c.last_decision)).count()));
+                        std::lock_guard<std::mutex> lock(c.team_mutex);
+                        creative_build = c.team.building;
+                    }
+                    const auto interval = std::chrono::milliseconds(creative_build ? 50 : 200);
+                    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+                    if (now - c.last_decision < interval)
+                    {
+                        Wait(c, static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(interval - (now - c.last_decision)).count()));
                     }
                     c.last_decision = std::chrono::steady_clock::now();
                     return Status::Failure;
