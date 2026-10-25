@@ -154,7 +154,7 @@ bot.every(20, function()
         NETLINK_BUILD.send("S" .. string.pack(">i4i2i4I2", p.x, p.y, p.z, math.min(decision.voters or 0, 65535)))
         site_sent = now
     end
-    if not local_vote then
+    if not local_vote and not decision then
         local rows, roster = {}, call("bots") or {}
         for _, b in ipairs(roster) do
             local st = call("status", {bot = b.name})
@@ -194,13 +194,13 @@ bot.every(20, function()
             invalidate()
         end
     end
-    ballots[id].at = now
+    if ballots[id] then ballots[id].at = now end
     for host, ballot in pairs(ballots) do
         if host ~= id and now - ballot.at > 240 then ballots[host] = nil; invalidate() end
     end
     local current = election()
     if now - last_sent >= 60 then
-        if NETLINK_BUILD.signed then NETLINK_BUILD.send("V" .. local_vote) end
+        if NETLINK_BUILD.signed and local_vote then NETLINK_BUILD.send("V" .. local_vote) end
         -- (Once decided, no more D/C: sent every minute for ever, every other host answers rejected:authority)
         if current and current.host == id and not decision and now - changed >= 120 then
             approved = current.hash

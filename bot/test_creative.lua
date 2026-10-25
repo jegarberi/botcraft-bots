@@ -75,6 +75,13 @@ pump(240)
 assert(#C.builds==1 and C.builds[1].x==a.x and C.builds[1].z==a.z and C.builds[1].creative, 'a late host builds at the team site')
 assert(C.tool().decision.joined and C.chats[1]:match('joining host'), 'the late host says it joins the team')
 assert(#A.builds==1 and #B.builds==1 and A.tool().decision.site.x==a.x, 'the team keeps its site')
+-- After a restart: the castle standing is the site at once, without a vote (even with terrain not loaded), sent on
+local D = instance('dddddd', {bot('CreativeD', 0, true)}, true)
+D.site = {x = 7, y = 70, z = 9}
+D.roster[1].position = nil
+pump(160)
+assert(D.tool().decision and D.tool().decision.existing and D.tool().decision.site.x == 7, 'a standing castle is the site after a restart')
+assert(#D.builds == 0 and D.tool().started, 'the standing castle is kept, not started again')
 local packed = A.lib.encode({{name='Valid',x=0,y=70,z=0,score=0,creative=true}})
 assert(A.lib.decode(packed)[1].creative)
 assert(not pcall(A.lib.decode, packed:sub(1,-2)), 'truncation rejected')
