@@ -577,7 +577,7 @@ public:
         return ++gear_steps;
     }
     /// @brief One tool action at a time per bot: the MCP thread, the web GUI and the Lua chat handlers all run some
-    std::mutex run_mutex;
+    std::timed_mutex run_mutex;
 
 protected:
     using ProtocolCraft::Handler::Handle;
@@ -1070,6 +1070,8 @@ static R WithMemory(const BehaviourClient& c, F&& f, R def = R())
 /// @brief Calls made by a plugin, on this thread (the tools they call in turn included): their build orders are
 /// not kept for the next join, the plugin hands them over again
 static thread_local int lua_calls = 0;
+/// @brief Calls made while holding the plugins' lock (not from a bot.spawn thread, which lets it go): they must not wait long
+static thread_local int lua_locked = 0;
 
 static void SaveDoing(const BehaviourClient& c, const std::string& key, const std::string& value)
 {
@@ -8836,7 +8838,20 @@ static bool ClearTrap(McpBot& c)
 template<typename F>
 static bool Run(McpBot& bot, const int timeout_s, const std::string& what, F&& f)
 {
-    std::lock_guard<std::mutex> lock(bot.run_mutex);
+    // Plugin code that holds the plugins' lock doesn't wait for a bot busy with another tool (a walk to the
+    // settlement took 16 minutes, and the berry picker's timer held every plugin up all that time)
+    std::unique_lock<std::timed_mutex> lock(bot.run_mutex, std::defer_lock);
+    if (lua_locked > 0)
+    {
+        if (!lock.try_lock_for(std::chrono::seconds(5)))
+        {
+            throw std::runtime_error(bot.GetNetworkManager()->GetMyName() + " is busy (" + bot.GetState() + "): " + what + " later");
+        }
+    }
+    else
+    {
+        lock.lock();
+    }
     const auto success = std::make_shared<std::atomic<bool>>(false);
     // 0: running, 1: success, 2: failure. Published by the very last leaf, after the tree swap
     // is requested, so a following Run can't have its tree overwritten by this one
@@ -9231,7 +9246,7 @@ static void Watchdog(McpBot& bot)
         bot.last_health = health;
     }
     // A tool call owns the tree: leave it alone
-    std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
+    std::unique_lock<std::timed_mutex> lock(bot.run_mutex, std::try_to_lock);
     const std::string state = bot.GetState();
     if (!lock || state.rfind("tool:", 0) == 0)
     {
@@ -9848,6 +9863,11 @@ static Value CallTool(const std::string& name, const Value& a)
             o["name"] = waiting;
             o["state"] = "kicked or crashed, rejoining soon";
             list.push_back(o);
+        }
+        // A job of its own (team_member solo=true: the berry picker, a house builder...)
+        for (size_t i = 0; i < list.size(); ++i)
+        {
+            list[i]["solo"] = solo_bots.count(list[i]["name"].get_string()) != 0;
         }
         return list;
     }
@@ -11131,7 +11151,7 @@ static Value CallTool(const std::string& name, const Value& a)
             throw std::runtime_error(item + " is neither crafted nor smelted: use collect or the autopilot's gather for raw materials");
         }
         // (A running tool action keeps the tree: the goal is taken up when it ends, see team_member)
-        std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
+        std::unique_lock<std::timed_mutex> lock(bot.run_mutex, std::try_to_lock);
         bot.SetMake(item, count);
         if (count > 0)
         {
@@ -11399,7 +11419,7 @@ static Value CallTool(const std::string& name, const Value& a)
             throw std::runtime_error("missing boolean argument: enabled");
         }
         // Not while a tool action (e.g. from a Lua chat handler) owns the tree: then the settings wait for it to end
-        std::unique_lock<std::mutex> lock(bot.run_mutex, std::try_to_lock);
+        std::unique_lock<std::timed_mutex> lock(bot.run_mutex, std::try_to_lock);
         bot.autopilot = a["enabled"].get<bool>();
         if (a.contains("gear") && a["gear"].is_bool())
         {
@@ -11715,7 +11735,7 @@ static Value CallTool(const std::string& name, const Value& a)
         // A tool action (a walk can take minutes) owns the tree: the order is stored without waiting, and the tool
         // hands the bot back to its default tree, which takes it up, when it ends. Waiting held the plugins' lock
         // (the caller's) all that time: every plugin stood still while bots walked to the settlement
-        std::unique_lock<std::mutex> run_lock(bot.run_mutex, std::try_to_lock);
+        std::unique_lock<std::timed_mutex> run_lock(bot.run_mutex, std::try_to_lock);
         {
             std::lock_guard<std::mutex> lock(bot.team_mutex);
             static std::atomic<int> plans = 0;
@@ -12067,6 +12087,7 @@ static bool CallFromLua(lua_State* L, const char* name)
         }
         if (lua_spawned_states.count(L) == 0)
         {
+            struct Locked { Locked() { ++lua_locked; } ~Locked() { --lua_locked; } } locked;
             PushJson(L, CallTool(name, args));
             return true;
         }

@@ -455,7 +455,8 @@ end
 local function gather()
     if not settlement or MIGRATING then return end
     for _, b in ipairs(call("bots", {}) or {}) do
-        local st = call("status", { bot = b.name })
+        -- (not a bot with a job of its own somewhere: its plugin would walk it back, every 20 minutes)
+        local st = not b.solo and call("status", { bot = b.name })
         local p = type(st) == "table" and st.position
         if p and (p.x - settlement.x) ^ 2 + (p.z - settlement.z) ^ 2 > GATHER * GATHER and
             os.time() - (gathered[b.name] or 0) >= 1200 and not bot.busy("gather:" .. b.name) then
