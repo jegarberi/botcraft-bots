@@ -54,22 +54,54 @@ index 0f6cf12..d1403eb 100644
 +    }
 +}
 diff --git a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
-index 260a52e..b439608 100644
+index 260a52e..c9d2b44 100644
 --- a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
 +++ b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
-@@ -134,8 +134,9 @@ namespace Botcraft
+@@ -76,6 +76,7 @@ namespace Botcraft
+         virtual void Yield() override
+         {
              std::unique_lock<std::mutex> lock(behaviour_mutex);
++            ++yields;
+             behaviour_cond_var.notify_all();
+             behaviour_cond_var.wait(lock);
+             if (should_be_closed)
+@@ -132,10 +133,15 @@ namespace Botcraft
+             }
+ 
+             std::unique_lock<std::mutex> lock(behaviour_mutex);
++            const size_t seen = yields;
              // Resume tree ticking
              behaviour_cond_var.notify_all();
 -            // Wait for the next call to Yield()
 -            behaviour_cond_var.wait(lock);
-+            // Wait for the next call to Yield(), 1 second at most: a tree thread that ended (the bot closed)
-+            // never yields again, and the caller would wait here forever
-+            behaviour_cond_var.wait_for(lock, std::chrono::seconds(1));
++            // Wait for the next call to Yield(), or for the tree thread to end (a closed bot's never yields again:
++            // waiting for it would hang the caller for ever). Spurious wakeups wait again
++            while (yields == seen && tree_loop_ready)
++            {
++                behaviour_cond_var.wait_for(lock, std::chrono::seconds(1));
++            }
          }
  
          /// @brief Set a tree to execute the given action once and block until done.
-@@ -331,8 +332,11 @@ namespace Botcraft
+@@ -298,6 +304,17 @@ namespace Botcraft
+         {
+             Logger::GetInstance().RegisterThread("Behaviour - " + GetNetworkManager()->GetMyName());
+             tree_loop_ready = true;
++            // However the loop ends: wake whoever waits in BehaviourStep for a Yield that won't come
++            struct Ended
++            {
++                TemplatedBehaviourClient& c;
++                ~Ended()
++                {
++                    std::lock_guard<std::mutex> lock(c.behaviour_mutex);
++                    c.tree_loop_ready = false;
++                    c.behaviour_cond_var.notify_all();
++                }
++            } ended{ *this };
+             while (true)
+             {
+                 try
+@@ -331,8 +348,11 @@ namespace Botcraft
                  }
                  catch (const std::exception& e)
                  {
@@ -83,6 +115,14 @@ index 260a52e..b439608 100644
                  }
                  catch (...)
                  {
+@@ -353,5 +373,7 @@ namespace Botcraft
+         std::mutex behaviour_mutex;
+ 
+         std::atomic<bool> tree_loop_ready;
++        /// @brief Calls to Yield so far (under behaviour_mutex): BehaviourStep waits for the next one
++        size_t yields = 0;
+     };
+ } // namespace Botcraft
 diff --git a/botcraft/include/botcraft/Game/ConnectionClient.hpp b/botcraft/include/botcraft/Game/ConnectionClient.hpp
 index 8efbf2a..25a3bd5 100644
 --- a/botcraft/include/botcraft/Game/ConnectionClient.hpp
