@@ -883,8 +883,8 @@ local function stage_over()
     if job.best == nil or lowest < job.best then
         job.best, job.best_at = lowest, now
     end
-    -- (Creative: a stage takes a minute, stragglers get 60 seconds, not 5 minutes)
-    return now - job.best_at > (job.creative and 60 or 300), lowest .. " spots left that the bots could not do"
+    -- (Creative: a stage takes a minute, so its last stragglers get 60 seconds, not 5 minutes)
+    return now - job.best_at > ((job.creative and lowest < 100) and 60 or 300), lowest .. " spots left that the bots could not do"
 end
 
 -- Stock the pens: for each kind of animal the bot has the food of, open the gate, lead the animals within
