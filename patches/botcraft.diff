@@ -54,10 +54,22 @@ index 0f6cf12..d1403eb 100644
 +    }
 +}
 diff --git a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
-index 260a52e..234e5af 100644
+index 260a52e..b439608 100644
 --- a/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
 +++ b/botcraft/include/botcraft/AI/TemplatedBehaviourClient.hpp
-@@ -331,8 +331,11 @@ namespace Botcraft
+@@ -134,8 +134,9 @@ namespace Botcraft
+             std::unique_lock<std::mutex> lock(behaviour_mutex);
+             // Resume tree ticking
+             behaviour_cond_var.notify_all();
+-            // Wait for the next call to Yield()
+-            behaviour_cond_var.wait(lock);
++            // Wait for the next call to Yield(), 1 second at most: a tree thread that ended (the bot closed)
++            // never yields again, and the caller would wait here forever
++            behaviour_cond_var.wait_for(lock, std::chrono::seconds(1));
+         }
+ 
+         /// @brief Set a tree to execute the given action once and block until done.
+@@ -331,8 +332,11 @@ namespace Botcraft
                  }
                  catch (const std::exception& e)
                  {
