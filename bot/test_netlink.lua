@@ -40,6 +40,7 @@ local function instance(id, name, key, opts)
         on_chat = function(fn) listeners[#listeners + 1] = fn; inst.listener = fn end,
         log = print,
     }
+    inst.env = env
     inst.lib = load(src, "netlink", "t", env)()
     return inst
 end
@@ -113,6 +114,17 @@ assert(from.cccccc, "a message signed with the same secret is merged (sent as 'n
 assert(not from.eeeeee and not from.ffffff, "unsigned and wrongly signed messages are refused")
 assert(said("ACK eeeeee %x+ rejected:signature") and said("ACK ffffff %x+ rejected:signature"))
 assert(D.tool.run({}).signed and not E.tool.run({}).signed)
+-- Two programs with one id (a copied folder): the one that hears a message with its id that it never sent
+-- takes a new id, and NETLINK_BUILD hands out the new one; the sender keeps its own
+listeners, lines = {}, {}
+local G1 = instance("abcdef", "BotG1", nil, { w = w })
+local G2 = instance("abcdef", "BotG2", nil, { w = w })
+G1.tool.run({ send = true })
+pump({ G1, G2 }, 10)
+assert(G1.tool.run({}).id == "abcdef", "the sender keeps its id")
+assert(G2.tool.run({}).id ~= "abcdef" and G2.lib.id == G2.tool.run({}).id, "the other one takes a new id: " .. G2.tool.run({}).id)
+assert(G2.env.NETLINK_BUILD.id == G2.lib.id, "NETLINK_BUILD hands out the new id")
+os.remove("../netlink_id.txt")
 for _, l in ipairs(lines) do assert(#l <= 256, "a chat line fits: " .. #l) end
 print(string.format("netlink plugin OK: %d chat lines, longest %d characters", #lines,
     (function() local m = 0 for _, l in ipairs(lines) do m = math.max(m, #l) end return m end)()))

@@ -124,18 +124,23 @@ end
 local function hex(bytes) return (bytes:gsub(".", function(ch) return string.format("%02x", ch:byte()) end)) end
 
 -- ---------------------------------------------------------------- this program's id and secret
+local function new_id()
+    math.randomseed(os.time() + math.floor(os.clock() * 1e6))
+    local id = string.format("%06x", math.random(0, 0xffffff))
+    local f = io.open(ID_FILE, "w")
+    if f then f:write(id, "\n"); f:close() end
+    return id
+end
 local function load_id()
     local f = io.open(ID_FILE, "r")
     local id = f and f:read("l")
     if f then f:close() end
     if id and id:match("^%x%x%x%x%x%x$") then return id end
-    math.randomseed(os.time() + math.floor(os.clock() * 1e6))
-    id = string.format("%06x", math.random(0, 0xffffff))
-    f = io.open(ID_FILE, "w")
-    if f then f:write(id, "\n"); f:close() end
-    return id
+    return new_id()
 end
 local ME = load_id()
+-- Set below: the tables that hand ME out, given the new one when it has to change
+local on_new_id = {}
 
 local function load_key()
     local f = io.open(KEY_FILE, "r")
@@ -270,6 +275,15 @@ bot.on_chat(function(line)
     local words = {}
     for w in rest:gmatch("%S+") do words[#words + 1] = w end
     local from = words[1]
+    if from == ME and words[2] and words[2] ~= "ACK" and words[2] ~= "NACK" and not sent[words[2]] then
+        -- Our id on a message we never sent: another program has it too (a copy of this folder with its
+        -- netlink_id.txt). Each takes the other's lines for its own echo and they never hear each other: a new id
+        local old = ME
+        ME = new_id()
+        for _, t in ipairs(on_new_id) do t.id = ME end
+        io.stderr:write("[netlink] id ", old, " is used by another host too: now ", ME, "\n")
+        return
+    end
     if not from or not from:match("^%x%x%x%x%x%x$") or from == ME then return end
     peers[from] = peers[from] or {}
     peers[from].last_seen = os.time()
@@ -675,6 +689,7 @@ NETLINK_BUILD = {
         end
     end,
 }
+on_new_id[#on_new_id + 1] = NETLINK_BUILD
 bot.tool{
     name = "central",
     description = "Central community survival coordinator over signed, compressed base64 Minecraft chat. mode=leader makes this host the brain; mode=worker with central=leader netlink id follows it; mode=off returns local control. bot selects the local chat speaker. Reports health and hunger every minute; assigns trades across hosts for food, shelter and resource production. Every 5 minutes the workers also report where each bot stands and what it sees there; the leader has every bot of every host vote where to settle (settle plugin) and sends the winning place to the workers: each host's town moves there and its bots farther than 256 blocks walk there. settle=true votes again. The mode and the settlement are kept across restarts. Requires a shared netlink_key.txt.",
@@ -693,5 +708,7 @@ bot.tool{
 }
 
 -- For the offline check
-return { b64encode = b64encode, b64decode = b64decode, checksum = checksum, sha256 = sha256, hmac = hmac, hex = hex,
+local exported = { b64encode = b64encode, b64decode = b64decode, checksum = checksum, sha256 = sha256, hmac = hmac, hex = hex,
     compress = compress, decompress = decompress, pack = pack_network, unpack = unpack_network, id = ME }
+on_new_id[#on_new_id + 1] = exported
+return exported
