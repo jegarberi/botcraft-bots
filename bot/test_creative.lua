@@ -69,6 +69,12 @@ approvals = 0
 pump(300)
 assert(#A.builds==1 and #B.builds==1, 'no restart each tick')
 assert(approvals == 0, 'no approvals sent once the site is decided: ' .. approvals)
+-- A host connecting after the decision joins the team's site instead of voting alone
+local C = instance('cccccc', {bot('CreativeC', 5000, true)}, true)
+pump(240)
+assert(#C.builds==1 and C.builds[1].x==a.x and C.builds[1].z==a.z and C.builds[1].creative, 'a late host builds at the team site')
+assert(C.tool().decision.joined and C.chats[1]:match('joining host'), 'the late host says it joins the team')
+assert(#A.builds==1 and #B.builds==1 and A.tool().decision.site.x==a.x, 'the team keeps its site')
 local packed = A.lib.encode({{name='Valid',x=0,y=70,z=0,score=0,creative=true}})
 assert(A.lib.decode(packed)[1].creative)
 assert(not pcall(A.lib.decode, packed:sub(1,-2)), 'truncation rejected')

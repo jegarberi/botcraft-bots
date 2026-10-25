@@ -4,6 +4,7 @@ local loaded = os.time()
 local ballots, acknowledgements = {}, {}
 local local_vote, changed, last_sent, registered = nil, loaded, 0, false
 local decision, approved, started, announced = nil, nil, false, false
+local site_sent
 local note = "waiting for bots to join"
 local function call(tool, args)
     local ok, result = pcall(bot.call, tool, args or {})
@@ -80,6 +81,17 @@ end
 local function receive(from, raw)
     if #raw > 5000 then return "rejected:ballot_size" end
     local kind = raw:sub(1, 1)
+    -- S: the site of a team already building. A host still undecided joins it (a decided one keeps its own:
+    -- two teams can't pull each other back and forth)
+    if kind == "S" then
+        if decision then return "ok:already_decided" end
+        if #raw ~= 13 then return "rejected:payload" end
+        local x, y, z, voters = string.unpack(">i4i2i4I2", raw, 2)
+        if math.abs(x) > 29999000 or math.abs(z) > 29999000 or y < -48 or y > 270 then return "rejected:payload" end
+        decision = {host = from, hosts = {from}, site = {name = "team", creative = true, x = x, y = y, z = z}, voters = voters, joined = true}
+        note = "joined the team of host " .. from
+        return "ok"
+    end
     if kind == "V" then
         local content = raw:sub(2)
         if decision and (not ballots[from] or ballots[from].raw ~= content) then return "rejected:site_already_decided" end
@@ -126,6 +138,22 @@ bot.every(20, function()
     if not NETLINK_BUILD or MIGRATING or os.time() - loaded < 120 then return end
     if not registered then NETLINK_BUILD.listen(receive); registered = true end
     local id, now = NETLINK_BUILD.id, os.time()
+    -- A castle already standing here (the vote was before a restart): that is the team's site, no new vote
+    if not decision then
+        local castle = call("castle", {action = "status"})
+        local site = castle and castle.site
+        if site and site.x and site.z then
+            decision = {host = id, hosts = {id}, site = {name = "castle", creative = true, x = site.x, y = site.y or 70, z = site.z},
+                voters = #(call("bots") or {}), existing = true}
+            announced = true
+        end
+    end
+    -- Every minute: the team's site to the other hosts, so one connecting later joins it instead of voting alone
+    if decision and NETLINK_BUILD.signed and now - (site_sent or 0) >= 60 then
+        local p = decision.site
+        NETLINK_BUILD.send("S" .. string.pack(">i4i2i4I2", p.x, p.y, p.z, math.min(decision.voters or 0, 65535)))
+        site_sent = now
+    end
     if not local_vote then
         local rows, roster = {}, call("bots") or {}
         for _, b in ipairs(roster) do
@@ -188,7 +216,9 @@ bot.every(20, function()
     end
     if decision and not announced then
         local p = decision.site
-        if call("chat", {message = string.format("[build] %d bots agreed: castle, village and farms at %d %d %d (overworld)", decision.voters, p.x, p.y, p.z)}) then announced = true end
+        local message = decision.joined and string.format("[build] joining host %s's team: castle, village and farms at %d %d %d (overworld)", decision.host, p.x, p.y, p.z)
+            or string.format("[build] %d bots agreed: castle, village and farms at %d %d %d (overworld)", decision.voters, p.x, p.y, p.z)
+        if call("chat", {message = message}) then announced = true end
     end
     note = decision and note or "collecting site proposals and host approvals"
     build()
