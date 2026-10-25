@@ -173,7 +173,8 @@ bot.every(20, function()
     local current = election()
     if now - last_sent >= 60 then
         if NETLINK_BUILD.signed then NETLINK_BUILD.send("V" .. local_vote) end
-        if current and current.host == id and now - changed >= 120 then
+        -- (Once decided, no more D/C: sent every minute for ever, every other host answers rejected:authority)
+        if current and current.host == id and not decision and now - changed >= 120 then
             approved = current.hash
             acknowledgements[id] = current.hash
             local all = true

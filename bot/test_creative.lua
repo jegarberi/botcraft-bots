@@ -1,6 +1,6 @@
 -- Offline shared-site council: lua5.4 test_creative.lua plugins/creative.lua
 local source = assert(io.open(arg[1])):read('a')
-local now, instances, messages = 1000, {}, {}
+local now, instances, messages, approvals = 1000, {}, {}, 0
 local function instance(id, roster, signed)
     local inst = {roster = roster, builds = {}, chats = {}}
     local env = setmetatable({}, {__index = _G})
@@ -11,7 +11,7 @@ local function instance(id, roster, signed)
         return string.format('%08x', h)
     end,
     listen = function(fn) inst.receive = fn end,
-    send = function(raw) messages[#messages + 1] = {from = id, raw = raw}; return 'queued' end}
+    send = function(raw) messages[#messages + 1] = {from = id, raw = raw}; if raw:match('^[DC]') then approvals = approvals + 1 end; return 'queued' end}
     env.bot = {
         call = function(tool, a)
             a = a or {}
@@ -65,8 +65,10 @@ assert(A.tool().decision.voters==5 and B.tool().decision.voters==5, 'survival an
 assert(A.chats[1]:match('5 bots agreed: castle, village and farms at 32 70 0'), A.chats[1])
 assert(A.receive('ffffff', 'C' .. A.tool().decision.hash)=='rejected:authority')
 assert(A.receive('ffffff', 'V' .. A.lib.encode({{name='Later',x=500,y=70,z=0,score=0,creative=true}}))=='rejected:site_already_decided')
+approvals = 0
 pump(300)
 assert(#A.builds==1 and #B.builds==1, 'no restart each tick')
+assert(approvals == 0, 'no approvals sent once the site is decided: ' .. approvals)
 local packed = A.lib.encode({{name='Valid',x=0,y=70,z=0,score=0,creative=true}})
 assert(A.lib.decode(packed)[1].creative)
 assert(not pcall(A.lib.decode, packed:sub(1,-2)), 'truncation rejected')

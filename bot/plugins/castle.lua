@@ -1489,6 +1489,7 @@ bot.tool(castle_tool)
 
 -- After a restart: the castle job again, at the stage it had reached, once the bots are back (2 minutes,
 -- for them to join and for the one planning it to see the ground)
+local surveyed_at   -- when the bots were sent over the site, before taking a creative castle up again
 bot.every(20, function()
     if MIGRATING then return end      -- the bots are moving to a new place (migrate plugin)
     if not castle_saved or job or os.time() - loaded_at < 120 then return end
@@ -1496,7 +1497,29 @@ bot.every(20, function()
     -- The ground is looked at through the eyes of the bot nearest the centre: wait (10 minutes at most) for one
     -- within 48 blocks of it, or the levelling plan leaves out all it cannot see, for good
     local args = saved.args or {}
-    if args.x and args.z and os.time() - loaded_at < 600 then
+    -- Creative: the bots spread over the site first, one to a spot of a grid (they share one world, so between
+    -- them every column of it is loaded), and the plan is made 20 seconds later from the whole ground
+    if args.creative and args.action == "start" and args.x and args.z then
+        if not surveyed_at then
+            local crew = {}
+            for _, b in ipairs(bot.call("bots") or {}) do
+                local ok, st = pcall(bot.call, "status", { bot = b.name })
+                if ok and type(st) == "table" and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then crew[#crew + 1] = b.name end
+            end
+            if #crew == 0 then return end
+            local k = math.ceil(math.sqrt(#crew))
+            for i, name in ipairs(crew) do
+                local gx, gz = (i - 1) % k, (i - 1) // k
+                local x = math.floor(args.x - OUTER + (gx + 0.5) * 2 * OUTER / k)
+                local z = math.floor(args.z - OUTER + (gz + 0.5) * 2 * OUTER / k)
+                pcall(bot.call, "chat", { bot = name, message = string.format("/tp @s %d %d %d", x, (args.y or 70) + 10, z) })
+            end
+            pcall(bot.call, "chat", { message = string.format("[castle] %d bots survey the site before the plan", #crew) })
+            surveyed_at = os.time()
+            return
+        end
+        if os.time() - surveyed_at < 20 then return end
+    elseif args.x and args.z and os.time() - loaded_at < 600 then
         local near = false
         for _, b in ipairs(bot.call("bots") or {}) do
             local ok, st = pcall(bot.call, "status", { bot = b.name })
