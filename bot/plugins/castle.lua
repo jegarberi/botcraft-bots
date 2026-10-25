@@ -827,6 +827,27 @@ local function forget_unbuilt_site(old)
     end
 end
 
+-- The blocks of a stage in n parts for n bots: sorted by x then z and cut in runs of (almost) the same size,
+-- so each part is a strip of the site. Each part: { blocks, x1, x2, z1, z2 }
+local function split_parts(blocks, n)
+    local sorted = {}
+    for i, b in ipairs(blocks) do sorted[i] = b end
+    table.sort(sorted, function(a, b) if a[1] ~= b[1] then return a[1] < b[1] end if a[3] ~= b[3] then return a[3] < b[3] end return a[2] < b[2] end)
+    local parts, size = {}, math.ceil(#sorted / math.max(n, 1))
+    for i = 1, n do
+        local p = { blocks = {} }
+        for k = (i - 1) * size + 1, math.min(i * size, #sorted) do
+            local b = sorted[k]
+            p.blocks[#p.blocks + 1] = b
+            p.x1, p.x2 = math.min(p.x1 or b[1], b[1]), math.max(p.x2 or b[1], b[1])
+            p.z1, p.z2 = math.min(p.z1 or b[3], b[3]), math.max(p.z2 or b[3], b[3])
+        end
+        p.x1, p.x2, p.z1, p.z2 = p.x1 or 0, p.x2 or 0, p.z1 or 0, p.z2 or 0
+        parts[i] = p
+    end
+    return parts
+end
+
 local function hand_over()
     CREATIVE_CONSTRUCTION = job.creative or false
     local s = job.stages[job.index]
@@ -837,10 +858,19 @@ local function hand_over()
             local ok, st = pcall(bot.call, "status", { bot = b.name })
             if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then members[#members + 1] = b.name end
         end
-        for _, name in ipairs(members) do
-            bot.call("team_member", { bot = name, objective = "build", plan = "blocks", blocks = s.blocks,
-                site = job.site, name = "castle", members = members, leader = members[1], solo = true })
-            bot.call("autopilot", { bot = name, enabled = true })
+        -- One part per bot, never two bots on one: strips across the site (by x, then z) with as many blocks each
+        local parts = split_parts(s.blocks, #members)
+        job.parts = {}
+        for i, name in ipairs(members) do
+            local p = parts[i]
+            job.parts[name] = { index = i, blocks = #p.blocks, done = #p.blocks == 0 }
+            if #p.blocks > 0 then
+                bot.call("team_member", { bot = name, objective = "build", plan = "blocks", blocks = p.blocks,
+                    site = job.site, name = "castle", members = { name }, leader = name, solo = true })
+                bot.call("autopilot", { bot = name, enabled = true })
+                pcall(bot.call, "chat", { bot = name, message = string.format("[castle] %s takes part %d/%d of %s: x %d..%d z %d..%d, %d blocks",
+                    name, i, #members, s.name, p.x1, p.x2, p.z1, p.z2, #p.blocks) })
+            end
         end
     else
         bot.call("team", { objective = "build", plan = "blocks", blocks = s.blocks, site = job.site, name = s.name:match("^road") and "road" or "castle" })
@@ -866,6 +896,19 @@ local function progress()
                 if lowest == nil or st.build_left < lowest then lowest = st.build_left end
             end
         end
+    end
+    if job.creative and job.parts then
+        -- Each bot reports its own part: the stage stands when every part does (a part seen done stays done; one
+        -- whose bot is away is not done). What is left is the most any part has
+        local most, all_done = 0, true
+        for name, part in pairs(job.parts) do
+            if type(left[name]) == "number" and left[name] == 0 then part.done = true end
+            if not part.done then
+                all_done = false
+                if type(left[name]) == "number" and left[name] > most then most = left[name] end
+            end
+        end
+        lowest = all_done and 0 or math.max(most, 1)
     end
     return left, lowest, working
 end

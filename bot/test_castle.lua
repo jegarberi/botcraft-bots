@@ -2,6 +2,7 @@
 -- without error. lua5.4 test_castle.lua plugins/castle.lua
 local tool, tick, orders, handed, sites = nil, nil, {}, {}, {}
 local creative = false
+local crew, chats = false, {}
 local eggs, animals = false, {}
 local timers = {}
 bot = { call = function(name, a)
@@ -32,6 +33,8 @@ bot = { call = function(name, a)
     end
     if name == "get_block" then return { block = (a.y < 70 and not (a.x >= 5 and a.x <= 6 and a.z == 5 and a.y >= 66)) and "minecraft:stone" or "minecraft:air" } end
     if name == "status" then return { position = { x = 0, y = 70, z = 0 }, building = false, build_left = 0, build_idle = 0, game_mode = creative and a.bot ~= "Survival" and "creative" or "survival", dimension = "minecraft:overworld" } end
+    if name == "chat" then chats[#chats + 1] = a return {} end
+    if name == "bots" and crew then return { { name = "Bot1" }, { name = "Bot2" }, { name = "Bot3" }, { name = "Survival" } } end
     if name == "bots" then return creative and { { name = "Bot1" }, { name = "Survival" } } or { { name = "Bot1" } } end
     if name == "mines" then return { { x = 120, y = 70, z = 90, resources = "iron_ore,coal_ore" } } end
     if name == "vault" then return { chests = {}, full = false } end
@@ -110,4 +113,23 @@ assert(ranch.stocked == 4 and #animals == 8, "creative spawn eggs stock all four
 assert(tool.run({action = "ranch"}).stocked == 4 and #animals == 8, "already stocked pens do not receive more animals")
 eggs = false
 tool.run({action = "stop"})
+-- Three creative bots: each gets a part of its own, no block in two parts, every block in one, each says which
+crew, orders, chats = true, {}, {}
+assert(tool.run({action = "start", x = 0, y = 70, z = 0, creative = true}).started)
+local seen, total, said = {}, 0, 0
+for _, o in ipairs(orders) do
+    assert(#o.members == 1 and o.members[1] == o.bot and o.leader == o.bot, "a part is built by its bot alone")
+    for _, b in ipairs(o.blocks) do
+        local key = b[1] .. " " .. b[2] .. " " .. b[3] .. " " .. b[4]
+        assert(not seen[key], "no block is in two parts")
+        seen[key], total = true, total + 1
+    end
+end
+for _, c in ipairs(chats) do if c.message:match("takes part %d/3") then said = said + 1 end end
+assert(#orders == 3 and said == 3, "each of the three bots takes one part and says so")
+local stage_blocks
+for _, c in ipairs(chats) do stage_blocks = stage_blocks or tonumber(c.message:match("^%[castle%] .-%(%d+/%d+%): (%d+) blocks")) end
+assert(stage_blocks and stage_blocks > 0 and total == stage_blocks, "the parts hold every block of the stage: " .. total .. " of " .. tostring(stage_blocks))
+tool.run({action = "stop"})
+crew = false
 print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")
