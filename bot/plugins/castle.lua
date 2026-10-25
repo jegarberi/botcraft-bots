@@ -883,7 +883,8 @@ local function stage_over()
     if job.best == nil or lowest < job.best then
         job.best, job.best_at = lowest, now
     end
-    return now - job.best_at > 300, lowest .. " spots left that the bots could not do"
+    -- (Creative: a stage takes a minute, stragglers get 60 seconds, not 5 minutes)
+    return now - job.best_at > (job.creative and 60 or 300), lowest .. " spots left that the bots could not do"
 end
 
 -- Stock the pens: for each kind of animal the bot has the food of, open the gate, lead the animals within
@@ -1481,6 +1482,8 @@ bot.every(20, function()
         io.stderr:write(os.date("%H:%M:%S"), " [castle] taken up again at stage ", job.index, " of ", #job.stages,
             type(err) == "table" and err.note and (" (" .. err.note .. ")") or "", "\n")
     else
+        -- (A bot not joined yet, say): kept, tried again in 20 seconds
+        castle_saved = saved
         io.stderr:write("[castle] could not take the job up again: ", tostring(err), "\n")
     end
 end)

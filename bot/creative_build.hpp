@@ -21,13 +21,20 @@ namespace CreativeBuild
     {
         for (const auto name : {"minecraft:stone", "minecraft:cobblestone", "minecraft:dirt", "minecraft:grass_block",
             "minecraft:sand", "minecraft:gravel", "minecraft:granite", "minecraft:andesite", "minecraft:diorite",
-            "minecraft:deepslate", "minecraft:snow", "minecraft:short_grass", "minecraft:tall_grass"}) if (item == name) return true;
-        return Suffix(item, "_log") || Suffix(item, "_leaves");
+            "minecraft:deepslate", "minecraft:snow", "minecraft:short_grass", "minecraft:tall_grass",
+            "minecraft:podzol", "minecraft:coarse_dirt", "minecraft:rooted_dirt", "minecraft:mud", "minecraft:clay",
+            "minecraft:moss_block", "minecraft:moss_carpet", "minecraft:mossy_cobblestone", "minecraft:tuff", "minecraft:calcite",
+            "minecraft:sandstone", "minecraft:red_sand", "minecraft:terracotta", "minecraft:snow_block", "minecraft:fern",
+            "minecraft:large_fern", "minecraft:sweet_berry_bush", "minecraft:dead_bush", "minecraft:bush", "minecraft:leaf_litter",
+            "minecraft:firefly_bush", "minecraft:dandelion", "minecraft:poppy", "minecraft:cornflower", "minecraft:oxeye_daisy",
+            "minecraft:brown_mushroom", "minecraft:red_mushroom", "minecraft:pumpkin", "minecraft:vine"}) if (item == name) return true;
+        return Suffix(item, "_log") || Suffix(item, "_leaves") || Suffix(item, "_terracotta");
     }
     using Cell = std::array<int, 3>;
     struct Batch { Cell low, high; int count; };
 
-    // A horizontal rectangle containing only eligible blueprint cells, never holes or another material.
+    // A box containing only eligible blueprint cells, never holes or another material: a rectangle of up to
+    // 4096 cells on the seed's layer, then grown up and down by whole layers up to /fill's 32768 blocks.
     inline Batch Rectangle(const std::set<Cell>& cells, const Cell& seed)
     {
         Batch batch{seed, seed, 0};
@@ -42,7 +49,16 @@ namespace CreativeBuild
         };
         while (width * (batch.high[2] - batch.low[2] + 2) <= 4096 && row(batch.high[2] + 1)) ++batch.high[2];
         while (width * (batch.high[2] - batch.low[2] + 2) <= 4096 && row(batch.low[2] - 1)) --batch.low[2];
-        batch.count = width * (batch.high[2] - batch.low[2] + 1);
+        const int area = width * (batch.high[2] - batch.low[2] + 1);
+        const auto layer = [&](int y)
+        {
+            for (int x = batch.low[0]; x <= batch.high[0]; ++x)
+                for (int z = batch.low[2]; z <= batch.high[2]; ++z) if (!cells.count({x, y, z})) return false;
+            return true;
+        };
+        while (area * (batch.high[1] - batch.low[1] + 2) <= 32768 && layer(batch.high[1] + 1)) ++batch.high[1];
+        while (area * (batch.high[1] - batch.low[1] + 2) <= 32768 && layer(batch.low[1] - 1)) --batch.low[1];
+        batch.count = area * (batch.high[1] - batch.low[1] + 1);
         return batch;
     }
 }

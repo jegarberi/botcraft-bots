@@ -236,6 +236,44 @@ index ab9bafc..300ff17 100644
  
  #if PROTOCOL_VERSION > 404 /* > 1.13.2 */ && PROTOCOL_VERSION < 757 /* < 1.18 */
          std::unordered_map<std::pair<int, int>, ProtocolCraft::ClientboundLightUpdatePacket> delayed_light_updates;
+diff --git a/botcraft/src/AI/Tasks/DigTask.cpp b/botcraft/src/AI/Tasks/DigTask.cpp
+index df80d18..6af7051 100644
+--- a/botcraft/src/AI/Tasks/DigTask.cpp
++++ b/botcraft/src/AI/Tasks/DigTask.cpp
+@@ -60,6 +60,33 @@ namespace Botcraft
+             return Status::Failure;
+         }
+ 
++        // In creative the server refuses to break anything while a sword, spear, trident, mace or
++        // debug stick is in hand: switch to another hotbar slot first, or every dig times out
++        if (local_player->GetInstabuild())
++        {
++            std::shared_ptr<InventoryManager> inventory_manager = c.GetInventoryManager();
++            const auto no_creative_break = [&](const ProtocolCraft::Slot& s) {
++                if (s.IsEmptySlot()) return false;
++                const Item* item = AssetsManager::getInstance().GetItem(s.GetItemId());
++                if (item == nullptr) return false;
++                const std::string& n = item->GetName();
++                const auto ends = [&](const std::string& suffix) { return n.size() >= suffix.size() && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0; };
++                return ends("_sword") || ends("_spear") || ends(":trident") || ends(":mace") || ends(":debug_stick");
++            };
++            if (no_creative_break(inventory_manager->GetHotbarSelected()))
++            {
++                std::shared_ptr<Window> inventory = inventory_manager->GetPlayerInventory();
++                for (short i = 0; i < 9; ++i)
++                {
++                    if (!no_creative_break(inventory->GetSlot(Window::INVENTORY_HOTBAR_START + i)))
++                    {
++                        inventory_manager->SetIndexHotbarSelected(i);
++                        break;
++                    }
++                }
++            }
++        }
++
+         // Check if the block is in range
+ #if PROTOCOL_VERSION < 766 /* < 1.20.5 */
+         const double range = game_mode == GameType::Creative ? 5.0 : 4.5;
 diff --git a/botcraft/src/AI/Tasks/PathfindingTask.cpp b/botcraft/src/AI/Tasks/PathfindingTask.cpp
 index 958521f..0f78990 100644
 --- a/botcraft/src/AI/Tasks/PathfindingTask.cpp

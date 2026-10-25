@@ -5259,9 +5259,6 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
     const Wanted wanted(selected.second);
     if (!CreativeBuild::Batchable(wanted.item) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
     const auto world = c.GetWorld();
-    const Blockstate* source = world->GetBlock(selected.first);
-    if (!source) return false;
-    const std::string replacing = source->GetName();
     std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
     {
         auto entities = c.GetEntityManager()->GetEntities();
@@ -5275,10 +5272,12 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         const auto failed = team.build_failed.find(p);
         if (failed != team.build_failed.end() && !Construction::RetryReady(failed->second.first,
             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - failed->second.second).count())) continue;
+        // Any mix of air, water and natural terrain goes in one box (cells already right too, so they don't
+        // split it): never lava, bedrock or anything built
         const Blockstate* block = world->GetBlock(p);
-        if (!block || block->GetName() != replacing || block->IsLava() || Unbreakable(block)) continue;
-        if (block->GetName() == wanted.item && wanted.StateMatches(*block)) continue;
-        if (!block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName())) continue;
+        if (!block || block->IsLava() || Unbreakable(block)) continue;
+        const bool done = block->GetName() == wanted.item && wanted.StateMatches(*block);
+        if (!done && !block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName())) continue;
         bool touches_entity = false;
         for (const auto& box : occupied)
         {
@@ -5296,15 +5295,16 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
     }
     const auto coordinates = [](const CreativeBuild::Cell& p)
     { return std::to_string(p[0]) + " " + std::to_string(p[1]) + " " + std::to_string(p[2]); };
-    c.SendPaced(true, "minecraft:fill " + coordinates(batch.low) + " " + coordinates(batch.high) + " " + selected.second + " replace " + replacing);
+    c.SendPaced(true, "minecraft:fill " + coordinates(batch.low) + " " + coordinates(batch.high) + " " + selected.second);
     const bool confirmed = Utilities::YieldForCondition([&]()
     {
         for (int x = batch.low[0]; x <= batch.high[0]; ++x)
-            for (int z = batch.low[2]; z <= batch.high[2]; ++z)
-            {
-                const Blockstate* block = world->GetBlock(Position(x, batch.low[1], z));
-                if (!block || block->GetName() != wanted.item || !wanted.StateMatches(*block)) return false;
-            }
+            for (int y = batch.low[1]; y <= batch.high[1]; ++y)
+                for (int z = batch.low[2]; z <= batch.high[2]; ++z)
+                {
+                    const Blockstate* block = world->GetBlock(Position(x, y, z));
+                    if (!block || block->GetName() != wanted.item || !wanted.StateMatches(*block)) return false;
+                }
         return true;
     }, c, 2000);
     if (!confirmed)
