@@ -5321,6 +5321,22 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         for (auto it = sent.begin(); it != sent.end();) it = now - it->second > std::chrono::seconds(5) ? sent.erase(it) : std::next(it);
         if (!sent.emplace(command, now).second) return false;
     }
+    {
+        // All the bots of this program together: 16384 filled blocks a second at most. 64 bots each sending a box
+        // of up to 32768 every second froze the server for half a minute: every bot timed out ("no answer")
+        // ponytail: per program, not per server; another host's fills come on top
+        constexpr double blocks_per_second = 16384.0;
+        static std::mutex budget_mutex;
+        static std::chrono::steady_clock::time_point next_slot{};
+        std::chrono::steady_clock::time_point slot;
+        {
+            std::lock_guard<std::mutex> lock(budget_mutex);
+            const auto now = std::chrono::steady_clock::now();
+            slot = std::max(next_slot, now);
+            next_slot = slot + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(batch.count / blocks_per_second));
+        }
+        Utilities::YieldForCondition([&]() { return std::chrono::steady_clock::now() >= slot; }, c, 120000);
+    }
     c.SendPaced(true, command);
     const bool confirmed = Utilities::YieldForCondition([&]()
     {
