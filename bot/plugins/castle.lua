@@ -855,7 +855,10 @@ local function progress()
     local left, lowest, working = {}, nil, 0
     for _, b in ipairs(bot.call("bots")) do
         local ok, st = pcall(bot.call, "status", { bot = b.name })
-        if ok and type(st) == "table" and st.build_left ~= nil and (not job.creative or (st.game_mode == "creative" and st.dimension == "minecraft:overworld")) then
+        -- (Creative: only the bots on the site; one far away sees a cell or two of it and would report 1 left)
+        local here = not job.creative or (st and st.position and job.site and st.position.x >= job.site[1] and st.position.x <= job.site[4]
+            and st.position.z >= job.site[3] and st.position.z <= job.site[6])
+        if ok and type(st) == "table" and st.build_left ~= nil and here and (not job.creative or (st.game_mode == "creative" and st.dimension == "minecraft:overworld")) then
             local active = st.build_idle ~= nil and st.build_idle < 60
             left[b.name] = active and st.build_left or "away"
             if active then
