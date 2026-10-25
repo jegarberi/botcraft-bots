@@ -35,8 +35,11 @@ namespace CreativeBuild
 
     // A box containing only eligible blueprint cells, never holes or another material: a rectangle of up to
     // 4096 cells on the seed's layer, then grown up and down by whole layers up to /fill's 32768 blocks.
-    inline Batch Rectangle(const std::set<Cell>& cells, const Cell& seed)
+    // has(cell): the cell may go in the box (a blueprint cell to build, or one already as wanted)
+    template <class Has>
+    inline Batch Rectangle(const Has& has, const Cell& seed)
     {
+        struct { const Has& f; bool count(const Cell& c) const { return f(c); } } cells{has};
         Batch batch{seed, seed, 0};
         if (!cells.count(seed)) return batch;
         while (batch.high[0] - batch.low[0] < 127 && cells.count({batch.high[0] + 1, seed[1], seed[2]})) ++batch.high[0];
@@ -60,5 +63,9 @@ namespace CreativeBuild
         while (area * (batch.high[1] - batch.low[1] + 2) <= 32768 && layer(batch.low[1] - 1)) --batch.low[1];
         batch.count = area * (batch.high[1] - batch.low[1] + 1);
         return batch;
+    }
+    inline Batch Rectangle(const std::set<Cell>& cells, const Cell& seed)
+    {
+        return Rectangle([&](const Cell& c) { return cells.count(c) > 0; }, seed);
     }
 }

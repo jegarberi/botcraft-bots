@@ -44,6 +44,10 @@ int main()
     for (int x = 0; x < 40; ++x) for (int y = 70; y < 82; ++y) for (int z = 0; z < 40; ++z) hill.insert({x, y, z});
     const auto cut = CreativeBuild::Rectangle(hill, {5, 75, 5});
     assert(cut.count == 40 * 40 * 12 && cut.low[1] == 70 && cut.high[1] == 81);
+    std::set<CreativeBuild::Cell> slope, sky; // a ring of a slope to cut, the air around it already right
+    for (int x = 0; x < 30; ++x) for (int z = 0; z < 30; ++z) (x < 2 || z < 2 ? slope : sky).insert({x, 70, z});
+    const auto ring = CreativeBuild::Rectangle([&](const CreativeBuild::Cell& c) { return slope.count(c) || sky.count(c); }, {0, 70, 0});
+    assert(ring.count == 900 && CreativeBuild::Rectangle(slope, {0, 70, 0}).count < 900);
     std::cout << "3500-cell floor: single placement " << checked << " actions; batched " << commands
               << " commands (" << static_cast<double>(checked) / commands << "x fewer), planner "
               << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << " us\n";

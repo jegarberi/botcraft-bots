@@ -5287,7 +5287,15 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         }
         if (!touches_entity) eligible.insert({p.x, p.y, p.z});
     }
-    const auto batch = CreativeBuild::Rectangle(eligible, {selected.first.x, selected.first.y, selected.first.z});
+    // Cells off the blueprint that already hold the wanted block (the air around a slope being levelled)
+    // change nothing when filled: in the box they let it grow past the blueprint's ragged edges
+    const auto has = [&](const CreativeBuild::Cell& cell)
+    {
+        if (eligible.count(cell)) return true;
+        const Blockstate* block = world->GetBlock(Position(cell[0], cell[1], cell[2]));
+        return block != nullptr && block->GetName() == wanted.item && wanted.StateMatches(*block);
+    };
+    const auto batch = CreativeBuild::Rectangle(has, {selected.first.x, selected.first.y, selected.first.z});
     if (batch.count < 16) return false;
     {
         std::lock_guard<std::mutex> lock(c.team_mutex);
