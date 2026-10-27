@@ -21,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <any>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -5268,7 +5269,25 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
     std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
     {
         auto entities = c.GetEntityManager()->GetEntities();
-        for (const auto& entry : *entities) if (entry.second && entry.second->IsLivingEntity()) occupied.push_back(entry.second->GetCollider());
+        for (const auto& entry : *entities)
+        {
+            if (!entry.second || !entry.second->IsLivingEntity()) continue;
+            // Some mob's size comes from metadata the server sent with another type (bad any_cast): that threw
+            // out of the build every tick while it stood near, and the bot's part of the castle never got done
+            try { occupied.push_back(entry.second->GetCollider()); }
+            catch (const std::bad_any_cast&)
+            {
+                static std::set<std::string> logged;
+                static std::mutex logged_mutex;
+                const std::string name = entry.second->GetName();
+                {
+                    std::lock_guard<std::mutex> lock(logged_mutex);
+                    if (logged.insert(name).second) LOG_WARNING("Entity " << name << ": size unreadable (metadata of another type), taken as 1x2");
+                }
+                const Vector3<double> at = entry.second->GetPosition();
+                occupied.push_back(AABB(Vector3<double>(at.x, at.y + 1.0, at.z), Vector3<double>(0.5, 1.0, 0.5)));
+            }
+        }
     }
     std::set<CreativeBuild::Cell> eligible;
     for (const auto& entry : team.blueprint)
