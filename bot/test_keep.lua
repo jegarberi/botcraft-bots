@@ -24,9 +24,10 @@ for dy = -5, 8 do
     assert(solid(at(-11, dy, -12)), "a wall behind the ladder at dy " .. dy .. ": " .. tostring(at(-11, dy, -12)))
 end
 -- The secret door: opening, door blocks, pistons, torch, the block it powers, the buttons' block and buttons
-assert(at(-10, 7, -11) == "air" and at(-10, 8, -11) == "air", "the opening")
+-- (Planned shut, as the torch keeps it: the door blocks in the opening, nothing planned where the heads go)
+assert(solid(at(-10, 7, -11)) and solid(at(-10, 8, -11)), "the door blocks, in the opening")
 assert(at(-10, 7, -9) == "sticky_piston[facing=north]" and at(-10, 8, -9) == "sticky_piston[facing=north]", "two pistons")
-assert(solid(at(-10, 7, -10)) and solid(at(-10, 8, -10)), "the door blocks")
+assert(not seen[(cx - 10) .. "," .. (y + 7) .. "," .. (cz - 10)] and not seen[(cx - 10) .. "," .. (y + 8) .. "," .. (cz - 10)], "the heads' spots are left be")
 assert(at(-10, 7, -8) == "redstone_wall_torch[facing=north]" and solid(at(-10, 7, -7)) and solid(at(-10, 8, -8)), "the torch, on its block, under the one it powers")
 assert(at(-9, 7, -7):match("button") and at(-11, 7, -7):match("button"), "a button on each side")
 assert(at(-11, 7, -9) == "air" and at(-11, 8, -6) == "air" and at(-9, 7, -11) == "air", "the passage and the way in are clear")

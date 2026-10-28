@@ -226,7 +226,9 @@ local function grid()
             end
         end
     end
-    function g.emit(list) for _, k in ipairs(order) do list[#list + 1] = cells[k] end end
+    -- Left out of the plan: whatever stands there is let be
+    function g.unset(x, y, z) cells[x .. "," .. y .. "," .. z] = nil end
+    function g.emit(list) for _, k in ipairs(order) do if cells[k] then list[#list + 1] = cells[k] end end end
     return g
 end
 
@@ -269,6 +271,7 @@ end
 -- wall) to a hidden passage and a ladder shaft down to the armory. Lower level, beside the vault: the armory to the
 -- west, the dungeon to the east (six cells, an iron door each opened by a button in the corridor)
 local function keep_rooms(g, cx, y, cz, entities)
+    local G = g
     local function S(dx, dy, dz, item) g.set(cx + dx, y + dy, cz + dz, item) end
     local function B(dx1, dy1, dz1, dx2, dy2, dz2, item) g.box(cx + dx1, y + dy1, cz + dz1, cx + dx2, y + dy2, cz + dz2, item) end
     local wall, trim = "stone_bricks", "polished_andesite"
@@ -363,16 +366,18 @@ local function keep_rooms(g, cx, y, cz, entities)
     painting(5, 9, -I, "south", "minecraft:plant")
     painting(I, 10, -6, "west", "minecraft:bomb")
     -- The secret door, in the wall x -10 between the bedroom and a hidden passage at x -11 (z -11..-6). The
-    -- opening at z -11; two sticky pistons at z -9 hold the two door blocks in it, pushed by a redstone torch at
-    -- z -8 (beside the lower one; the block over the torch passes the power to the upper one). A button on either
-    -- side of the wall block at z -7 under the torch puts the torch out: the pistons pull the door blocks aside
-    -- while it is held, and the door shuts behind
+    -- opening at z -11, shut by two door blocks; two sticky pistons at z -9 hold them there, their heads at z -10,
+    -- pushed by a redstone torch at z -8 (beside the lower one; the block over the torch passes the power to the
+    -- upper one). A button on either side of the wall block at z -7 under the torch puts the torch out: the pistons
+    -- pull the door blocks aside while it is held, and the door shuts behind. Planned shut, as the torch keeps it:
+    -- planned open, the pistons pushed before the door blocks came, their heads stood where the blocks were to go
+    -- and the doorway stayed a hole
     B(-10, 7, -I, -10, KEEP_HIGH - 1, -6, wall)
     B(-I, 9, -I, -I, KEEP_HIGH - 1, -5, wall)
     B(-I, 7, -10, -I, 8, -6, AIR)
     B(-I, 7, -5, -I, 8, -5, wall)
-    B(-10, 7, -I, -10, 8, -I, AIR)                           -- the opening (shut once the torch pushes the pistons)
-    S(-10, 7, -10, wall); S(-10, 8, -10, wall)               -- the door blocks, beside it
+    S(-10, 7, -I, wall); S(-10, 8, -I, wall)                 -- the door blocks, in the opening
+    G.unset(cx - 10, y + 7, cz - 10); G.unset(cx - 10, y + 8, cz - 10)   -- the pistons' heads, or the blocks pulled back
     S(-10, 7, -9, "sticky_piston[facing=north]"); S(-10, 8, -9, "sticky_piston[facing=north]")
     S(-10, 7, -8, "redstone_wall_torch[facing=north]")
     S(-10, 8, -8, wall)
@@ -442,7 +447,7 @@ local function summon_keep_entities()
     pcall(bot.call, "goto", { bot = who, x = e.x, y = e.y + 8, z = e.z, tolerance = 6 })
     local summoned = 0
     for _, kind in ipairs({ "painting", "armor_stand" }) do
-        local ok, near = pcall(bot.call, "entities", { bot = who, type = kind })
+        local ok, near = pcall(bot.call, "entities", { bot = who, type = kind, radius = 48 })
         near = ok and type(near) == "table" and near or {}
         for _, t in ipairs(KEEP_ENTITIES) do
             if t.kind == kind then
