@@ -1663,7 +1663,10 @@ local function road_tick()
     if not ok or type(st) ~= "table" or not st.position then return end
     local now = os.time()
     if r.busy then
-        -- A piece is being laid: wait for it, 5 minutes at most without a block more
+        -- A piece is being laid: wait for it, 5 minutes at most without a block more. Not building yet, 30 seconds
+        -- after the order: it may not have taken it up (it does when what it is doing ends); taken as done, every
+        -- piece was replaced by the next before it was built (after a restart, all along a road laid before)
+        if not st.building and r.best == nil and now - (r.best_at or 0) < 30 then return end
         if st.building and (st.build_left or 0) > 0 then
             if r.best == nil or st.build_left < r.best then r.best, r.best_at = st.build_left, now end
             if now - r.best_at < r.patience then return end

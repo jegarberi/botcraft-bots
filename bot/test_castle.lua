@@ -42,6 +42,11 @@ bot = { call = function(name, a)
     return {}
 end, tool = function(t) tool = t end, every = function(seconds, f) timers[seconds] = timers[seconds] or {}; timers[seconds][#timers[seconds] + 1] = f; local before = tick; tick = before and function() before(); f() end or f end, on_chat = function() end, log = print }
 load(io.open(arg[1]):read("a"), "castle")()
+-- A clock that moves 31 seconds a tick: the road builder gives a bot 30 seconds to take an order up
+local clock = os.time()
+os.time = function() return clock end
+local plugin_tick = tick
+tick = function() clock = clock + 31; plugin_tick() end
 local plan = tool.run({ action = "plan", x = 0, y = 70, z = 0 })
 assert(#plan.stages >= 10, "the full plan has all its stages")
 for _, s in ipairs(plan.stages) do assert(s.blocks > 0, s.stage .. " is empty") end

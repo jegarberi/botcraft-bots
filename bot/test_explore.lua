@@ -27,6 +27,11 @@ end, tool = function(t) if t.name == "castle" then tool = t end end,
 assert(not io.open("../roadbot_job.lua"), "../roadbot_job.lua exists: run from a copy, or move it away")
 local ok, err = pcall(function()
 load(io.open(arg[1]):read("a"), "castle")()
+-- A clock that moves 31 seconds a tick: the road builder gives a bot 30 seconds to take an order up
+local clock = os.time()
+os.time = function() return clock end
+local plugin_tick = tick
+tick = function() clock = clock + 31; plugin_tick() end
 local r = tool.run({ action = "explore", bot = "Bot1", structures = "#minecraft:village", radius = 1000, rail = false })
 assert(r.bot == "Bot1" and r.within == 1000)
 signs = 0
