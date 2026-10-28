@@ -5,6 +5,8 @@
 
 int main()
 {
+    // Rails go by command one at a time (their shape), and are not mistaken for a material to fill boxes with
+    assert(CreativeBuild::Single("minecraft:powered_rail") && CreativeBuild::Batchable("minecraft:rail") && !CreativeBuild::Single("minecraft:stone"));
     assert(CreativeBuild::Batchable("minecraft:stone_bricks"));
     assert(CreativeBuild::Batchable("minecraft:stone_brick_stairs"));
     assert(!CreativeBuild::Batchable("minecraft:chest"));

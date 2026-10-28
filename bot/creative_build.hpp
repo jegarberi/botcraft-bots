@@ -10,12 +10,19 @@ namespace CreativeBuild
     {
         return name.size() >= suffix.size() && name.substr(name.size() - suffix.size()) == suffix;
     }
+    // Set by command even one at a time: their shape comes from their neighbours when placed by hand (a slope, a curve
+    // of a railway would come out wrong and be taken out again, over and over); a command gives the shape asked for
+    inline bool Single(const std::string_view item)
+    {
+        return item == "minecraft:rail" || item == "minecraft:powered_rail" || item == "minecraft:redstone_block";
+    }
     inline bool Batchable(const std::string_view item)
     {
         for (const auto name : {"minecraft:air", "minecraft:stone", "minecraft:stone_bricks", "minecraft:cobblestone",
             "minecraft:dirt", "minecraft:grass_block", "minecraft:sand", "minecraft:gravel", "minecraft:glass",
             "minecraft:glass_pane", "minecraft:farmland", "minecraft:wheat", "minecraft:water"}) if (item == name) return true;
-        return Suffix(item, "_stairs") || Suffix(item, "_slab") || Suffix(item, "_planks") || Suffix(item, "_log") || Suffix(item, "_fence");
+        return Suffix(item, "_stairs") || Suffix(item, "_slab") || Suffix(item, "_planks") || Suffix(item, "_log") || Suffix(item, "_fence") ||
+            Single(item);
     }
     inline bool Natural(const std::string_view item)
     {

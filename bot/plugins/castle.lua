@@ -748,6 +748,117 @@ local function road(x1, z1, x2, z2, around_y, item, span)
     return list, unseen, bridged
 end
 
+-- A road with a railway beside it, one straight piece along x or z (a road is two legs: along one axis, then
+-- the other; rails only join side by side). It keeps a steady grade, a block up or down every 4 steps at most:
+-- through a mountain it tunnels, over a valley it runs on a deck with a parapet. Across it: the road 3 wide, the
+-- rail beside it on one side, a torch every 8 steps on the other. The rail sits on the inside of the turn, so the
+-- two legs' rails meet at a curve. A powered rail on a redstone block on every slope and every 24 blocks.
+-- c: the road so far (px pz: where this piece starts, y: the road's level, leg, kx kz: the turn, x z: the end,
+-- since: steps since the level last changed). Returns the blocks, the end reached (the piece stops where the
+-- ground is out of sight) and the level there; nil if nothing of it is in sight
+local RAIL_GRADE, RAIL_POWER = 4, 24
+local function rail_road(c, ex, ez, item, span)
+    local list, keys = {}, {}
+    local function put(x, y, z, what, prio)
+        local k = x .. "," .. y .. "," .. z
+        local o = keys[k]
+        if o and o.prio >= prio then return end
+        if o then o.b[4], o.prio = what, prio
+        else local b = { x, y, z, what }; list[#list + 1] = b; keys[k] = { b = b, prio = prio } end
+    end
+    local along_x = ex ~= c.px
+    local d = along_x and (ex > c.px and 1 or -1) or (ez > c.pz and 1 or -1)
+    local n = along_x and math.abs(ex - c.px) or math.abs(ez - c.pz)
+    -- The turn: which way each leg goes, and the side of the rail (the inside of the turn)
+    local d1 = c.kx ~= c.sx and (c.kx > c.sx and 1 or -1) or (c.kz > c.sz and 1 or -1)
+    local d2 = (c.x ~= c.kx or c.z ~= c.kz) and ((c.x ~= c.kx) and (c.x > c.kx and 1 or -1) or (c.z > c.kz and 1 or -1)) or 1
+    local side = c.leg == 1 and d2 or -d1
+    local function at(i) return along_x and c.px + d * i or c.px, along_x and c.pz or c.pz + d * i end
+    local function across(x, z, w) return along_x and x or x + w * side, along_x and z + w * side or z end
+    local function axis(x, z) return along_x and x or z end
+    local K = axis(c.kx, c.kz)
+    -- The ground along the way, the piece cut short where it is out of sight
+    local h = {}
+    for i = 0, n do
+        local x, z = at(i)
+        local g = ground_height(x, z, c.y + span, c.y - span)
+        if g == nil then
+            if block_at(x, c.y, z) == nil then n = i - 1 break end
+            g = c.y - span     -- loaded, nothing within span below: deep
+        end
+        h[i] = g
+    end
+    if n < 0 then return nil end
+    -- The level, step by step: toward the ground ahead (the middle height of the next 16 steps), one block per
+    -- RAIL_GRADE steps at most, and flat within 5 of the turn (a curved rail can't slope)
+    local level, L, since = {}, c.first and h[0] or c.y, c.since or RAIL_GRADE
+    for i = 0, n do
+        local ahead = {}
+        for j = i, math.min(n, i + 16) do ahead[#ahead + 1] = h[j] end
+        table.sort(ahead)
+        local target = ahead[(#ahead + 1) // 2]
+        local x, z = at(i)
+        local near_turn = c.has_turn and math.abs(axis(x, z) - K) < 5
+        if i > 0 and since >= RAIL_GRADE and not near_turn and target ~= L then
+            L = L + (target > L and 1 or -1)
+            since = 0
+        end
+        -- (A piece's first step is the last one of the piece before, already counted)
+        if i > 0 or c.first then since = since + 1 end
+        level[i] = L
+    end
+    local names = along_x and { [1] = "east", [-1] = "west" } or { [1] = "south", [-1] = "north" }
+    for i = 0, n do
+        local x, z = at(i)
+        local Li = level[i]
+        local drop = h[i] < Li - 2
+        for w = -2, 2 do
+            local bx, bz = across(x, z, w)
+            put(bx, Li, bz, item, 2)
+            for up = 1, 3 do put(bx, Li + up, bz, AIR, 1) end
+        end
+        if drop then
+            for _, w in ipairs({ -2, 3 }) do
+                local bx, bz = across(x, z, w)
+                put(bx, Li, bz, item, 2)
+                put(bx, Li + 1, bz, item, 3)
+            end
+        end
+        if axis(x, z) % 8 == 0 then
+            local tx, tz = across(x, z, -2)
+            put(tx, Li + (drop and 2 or 1), tz, "torch", 4)
+        end
+        -- The rail, but not where the other leg's rail runs: leg 1 stops 2 before the turn, where leg 2's curve is
+        local a = axis(x, z)
+        local rx, rz = across(x, z, 2)
+        local rail
+        if c.leg == 1 and c.has_turn and (a - K) * d > -3 then rail = nil
+        elseif c.leg == 2 and (a - K) * d < 2 then rail = nil
+        elseif c.leg == 2 and (a - K) * d == 2 then
+            -- The curve: back toward leg 1, on along leg 2
+            local xs = along_x and (d > 0 and "east" or "west") or (d1 > 0 and "west" or "east")
+            local zs = along_x and (d1 > 0 and "north" or "south") or (d > 0 and "south" or "north")
+            rail = "rail[shape=" .. zs .. "_" .. xs .. "]"
+        else
+            -- Up toward the higher neighbour, if one is
+            local nxt, prv = level[i + 1], level[i - 1] or (c.prev_level or Li)
+            local shape = along_x and "east_west" or "north_south"
+            if nxt == Li + 1 then shape = "ascending_" .. names[d]
+            elseif prv == Li + 1 then shape = "ascending_" .. names[-d] end
+            if shape:match("^ascending") or a % RAIL_POWER == 0 then
+                rail = "powered_rail[shape=" .. shape .. "]"
+                put(rx, Li, rz, "redstone_block", 3)
+            else
+                rail = "rail[shape=" .. shape .. "]"
+            end
+        end
+        if rail then put(rx, Li + 1, rz, rail, 4) end
+    end
+    c.since, c.prev_level = since, level[n - 1] or level[n]
+    local endx, endz = at(n)
+    return list, endx, endz, level[n], level[0]
+end
+
 -- The castle's site is kept in a file: the plugin's own memory does not survive a restart of the program
 local SITE_FILE = "../castle_site.txt"
 
@@ -865,6 +976,7 @@ local function strip_parts(blocks, n, x1, x2)
     return parts
 end
 
+local roadman                      -- the road builder (below): not one of the castle's builders
 local function hand_over()
     CREATIVE_CONSTRUCTION = job.creative or false
     local s = job.stages[job.index]
@@ -873,7 +985,7 @@ local function hand_over()
         local members = {}
         for _, b in ipairs(bot.call("bots")) do
             local ok, st = pcall(bot.call, "status", { bot = b.name })
-            if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then members[#members + 1] = b.name end
+            if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" and not (roadman and roadman.bot == b.name) then members[#members + 1] = b.name end
         end
         -- One part per bot, never two bots on one. Alone: strips across the site (by x, then z) with as many blocks
         -- each. With bots of other hosts on the same site (creative plugin): strips of the site of the same width,
@@ -1091,10 +1203,10 @@ end
 -- The road builder: one bot, out of the team, whose whole job is roads. From the origin to each of the team's
 -- mines and to each place it was given, one after the other, 32 blocks at a time (the ground has to be in its
 -- sight to be planned), with a signpost at each end saying where the road leads. Mines opened later get theirs
-local roadman = restore(ROADS_FILE)     -- the road builder, as it was before a restart (nil: none)
+roadman = restore(ROADS_FILE)     -- the road builder, as it was before a restart (nil: none)
 local function keep(r)
     save(ROADS_FILE, r and { bot = r.bot, origin = r.origin, places = r.places, done = r.done, laid = r.laid, patience = 300, item = r.item,
-        sign = r.sign, explore = r.explore, reach = r.reach })
+        sign = r.sign, explore = r.explore, reach = r.reach, rail = r.rail, castle = r.castle })
 end
 -- What an explorer looks for (structure ids or #tags for /locate), when not told
 local STRUCTURES = "#minecraft:village,pillager_outpost,ruined_portal,desert_pyramid,jungle_pyramid,igloo,swamp_hut,mineshaft,trail_ruins,trial_chambers"
@@ -1121,6 +1233,62 @@ local function explore(r)
     keep(r)
     return found
 end
+-- One piece of a road with its railway (rail_road), up to 32 blocks along the leg under way
+local function rail_tick(r, c, st, now)
+    local tx, tz = c.leg == 1 and c.kx or c.x, c.leg == 1 and c.kz or c.z
+    if c.px == tx and c.pz == tz then
+        if c.leg == 1 and c.has_turn then c.leg = 2; return end
+        r.done[c.x .. " " .. c.z] = true
+        r.laid = r.laid + 1
+        keep(r)
+        r.cur = nil
+        return
+    end
+    local ex = c.px + math.max(-32, math.min(32, tx - c.px))
+    local ez = c.pz + math.max(-32, math.min(32, tz - c.pz))
+    local away = math.max(math.abs(st.position.x - c.px), math.abs(st.position.z - c.pz))
+    local order = { bot = r.bot, objective = "build", plan = "blocks", members = { r.bot }, leader = r.bot, count = 1, solo = true, name = "road" }
+    r.best, r.best_at, r.busy = nil, now, true
+    viewer = r.bot
+    local first = c.first
+    local blocks, endx, endz, y, y0 = rail_road(c, ex, ez, r.item, 24)
+    c.first_level = first and y0 or nil
+    viewer = nil
+    if not blocks then
+        if away <= 24 then
+            -- In sight of the bot and still nothing: skip a block on (void, or the world's edge)
+            c.px, c.pz = c.px + (ex ~= c.px and (ex > c.px and 1 or -1) or 0), c.pz + (ez ~= c.pz and (ez > c.pz and 1 or -1) or 0)
+            r.busy = false
+            return
+        end
+        -- Out of the bot's sight: a torch to put there takes it there
+        order.blocks = { { c.px, c.y + 1, c.pz, "torch" } }
+        r.patience, r.note = 120, "going to " .. c.px .. " " .. c.pz
+        pcall(bot.call, "team_member", order)
+        return
+    end
+    local far = math.floor(math.sqrt((c.x - r.origin.x) ^ 2 + (c.z - r.origin.z) ^ 2) + 0.5)
+    -- A signpost just beyond each end of the road, on a block of its own
+    local ux, uz = ex - c.px, ez - c.pz
+    ux, uz = ux ~= 0 and (ux > 0 and 1 or -1) or 0, uz ~= 0 and (uz > 0 and 1 or -1) or 0
+    local function post(x, z, level, text)
+        add(blocks, x, level, z, r.item)
+        add(blocks, x, level + 1, z, r.sign .. "|" .. text)
+    end
+    if c.first then
+        post(c.px - ux, c.pz - uz, c.first_level or y, c.name .. "|" .. c.what .. "|at " .. c.x .. " " .. c.z .. "|" .. far .. " blocks")
+    end
+    if (c.leg == 2 or not c.has_turn) and endx == c.x and endz == c.z then
+        post(c.x + ux, c.z + uz, y, r.origin.name .. "|at " .. r.origin.x .. " " .. r.origin.z .. "|" .. far .. " blocks|")
+    end
+    c.first, c.px, c.pz, c.y = false, endx, endz, y
+    order.blocks = blocks
+    r.patience = 300
+    r.note = "road and railway to " .. c.name .. " at " .. c.x .. " " .. c.z .. " (leg " .. c.leg .. "): at " .. endx .. " " .. endz
+    keep(r)
+    pcall(bot.call, "team_member", order)
+end
+
 local function road_tick()
     local r = roadman
     if not r then return end
@@ -1146,6 +1314,22 @@ local function road_tick()
         for _, p in ipairs(places) do
             if not r.done[p.x .. " " .. p.z] then
                 r.cur = { name = p.name, what = p.what or "", x = p.x, z = p.z, px = r.origin.x, pz = r.origin.z, y = r.origin.y, first = true }
+                if r.rail then
+                    -- Two straight legs, the longer way first. From the castle: from 4 blocks beyond the moat, on the
+                    -- side the place lies
+                    local c, sx, sz = r.cur, r.origin.x, r.origin.z
+                    local dx, dz = p.x - sx, p.z - sz
+                    local first_x = math.abs(dx) >= math.abs(dz)
+                    if r.castle then
+                        local out = OUTER + 4
+                        if first_x then sx = sx + (dx >= 0 and out or -out) else sz = sz + (dz >= 0 and out or -out) end
+                    end
+                    c.sx, c.sz, c.px, c.pz = sx, sz, sx, sz
+                    c.kx, c.kz = first_x and p.x or sx, first_x and sz or p.z
+                    c.leg = (c.kx == sx and c.kz == sz) and 2 or 1
+                    c.has_turn = c.leg == 2 or not (c.kx == p.x and c.kz == p.z)
+                    if c.leg == 2 then c.has_turn = false; c.leg = 1; c.kx, c.kz = p.x, p.z end
+                end
                 break
             end
         end
@@ -1177,6 +1361,7 @@ local function road_tick()
         r.cur = nil
         return
     end
+    if r.rail then return rail_tick(r, c, st, now) end
     local step = math.min(len, 32)
     local ex, ez = math.floor(c.px + dx / len * step + 0.5), math.floor(c.pz + dz / len * step + 0.5)
     local here_y = math.floor(st.position.y)
@@ -1320,7 +1505,7 @@ end
 local castle_tool = {
     name = "castle",
     description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), explore (the same road builder as an explorer: it finds the structures itself with /locate, from the origin and then from the end of each road it lays, so it reaches further and further: structures = what to look for, default villages, pillager outposts, ruined portals, desert and jungle temples, igloos, swamp huts, mineshafts, trail ruins, trial chambers; radius = how far from the origin, default 1500; each find is announced in the chat and gets a road with a signpost at both ends and a waypoint sign every 128 blocks saying where it leads and how far is left; stop=true gives the bot back), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
-    params = { creative = "boolean", action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string" },
+    params = { creative = "boolean", action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string", rail = "boolean" },
     run = function(args)
         local action = args.action or "status"
         if action == "status" then
@@ -1381,8 +1566,10 @@ local castle_tool = {
                     not_found[#not_found + 1] = name
                 end
             end
+            -- (rail=false: the old road alone, along a straight line and over the hills)
+            local castle_origin = job_site and math.abs(origin.x - job_site.x) <= 8 and math.abs(origin.z - job_site.z) <= 8
             roadman = { bot = who, origin = origin, places = places, done = {}, laid = 0, patience = 300,
-                item = args.item or "cobblestone", sign = args.sign or "spruce_sign" }
+                item = args.item or "cobblestone", sign = args.sign or "spruce_sign", rail = args.rail ~= false, castle = castle_origin or nil }
             if action == "explore" then
                 roadman.explore = args.structures or STRUCTURES
                 roadman.reach = math.floor(args.radius or 1500)

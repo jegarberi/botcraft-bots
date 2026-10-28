@@ -5304,7 +5304,8 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         const Blockstate* block = world->GetBlock(p);
         if (!block || block->IsLava() || Unbreakable(block)) continue;
         const bool done = block->GetName() == wanted.item && wanted.StateMatches(*block);
-        if (!done && !block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName())) continue;
+        if (!done && !block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName()) &&
+            !(CreativeBuild::Single(wanted.item) && CreativeBuild::Single(block->GetName()))) continue;
         bool touches_entity = false;
         for (const auto& box : occupied)
         {
@@ -5326,7 +5327,7 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         return block != nullptr && block->GetName() == wanted.item && wanted.StateMatches(*block);
     };
     const auto batch = CreativeBuild::Rectangle(has, {selected.first.x, selected.first.y, selected.first.z});
-    if (batch.count < 16) return false;
+    if (batch.count < (CreativeBuild::Single(wanted.item) ? 1 : 16)) return false;
     {
         std::lock_guard<std::mutex> lock(c.team_mutex);
         if (c.team.plan_id != team.plan_id) return false;

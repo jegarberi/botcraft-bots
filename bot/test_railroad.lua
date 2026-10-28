@@ -1,0 +1,73 @@
+-- Offline check of the road with its railway: lua5.4 test_railroad.lua plugins/castle.lua
+-- Ground at 70, a mountain at x 30..50 (up to 90), a valley at x 60..70 (down to 50). The road goes east along
+-- z 0 to x 90, turns, and goes south to z 60
+local function ground(x, z)
+    if x >= 30 and x <= 50 and z <= 6 then return 90 end
+    if x >= 60 and x <= 70 and z <= 6 then return 50 end
+    return 70
+end
+bot = { call = function(tool, a)
+    if tool == "get_block" then
+        if a.y > ground(a.x, a.z) then return { block = "minecraft:air" } end
+        return { block = "minecraft:stone" }
+    end
+    return {}
+end, tool = function() end, every = function() end, on_chat = function() end, log = print }
+local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road(")
+load(src, "castle")()
+local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true }
+local world, rails = {}, {}
+local function lay(ex, ez)
+    local blocks, x, z, y = rail_road(c, ex, ez, "cobblestone", 24)
+    assert(blocks, "the piece is in sight")
+    for _, b in ipairs(blocks) do
+        world[b[1] .. "," .. b[2] .. "," .. b[3]] = b[4]
+        if b[4]:match("rail") then rails[#rails + 1] = b end
+    end
+    c.first, c.px, c.pz, c.y = false, x, z, y
+end
+local deck = {}
+while c.px ~= 90 do lay(math.min(c.px + 32, 90), 0) ; end
+c.leg = 2
+while c.pz ~= 60 do lay(90, math.min(c.pz + 32, 60)) end
+-- The grade: the road's level along z 0 never moves more than 1 in 4 steps, and it tunnels through the mountain
+for x = 0, 90 do
+    for y = 40, 100 do if world[x .. "," .. y .. ",0"] == "cobblestone" or world[x .. "," .. y .. ",0"] == "redstone_block" then deck[x] = y end end
+end
+local last_change = -99
+for x = 1, 90 do
+    assert(math.abs(deck[x] - deck[x - 1]) <= 1, "one block at a time at x " .. x)
+    if deck[x] ~= deck[x - 1] then assert(x - last_change >= 4, "4 steps between changes at x " .. x); last_change = x end
+end
+assert(deck[40] < 80 and world["40," .. deck[40] + 1 .. ",0"] == "air", "a tunnel through the mountain")
+assert(deck[65] > 55, "a deck over the valley")
+-- The railway: one chain, each rail joined to the next side by side, a slope where the level changes
+table.sort(rails, function(a, b) return a[1] < b[1] or (a[1] == b[1] and a[3] < b[3]) end)
+local at = {}
+for _, r in ipairs(rails) do at[r[1] .. "," .. r[3]] = r end
+local corner = at["88,2"]
+assert(corner and corner[4] == "rail[shape=south_west]", "the curve at 88 2: " .. tostring(corner and corner[4]))
+for _, r in ipairs(rails) do
+    local links = 0
+    for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do
+        local o = at[(r[1] + d[1]) .. "," .. (r[3] + d[2])]
+        if o then
+            links = links + 1
+            assert(math.abs(o[2] - r[2]) <= 1, "neighbouring rails a block apart at most")
+            if o[2] == r[2] + 1 then assert(r[4]:match("ascending"), "a rail below its neighbour slopes up: " .. r[1] .. " " .. r[3] .. " " .. r[4]) end
+        end
+    end
+    assert(links >= 1 and links <= 2, "rail at " .. r[1] .. " " .. r[3] .. " joins " .. links)
+    if r[4]:match("ascending") then
+        assert(r[4]:match("^powered_rail"), "slopes are powered")
+        assert(world[r[1] .. "," .. (r[2] - 1) .. "," .. r[3]] == "redstone_block", "a powered rail stands on a redstone block")
+    end
+end
+local ends = 0
+for _, r in ipairs(rails) do
+    local links = 0
+    for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do if at[(r[1] + d[1]) .. "," .. (r[3] + d[2])] then links = links + 1 end end
+    if links == 1 then ends = ends + 1 end
+end
+assert(ends == 2, "one unbroken line: " .. ends .. " ends")
+print("railroad planner OK: " .. #rails .. " rails")

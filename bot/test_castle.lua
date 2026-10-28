@@ -67,7 +67,7 @@ local roads = tool.run({ action = "roads" })
 assert(roads.started, "a road to the test mine is planned")
 tool.run({ action = "stop" })
 -- The road builder: one bot, 32 blocks at a time, signs at both ends, to the located village and to the mine
-local man = tool.run({ action = "roadbot", structures = "village_plains", x = 0, y = 70, z = 0 })
+local man = tool.run({ action = "roadbot", structures = "village_plains", x = 0, y = 70, z = 0, rail = false })
 assert(man.bot == "Bot1" and #man.places == 1 and #man.not_found == 0)
 local signs = 0
 for _ = 1, 12 do tick() end
@@ -83,6 +83,8 @@ local saved = io.open("../roadbot_job.lua")
 assert(saved, "the road builder is saved for a restart")
 saved:close()
 tool.run({ action = "stop" })
+-- (The road builder is no castle builder: it goes back to the others first)
+tool.run({ action = "roadbot", stop = true })
 os.remove("../roadbot_job.lua")
 os.remove("../castle_job.lua")
 creative = true

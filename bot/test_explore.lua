@@ -27,7 +27,7 @@ end, tool = function(t) if t.name == "castle" then tool = t end end,
 assert(not io.open("../roadbot_job.lua"), "../roadbot_job.lua exists: run from a copy, or move it away")
 local ok, err = pcall(function()
 load(io.open(arg[1]):read("a"), "castle")()
-local r = tool.run({ action = "explore", bot = "Bot1", structures = "#minecraft:village", radius = 1000 })
+local r = tool.run({ action = "explore", bot = "Bot1", structures = "#minecraft:village", radius = 1000, rail = false })
 assert(r.bot == "Bot1" and r.within == 1000)
 signs = 0
 for _ = 1, 400 do
