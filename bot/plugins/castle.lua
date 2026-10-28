@@ -459,7 +459,8 @@ local function summon_keep_entities()
                             t.x, t.y, t.z, f, f, t.variant, t.x, t.y, t.z, t.x, t.y, t.z)
                     else
                         local yaw = ({ south = 0, west = 90, north = 180, east = -90 })[t.facing]
-                        cmd = string.format('/summon minecraft:armor_stand %.1f %d %.1f {Rotation:[%df,0f],ShowArms:1b,equipment:{head:{id:"minecraft:iron_helmet"},chest:{id:"minecraft:iron_chestplate"},legs:{id:"minecraft:iron_leggings"},feet:{id:"minecraft:iron_boots"},mainhand:{id:"minecraft:iron_sword"}}}',
+                        -- (A command is 256 characters at most: longer, the server drops the bot)
+                        cmd = string.format('/summon armor_stand %.1f %d %.1f {Rotation:[%df],ShowArms:1b,equipment:{head:{id:iron_helmet},chest:{id:iron_chestplate},legs:{id:iron_leggings},feet:{id:iron_boots},mainhand:{id:iron_sword}}}',
                             t.x + 0.5, t.y, t.z + 0.5, yaw)
                     end
                     pcall(bot.call, "chat", { bot = who, message = cmd })

@@ -204,6 +204,10 @@ public:
     /// about 10 in a burst (a /locate for each kind of structure got the explorer kicked), commands included
     void SendPaced(const bool command, const std::string& text)
     {
+        // The server takes 256 characters at most and drops the bot for a longer one ("Failed to decode packet
+        // 'serverbound/minecraft:chat_command'": a /summon of an armor stand in its armor did it)
+        if (text.size() > 256) throw std::invalid_argument((command ? "command" : "message") + std::string(" longer than 256 characters (") +
+            std::to_string(text.size()) + "): the server would disconnect the bot for it");
         std::lock_guard<std::mutex> lock(send_mutex);
         const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
         if (now < next_send)
@@ -5266,10 +5270,11 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
 {
     if (std::chrono::steady_clock::now() < c.creative_fill_retry_at) return false;
     const Wanted wanted(selected.second);
-    // A block with a state asked for (a bed's half, a lantern hanging, a piston's facing...) goes by command too, even
-    // alone: placed by hand it takes the state of how it was placed, and came out wrong over and over. Not doors:
-    // by hand both halves come at once
-    const bool single = CreativeBuild::Single(wanted.item) || (!wanted.state.empty() && !EndsWith(wanted.item, "_door"));
+    // A block with a state asked for (a lantern hanging, a piston's facing...) goes by command too, even alone:
+    // placed by hand it takes the state of how it was placed, and came out wrong over and over. Not doors and beds:
+    // by hand both halves come at once; set by command, a half alone is taken away by the next update
+    const bool single = CreativeBuild::Single(wanted.item) ||
+        (!wanted.state.empty() && !EndsWith(wanted.item, "_door") && !EndsWith(wanted.item, "_bed"));
     if ((!CreativeBuild::Batchable(wanted.item) && !single) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
     const auto world = c.GetWorld();
     std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
@@ -5459,10 +5464,9 @@ static Status BuildStep(McpBot& c)
             continue;
         }
         const auto part = wanted.state.find("part");
-        if (empty && !creative && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
+        if (empty && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
         {
-            // The foot entry creates this half too; placing a second bed here would move it one block. (Not in
-            // creative: there each half is set by command, and the foot's command makes no head)
+            // The foot entry creates this half too; placing a second bed here would move it one block.
             continue;
         }
         const auto half = wanted.state.find("half");
