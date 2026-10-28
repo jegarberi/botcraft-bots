@@ -13,12 +13,14 @@ bot = { call = function(tool, a)
     end
     return {}
 end, tool = function() end, every = function() end, on_chat = function() end, log = print }
-local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road(")
+local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route(")
 load(src, "castle")()
 local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true }
-local world, rails = {}, {}
+local world, rails, segs = {}, {}, {}
 local function lay(ex, ez)
-    local blocks, x, z, y = rail_road(c, ex, ez, "cobblestone", 24)
+    local blocks, x, z, y, _, laid = rail_road(c, ex, ez, "cobblestone", 24)
+    segs[c.leg] = segs[c.leg] or { ax = laid.ax, line = laid.line, rail = laid.rail, lv = {} }
+    for a, l in pairs(laid.lv) do segs[c.leg].lv[a] = l end
     assert(blocks, "the piece is in sight")
     for _, b in ipairs(blocks) do
         world[b[1] .. "," .. b[2] .. "," .. b[3]] = b[4]
@@ -70,4 +72,18 @@ for _, r in ipairs(rails) do
     if links == 1 then ends = ends + 1 end
 end
 assert(ends == 2, "one unbroken line: " .. ends .. " ends")
-print("railroad planner OK: " .. #rails .. " rails")
+-- The network: with that road laid, a place off its first leg gets a branch at a right angle from its nearest
+-- point, at its level, 3 from its middle; that road's rail is cut there for 5 blocks
+local r = { origin = { x = 0, y = 70, z = 0 }, done = { ["90 60"] = true }, net = { segs[1], segs[2] } }
+local b = rail_route(r, { { name = "Farm", x = 20, z = -40 } })
+assert(b.sx == 20 and b.sz == -3 and b.kx == 20 and b.kz == -40 and not b.has_turn, "a straight branch north from 20 -3")
+assert(b.joined and b.y == deck[20], "the branch starts at the road's level")
+assert(#b.cut == 5, "5 rails cut")
+for _, cell in ipairs(b.cut) do
+    assert(cell[4] == "air" and cell[3] == 2 and cell[1] >= 18 and cell[1] <= 22, "the cut is on the rail's line")
+    assert(world[cell[1] .. "," .. cell[2] .. "," .. cell[3]]:match("rail"), "a rail is what is cut")
+end
+-- With nothing laid yet, the main road goes to the farthest place
+local m = rail_route({ origin = { x = 0, y = 70, z = 0 }, done = {} }, { { name = "Near", x = 50, z = 10 }, { name = "Far", x = -300, z = 900 } })
+assert(m.name == "Far" and m.sx == 0 and m.kz == 900, "the main road goes to the farthest place, the longer way first")
+print("railroad planner OK: " .. #rails .. " rails, branches and cuts")

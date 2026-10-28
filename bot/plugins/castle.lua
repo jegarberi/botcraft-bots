@@ -791,7 +791,7 @@ local function rail_road(c, ex, ez, item, span)
     if n < 0 then return nil end
     -- The level, step by step: toward the ground ahead (the middle height of the next 16 steps), one block per
     -- RAIL_GRADE steps at most, and flat within 5 of the turn (a curved rail can't slope)
-    local level, L, since = {}, c.first and h[0] or c.y, c.since or RAIL_GRADE
+    local level, L, since = {}, (c.first and not c.joined) and h[0] or c.y, c.since or RAIL_GRADE
     for i = 0, n do
         local ahead = {}
         for j = i, math.min(n, i + 16) do ahead[#ahead + 1] = h[j] end
@@ -856,7 +856,11 @@ local function rail_road(c, ex, ez, item, span)
     end
     c.since, c.prev_level = since, level[n - 1] or level[n]
     local endx, endz = at(n)
-    return list, endx, endz, level[n], level[0]
+    -- What was laid, for a branch to leave it later: the axis, the road's middle line, the rail's line, the level
+    -- at each step (by its coordinate along the axis)
+    local laid = { ax = along_x, line = along_x and c.pz or c.px, rail = along_x and c.pz + 2 * side or c.px + 2 * side, lv = {} }
+    for i = 0, n do local x, z = at(i); laid.lv[axis(x, z)] = level[i] end
+    return list, endx, endz, level[n], level[0], laid
 end
 
 -- The castle's site is kept in a file: the plugin's own memory does not survive a restart of the program
@@ -1206,7 +1210,7 @@ end
 roadman = restore(ROADS_FILE)     -- the road builder, as it was before a restart (nil: none)
 local function keep(r)
     save(ROADS_FILE, r and { bot = r.bot, origin = r.origin, places = r.places, done = r.done, laid = r.laid, patience = 300, item = r.item,
-        sign = r.sign, explore = r.explore, reach = r.reach, rail = r.rail, castle = r.castle })
+        sign = r.sign, explore = r.explore, reach = r.reach, rail = r.rail, castle = r.castle, net = r.net })
 end
 -- What an explorer looks for (structure ids or #tags for /locate), when not told
 local STRUCTURES = "#minecraft:village,pillager_outpost,ruined_portal,desert_pyramid,jungle_pyramid,igloo,swamp_hut,mineshaft,trail_ruins,trial_chambers"
@@ -1233,11 +1237,84 @@ local function explore(r)
     keep(r)
     return found
 end
+-- The next road of the network: none laid yet, the main road, to the farthest place (from the castle, from 4
+-- blocks beyond the moat on the side it lies). Then the place nearest to the roads laid, by a branch from the
+-- nearest point of them: it leaves the road at a right angle, 3 blocks from its middle, at the road's level, and
+-- the railway of that road is cut there for 5 blocks (it ends and starts again; the branch has its own)
+local function rail_route(r, places)
+    r.net = r.net or {}
+    local best, best_d, best_j
+    for _, p in ipairs(places) do
+        if not r.done[p.x .. " " .. p.z] then
+            if #r.net == 0 then
+                local d = (p.x - r.origin.x) ^ 2 + (p.z - r.origin.z) ^ 2
+                if not best or d > best_d then best, best_d = p, d end
+            else
+                for _, seg in ipairs(r.net) do
+                    local lo, hi
+                    for a in pairs(seg.lv) do lo, hi = math.min(lo or a, a), math.max(hi or a, a) end
+                    if lo then
+                        local pa, pp = seg.ax and p.x or p.z, seg.ax and p.z or p.x
+                        local ja = math.max(lo, math.min(hi, pa))
+                        local d = (pa - ja) ^ 2 + (pp - seg.line) ^ 2
+                        if not best or d < best_d then best, best_d, best_j = p, d, { seg = seg, a = ja, lo = lo, hi = hi } end
+                    end
+                end
+            end
+        end
+    end
+    if not best then return nil end
+    local p = best
+    local c = { name = p.name, what = p.what or "", x = p.x, z = p.z, y = r.origin.y, first = true }
+    local sx, sz, first_x
+    if not best_j then
+        sx, sz = r.origin.x, r.origin.z
+        local dx, dz = p.x - sx, p.z - sz
+        first_x = math.abs(dx) >= math.abs(dz)
+        if r.castle then
+            local out = OUTER + 4
+            if first_x then sx = sx + (dx >= 0 and out or -out) else sz = sz + (dz >= 0 and out or -out) end
+        end
+    else
+        local seg, ja = best_j.seg, best_j.a
+        local pa, pp = seg.ax and p.x or p.z, seg.ax and p.z or p.x
+        local a, perp
+        if math.abs(pp - seg.line) > 3 then
+            -- Off to the side: away at a right angle
+            a, perp = ja, seg.line + (pp > seg.line and 3 or -3)
+            first_x = not seg.ax
+        else
+            -- On past the road's end: on along it
+            local dir = (ja == best_j.hi) and 1 or -1
+            a, perp = ja + 3 * dir, seg.line
+            first_x = seg.ax
+        end
+        if seg.ax then sx, sz = a, perp else sx, sz = perp, a end
+        c.y, c.joined = seg.lv[ja], true
+        -- The cut in that road's railway (rails at its level + 1)
+        c.cut = {}
+        for da = -2, 2 do
+            local l = seg.lv[ja + da]
+            if l then
+                local rx, rz = seg.ax and ja + da or seg.rail, seg.ax and seg.rail or ja + da
+                c.cut[#c.cut + 1] = { rx, l + 1, rz, AIR }
+            end
+        end
+    end
+    c.sx, c.sz, c.px, c.pz = sx, sz, sx, sz
+    c.kx, c.kz = first_x and p.x or sx, first_x and sz or p.z
+    c.leg, c.has_turn = 1, not (c.kx == p.x and c.kz == p.z)
+    if c.kx == sx and c.kz == sz then c.kx, c.kz, c.has_turn = p.x, p.z, false end
+    return c
+end
+
 -- One piece of a road with its railway (rail_road), up to 32 blocks along the leg under way
 local function rail_tick(r, c, st, now)
     local tx, tz = c.leg == 1 and c.kx or c.x, c.leg == 1 and c.kz or c.z
     if c.px == tx and c.pz == tz then
         if c.leg == 1 and c.has_turn then c.leg = 2; return end
+        r.net = r.net or {}
+        for _, seg in ipairs(c.segs or {}) do r.net[#r.net + 1] = seg end
         r.done[c.x .. " " .. c.z] = true
         r.laid = r.laid + 1
         keep(r)
@@ -1251,8 +1328,19 @@ local function rail_tick(r, c, st, now)
     r.best, r.best_at, r.busy = nil, now, true
     viewer = r.bot
     local first = c.first
-    local blocks, endx, endz, y, y0 = rail_road(c, ex, ez, r.item, 24)
+    local blocks, endx, endz, y, y0, laid = rail_road(c, ex, ez, r.item, 24)
     c.first_level = first and y0 or nil
+    if laid then
+        -- One segment per leg, its levels gathered piece by piece
+        c.segs = c.segs or {}
+        local seg = c.segs[c.leg]
+        if not seg then seg = { ax = laid.ax, line = laid.line, rail = laid.rail, lv = {} }; c.segs[c.leg] = seg end
+        for a, l in pairs(laid.lv) do seg.lv[a] = l end
+    end
+    if laid and first and c.cut then
+        -- The junction: the railway of the road it leaves ends here and starts again beyond it
+        for _, b in ipairs(c.cut) do blocks[#blocks + 1] = b end
+    end
     viewer = nil
     if not blocks then
         if away <= 24 then
@@ -1311,26 +1399,14 @@ local function road_tick()
             local what = (m.resources or ""):gsub("_ore", ""):gsub(",", ", ")
             places[#places + 1] = { name = "Mine", what = what ~= "" and what or "ore", x = m.x, z = m.z }
         end
-        for _, p in ipairs(places) do
-            if not r.done[p.x .. " " .. p.z] then
-                r.cur = { name = p.name, what = p.what or "", x = p.x, z = p.z, px = r.origin.x, pz = r.origin.z, y = r.origin.y, first = true }
-                if r.rail then
-                    -- Two straight legs, the longer way first. From the castle: from 4 blocks beyond the moat, on the
-                    -- side the place lies
-                    local c, sx, sz = r.cur, r.origin.x, r.origin.z
-                    local dx, dz = p.x - sx, p.z - sz
-                    local first_x = math.abs(dx) >= math.abs(dz)
-                    if r.castle then
-                        local out = OUTER + 4
-                        if first_x then sx = sx + (dx >= 0 and out or -out) else sz = sz + (dz >= 0 and out or -out) end
-                    end
-                    c.sx, c.sz, c.px, c.pz = sx, sz, sx, sz
-                    c.kx, c.kz = first_x and p.x or sx, first_x and sz or p.z
-                    c.leg = (c.kx == sx and c.kz == sz) and 2 or 1
-                    c.has_turn = c.leg == 2 or not (c.kx == p.x and c.kz == p.z)
-                    if c.leg == 2 then c.has_turn = false; c.leg = 1; c.kx, c.kz = p.x, p.z end
+        if r.rail then
+            r.cur = rail_route(r, places)
+        else
+            for _, p in ipairs(places) do
+                if not r.done[p.x .. " " .. p.z] then
+                    r.cur = { name = p.name, what = p.what or "", x = p.x, z = p.z, px = r.origin.x, pz = r.origin.z, y = r.origin.y, first = true }
+                    break
                 end
-                break
             end
         end
         if not r.cur and r.explore then
