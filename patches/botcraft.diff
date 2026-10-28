@@ -755,6 +755,19 @@ index d3e406d..201b5a4 100644
          for (size_t i = 0; i < faces.size(); ++i)
          {
              std::static_pointer_cast<Renderer::Scale>(face_descriptors[i].transformations.scales.back())->axis_x = static_cast<float>(half_width);
+diff --git a/botcraft/src/Game/Entities/entities/monster/cubemob/AbstractCubeMobEntity.cpp b/botcraft/src/Game/Entities/entities/monster/cubemob/AbstractCubeMobEntity.cpp
+index ddc0a0f..abf36a4 100644
+--- a/botcraft/src/Game/Entities/entities/monster/cubemob/AbstractCubeMobEntity.cpp
++++ b/botcraft/src/Game/Entities/entities/monster/cubemob/AbstractCubeMobEntity.cpp
+@@ -73,7 +73,7 @@ namespace Botcraft
+ 
+     int AbstractCubeMobEntity::GetIdSizeImpl() const
+     {
+-        return std::any_cast<bool>(metadata.at("id_size"));
++        return std::any_cast<int>(metadata.at("id_size"));
+     }
+ 
+     void AbstractCubeMobEntity::SizeChanged(const int new_size)
 diff --git a/botcraft/src/Game/ManagersClient.cpp b/botcraft/src/Game/ManagersClient.cpp
 index 9380d9d..7d36ad6 100644
 --- a/botcraft/src/Game/ManagersClient.cpp

@@ -2027,7 +2027,9 @@ static Status TunnelToward(BehaviourClient& c, const Position& target, const int
             return Status::Failure;
         };
     const std::string pickaxe = HeldTool(c, "pickaxe");
-    if (pickaxe.empty() && !allow_hands)
+    // (Creative: every block breaks at once by hand. A creative bot shut in under the castle's floor kept
+    // failing here and never got back to its part of the build)
+    if (pickaxe.empty() && !allow_hands && c.GetLocalPlayer()->GetGameMode() != GameType::Creative)
     {
         return fail("no pickaxe", BlockPos(c.GetLocalPlayer()->GetPosition()));
     }
