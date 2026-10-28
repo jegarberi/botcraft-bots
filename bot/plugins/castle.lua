@@ -365,25 +365,29 @@ local function keep_rooms(g, cx, y, cz, entities)
     painting(-4, 9, -I, "south", "minecraft:wasteland")
     painting(5, 9, -I, "south", "minecraft:plant")
     painting(I, 10, -6, "west", "minecraft:bomb")
-    -- The secret door, in the wall x -10 between the bedroom and a hidden passage at x -11 (z -11..-6). The
+    -- The secret door, in the wall x -10 between the bedroom and a hidden passage at x -11 (z -11..-5). The
     -- opening at z -11, shut by two door blocks; two sticky pistons at z -9 hold them there, their heads at z -10,
     -- pushed by a redstone torch at z -8 (beside the lower one; the block over the torch passes the power to the
-    -- upper one). A button on either side of the wall block at z -7 under the torch puts the torch out: the pistons
-    -- pull the door blocks aside while it is held, and the door shuts behind. Planned shut, as the torch keeps it:
-    -- planned open, the pistons pushed before the door blocks came, their heads stood where the blocks were to go
-    -- and the doorway stayed a hole
-    B(-10, 7, -I, -10, KEEP_HIGH - 1, -6, wall)
+    -- upper one). A press on a button (one each side, on a waxed copper bulb at z -5) lights the bulb, a comparator
+    -- at z -6 reading it powers the torch's block at z -7, the torch goes out and the pistons pull the door blocks
+    -- aside; the next press shuts it. (A button alone held it open a second, the door 4 blocks away.) Planned shut,
+    -- as the torch keeps it: planned open, the pistons pushed before the door blocks came, their heads stood where
+    -- the blocks were to go and the doorway stayed a hole
+    B(-10, 7, -I, -10, KEEP_HIGH - 1, -5, wall)
     B(-I, 9, -I, -I, KEEP_HIGH - 1, -5, wall)
-    B(-I, 7, -10, -I, 8, -6, AIR)
-    B(-I, 7, -5, -I, 8, -5, wall)
+    B(-I, 7, -10, -I, 8, -5, AIR)
+    B(-I, 7, -4, -I, KEEP_HIGH - 1, -4, wall)
     S(-10, 7, -I, wall); S(-10, 8, -I, wall)                 -- the door blocks, in the opening
     G.unset(cx - 10, y + 7, cz - 10); G.unset(cx - 10, y + 8, cz - 10)   -- the pistons' heads, or the blocks pulled back
     S(-10, 7, -9, "sticky_piston[facing=north]"); S(-10, 8, -9, "sticky_piston[facing=north]")
     S(-10, 7, -8, "redstone_wall_torch[facing=north]")
     S(-10, 8, -8, wall)
     S(-10, 7, -7, wall)
-    S(-9, 7, -7, "stone_button[face=wall,facing=east]")
-    S(-I, 7, -7, "stone_button[face=wall,facing=west]")
+    S(-10, 7, -6, "comparator[facing=south,mode=compare]")
+    S(-10, 7, -5, "waxed_copper_bulb")
+    S(-9, 7, -5, "stone_button[face=wall,facing=east]")
+    S(-I, 7, -5, "stone_button[face=wall,facing=west]")
+    S(-9, 7, -7, AIR); S(-I, 7, -7, AIR)                     -- (where the buttons were before)
     -- The shaft: x -11 z -11, from the lower level up to the passage, a ladder on the keep's north wall
     B(-10, 0, -I, -10, 5, -10, wall)
     B(-I, 0, -10, -I, 5, -10, wall)

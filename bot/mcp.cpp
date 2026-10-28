@@ -5265,31 +5265,15 @@ static std::string OtherWood(BehaviourClient& c, const std::string& item)
     return best;
 }
 
-// A bed's head wanted at p whose foot already stands there alone (set by command once: a command makes no head).
-// Only then does the head go in by itself; otherwise placing the foot makes both
-static bool LoneBedFoot(const std::shared_ptr<World>& world, const Position& p, const Wanted& wanted)
-{
-    const auto part = wanted.state.find("part"), facing = wanted.state.find("facing");
-    if (!EndsWith(wanted.item, "_bed") || part == wanted.state.end() || part->second != "head" || facing == wanted.state.end()) return false;
-    static const std::map<std::string, Position> back = { { "north", Position(0, 0, 1) }, { "south", Position(0, 0, -1) },
-        { "east", Position(-1, 0, 0) }, { "west", Position(1, 0, 0) } };
-    const auto way = back.find(facing->second);
-    if (way == back.end()) return false;
-    const Blockstate* foot = world->GetBlock(p + way->second);
-    return foot != nullptr && foot->GetName() == wanted.item && foot->GetVariableValue("part") == "foot";
-}
-
 // Operator-only acceleration. Rejected commands fall back to the normal creative inventory builder.
 static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, std::string>& selected)
 {
     if (std::chrono::steady_clock::now() < c.creative_fill_retry_at) return false;
     const Wanted wanted(selected.second);
-    // A block with a state asked for (a lantern hanging, a piston's facing...) goes by command too, even alone:
-    // placed by hand it takes the state of how it was placed, and came out wrong over and over. Not doors and beds:
-    // by hand both halves come at once; set by command, a half alone is taken away by the next update
-    const bool single = CreativeBuild::Single(wanted.item) ||
-        (!wanted.state.empty() && !EndsWith(wanted.item, "_door") && !EndsWith(wanted.item, "_bed")) ||
-        LoneBedFoot(c.GetWorld(), selected.first, wanted);
+    // A block with a state asked for (a lantern hanging, a piston's facing, each half of a bed or door...) goes by
+    // command too, even alone: placed by hand it takes the state of how it was placed, and came out wrong over and
+    // over (beds and doors not at all: the main bed and the dungeon's iron doors never came)
+    const bool single = CreativeBuild::Single(wanted.item) || !wanted.state.empty();
     if ((!CreativeBuild::Batchable(wanted.item) && !single) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
     const auto world = c.GetWorld();
     std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
@@ -5479,14 +5463,14 @@ static Status BuildStep(McpBot& c)
             continue;
         }
         const auto part = wanted.state.find("part");
-        if (empty && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head" && !LoneBedFoot(world, p, wanted))
+        if (empty && !creative && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
         {
-            // The foot entry creates this half too; placing a second bed here would move it one block. (Unless the
-            // foot stands alone: then the head goes in by command, see CreativeFill)
+            // The foot entry creates this half too; placing a second bed here would move it one block. (Creative:
+            // each half goes in by command, see CreativeFill)
             continue;
         }
         const auto half = wanted.state.find("half");
-        if (empty && EndsWith(wanted_block, "_door") && half != wanted.state.end() && half->second == "upper")
+        if (empty && !creative && EndsWith(wanted_block, "_door") && half != wanted.state.end() && half->second == "upper")
         {
             // The lower entry creates this half too.
             continue;

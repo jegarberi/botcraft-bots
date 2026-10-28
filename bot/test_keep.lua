@@ -29,7 +29,8 @@ assert(solid(at(-10, 7, -11)) and solid(at(-10, 8, -11)), "the door blocks, in t
 assert(at(-10, 7, -9) == "sticky_piston[facing=north]" and at(-10, 8, -9) == "sticky_piston[facing=north]", "two pistons")
 assert(not seen[(cx - 10) .. "," .. (y + 7) .. "," .. (cz - 10)] and not seen[(cx - 10) .. "," .. (y + 8) .. "," .. (cz - 10)], "the heads' spots are left be")
 assert(at(-10, 7, -8) == "redstone_wall_torch[facing=north]" and solid(at(-10, 7, -7)) and solid(at(-10, 8, -8)), "the torch, on its block, under the one it powers")
-assert(at(-9, 7, -7):match("button") and at(-11, 7, -7):match("button"), "a button on each side")
+assert(at(-10, 7, -6) == "comparator[facing=south,mode=compare]" and at(-10, 7, -5) == "waxed_copper_bulb", "a comparator reading the bulb, into the torch's block")
+assert(at(-9, 7, -5):match("button") and at(-11, 7, -5):match("button"), "a button on each side of the bulb")
 assert(at(-11, 7, -9) == "air" and at(-11, 8, -6) == "air" and at(-9, 7, -11) == "air", "the passage and the way in are clear")
 -- Beds whole, doors whole, buttons and hanging lanterns on something
 local step = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 } }
