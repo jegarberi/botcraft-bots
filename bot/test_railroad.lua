@@ -21,8 +21,8 @@ bot = { call = function(tool, a)
     end
     return {}
 end, tool = function() end, every = function() end, on_chat = function() end, log = print }
-local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route("):gsub("local function rail_tick%(", "function rail_tick(")
-load(src, "castle")()
+local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route("):gsub("local function rail_tick%(", "function rail_tick("):gsub("local function road_tick%(", "function road_tick("):gsub("\nlocal roadman ", "\nroadman = nil ")
+assert(load(src, "castle"))()
 local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
 local world, rails, segs = {}, {}, {}
 built = false
@@ -128,5 +128,21 @@ rail_tick(rr, rc, { position = { x = 0, y = 70, z = 0 } }, 0)
 assert(not given and rc.px == 0 and rc.first and not rr.busy, "a refused piece stays to do")
 rail_tick(rr, rc, { position = { x = 0, y = 70, z = 0 } }, 0)
 assert(given and #given.blocks > 0 and rc.px == 32 and rr.busy, "and goes the next time")
+-- Out of sight (nothing loaded there): the bot is sent there, not given a piece that gets nowhere
+local blind = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = false, d0 = 0, name = "Farm", what = "" }
+local real_call = bot.call
+bot.call = function(tool, a) if tool == "get_block" and a.x >= 1 then error("position is not loaded") end return real_call(tool, a) end
+given = nil
+rail_tick(rr, blind, { position = { x = 0, y = 70, z = 300 } }, 0)
+assert(given and #given.blocks == 1 and given.blocks[1][4] == "torch" and blind.px == 0, "a torch there takes the bot there")
+bot.call = real_call
+-- A railway road that reaches its end joins the network, for the branches
+roadman = { bot = "Bot1", origin = { x = 0, y = 70, z = 0, name = "Castle" }, done = {}, laid = 0, item = "cobblestone", sign = "spruce_sign", rail = true, places = {},
+    cur = { px = 90, pz = 60, x = 90, z = 60, kx = 90, kz = 0, leg = 2, has_turn = true, segs = segs } }
+real_call = bot.call
+bot.call = function(tool, a) if tool == "status" then return { position = { x = 90, y = 70, z = 60 } } end return real_call(tool, a) end
+road_tick()
+bot.call = real_call
+assert(#roadman.net == 2 and roadman.done["90 60"], "the road's two legs are in the network")
 io.open = real_open
 print("railroad planner OK: " .. #rails .. " rails, branches, cuts, milestones, a refused order")

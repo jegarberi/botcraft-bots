@@ -165,4 +165,21 @@ end
 TEAM_CREW = nil
 tool.run({action = "stop"})
 crew = false
+-- The repair bot: with no castle job, a creative bot goes over the plan part by part; it never clears a cell
+-- planned empty outside the moat, nor touches the secret door's blocks, and is no builder of the next castle
+orders = {}
+local fix = tool.run({ action = "repair" })
+assert(fix.bot == "Bot1", "the free creative bot repairs: " .. tostring(fix.bot))
+for _ = 1, 6 do tick() end
+assert(#orders >= 2, "a part per tick once the last is through: " .. #orders)
+for _, o in ipairs(orders) do
+    assert(o.bot == "Bot1" and o.solo and o.name == "castle repair" and #o.blocks > 0)
+    for _, b in ipairs(o.blocks) do
+        assert(b[4] ~= "air" or b[2] < 70 - 1, "no empty cell cleared above the ground (the moat is dug below it)")
+        assert(not (b[1] == -10 and (b[2] == 77 or b[2] == 78) and b[3] == -11), "the secret door's blocks are left alone")
+    end
+end
+assert(tool.run({ action = "repair" }).part == #orders)
+assert(tool.run({ action = "repair", stop = true }):match("back"))
+os.remove("../repair_job.lua")
 print("castle plugin OK: " .. #plan.stages .. " stages, " .. plan.blocks .. " blocks")
