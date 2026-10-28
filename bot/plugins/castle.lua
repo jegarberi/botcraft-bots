@@ -2120,7 +2120,8 @@ bot.every(20, function()
                 if s.name == name then job.index = i; break end
             end
         end
-        job.saved.index = job.index
+        -- (The name too: start saved the first stage's, and a second restart went back to the levelling)
+        job.saved.index, job.saved.stage = job.index, job.stages[job.index] and job.stages[job.index].name or nil
         save(JOB_FILE, job.saved)
         hand_over()
         io.stderr:write(os.date("%H:%M:%S"), " [castle] taken up again at stage ", job.index, " of ", #job.stages,
