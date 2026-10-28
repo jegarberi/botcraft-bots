@@ -1609,7 +1609,7 @@ local function rail_tick(r, c, st, now)
     local order = { bot = r.bot, objective = "build", plan = "blocks", members = { r.bot }, leader = r.bot, count = 1, solo = true, name = "road" }
     r.best, r.best_at, r.busy = nil, now, true
     viewer = r.bot
-    local first = c.first
+    local first, start_x, start_z, start_y, since, prev_level = c.first, c.px, c.pz, c.y, c.since, c.prev_level
     local blocks, endx, endz, y, y0, laid = rail_road(c, ex, ez, r.item, 24)
     c.first_level = first and y0 or nil
     if laid then
@@ -1640,7 +1640,7 @@ local function rail_tick(r, c, st, now)
         -- Out of the bot's sight: a torch to put there takes it there
         order.blocks = { { c.px, c.y + 1, c.pz, "torch" } }
         r.patience, r.note = 120, "going to " .. c.px .. " " .. c.pz
-        pcall(bot.call, "team_member", order)
+        if not pcall(bot.call, "team_member", order) then r.busy = false end
         return
     end
     local far = math.floor(math.sqrt((c.x - r.origin.x) ^ 2 + (c.z - r.origin.z) ^ 2) + 0.5)
@@ -1662,7 +1662,13 @@ local function rail_tick(r, c, st, now)
     r.patience = 300
     r.note = "road and railway to " .. c.name .. " at " .. c.x .. " " .. c.z .. " (leg " .. c.leg .. "): at " .. endx .. " " .. endz
     keep(r)
-    pcall(bot.call, "team_member", order)
+    -- Refused (the bot busy with a tool of another plugin: "busy" after 5 seconds): the same piece again next time,
+    -- not the next one. Taken as given, whole stretches of road were passed over unbuilt
+    local ok, err = pcall(bot.call, "team_member", order)
+    if not ok then
+        c.first, c.px, c.pz, c.y, c.since, c.prev_level = first, start_x, start_z, start_y, since, prev_level
+        r.busy, r.note = false, "the order for the piece at " .. start_x .. " " .. start_z .. " was refused (" .. tostring(err) .. "): again"
+    end
 end
 
 local function road_tick()
@@ -2091,7 +2097,9 @@ bot.every(20, function()
             local crew = {}
             for _, b in ipairs(bot.call("bots") or {}) do
                 local ok, st = pcall(bot.call, "status", { bot = b.name })
-                if ok and type(st) == "table" and st.game_mode == "creative" and st.dimension == "minecraft:overworld" then crew[#crew + 1] = b.name end
+                -- (Not the road builder: sent to a spot of the grid, it was busy and its road orders bounced)
+                if ok and type(st) == "table" and st.game_mode == "creative" and st.dimension == "minecraft:overworld"
+                    and not (roadman and roadman.bot == b.name) then crew[#crew + 1] = b.name end
             end
             if #crew == 0 then return end
             local k = math.ceil(math.sqrt(#crew))

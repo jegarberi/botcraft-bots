@@ -7,6 +7,12 @@ local function ground(x, z)
     return 70
 end
 bot = { call = function(tool, a)
+    if tool == "team_member" then
+        refusals = (refusals or 0) - 1
+        if refusals >= 0 then error("busy") end
+        given = a
+        return {}
+    end
     if tool == "get_block" then
         local laid = built and built[a.x .. "," .. a.y .. "," .. a.z]
         if laid then return { block = "minecraft:" .. laid:gsub("%[.*", ""):gsub("|.*", "") } end
@@ -15,7 +21,7 @@ bot = { call = function(tool, a)
     end
     return {}
 end, tool = function() end, every = function() end, on_chat = function() end, log = print }
-local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route(")
+local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route("):gsub("local function rail_tick%(", "function rail_tick(")
 load(src, "castle")()
 local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
 local world, rails, segs = {}, {}, {}
@@ -112,4 +118,15 @@ end
 -- With nothing laid yet, the main road goes to the farthest place
 local m = rail_route({ origin = { x = 0, y = 70, z = 0 }, done = {} }, { { name = "Near", x = 50, z = 10 }, { name = "Far", x = -300, z = 900 } })
 assert(m.name == "Far" and m.sx == 0 and m.kz == 900, "the main road goes to the farthest place, the longer way first")
-print("railroad planner OK: " .. #rails .. " rails, branches and cuts")
+-- An order the bot refuses (busy with another tool) is not taken as given: the same piece goes again next time
+local real_open = io.open
+io.open = function(path, mode) if tostring(path):match("roadbot_job") then return nil end return real_open(path, mode) end
+local rr = { bot = "Bot1", origin = { x = 0, y = 70, z = 0, name = "Castle" }, done = {}, laid = 0, item = "cobblestone", sign = "spruce_sign" }
+local rc = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 0, name = "Farm", what = "wheat" }
+refusals, given = 1, nil
+rail_tick(rr, rc, { position = { x = 0, y = 70, z = 0 } }, 0)
+assert(not given and rc.px == 0 and rc.first and not rr.busy, "a refused piece stays to do")
+rail_tick(rr, rc, { position = { x = 0, y = 70, z = 0 } }, 0)
+assert(given and #given.blocks > 0 and rc.px == 32 and rr.busy, "and goes the next time")
+io.open = real_open
+print("railroad planner OK: " .. #rails .. " rails, branches, cuts, milestones, a refused order")

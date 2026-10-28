@@ -5459,9 +5459,10 @@ static Status BuildStep(McpBot& c)
             continue;
         }
         const auto part = wanted.state.find("part");
-        if (empty && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
+        if (empty && !creative && EndsWith(wanted_block, "_bed") && part != wanted.state.end() && part->second == "head")
         {
-            // The foot entry creates this half too; placing a second bed here would move it one block.
+            // The foot entry creates this half too; placing a second bed here would move it one block. (Not in
+            // creative: there each half is set by command, and the foot's command makes no head)
             continue;
         }
         const auto half = wanted.state.find("half");
