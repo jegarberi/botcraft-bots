@@ -1057,7 +1057,16 @@ local function rail_road(c, ex, ez, item, span)
         local target = ahead[(#ahead + 1) // 2]
         local x, z = at(i)
         local near_turn = c.has_turn and math.abs(axis(x, z) - K) < 5
-        if i > 0 and since >= RAIL_GRADE and not near_turn and target ~= L then
+        -- The road already laid here (after a restart the builder goes over it again): its deck, the road block
+        -- with air over it, within a block of the level. Followed as it is: planned afresh over a road, the look
+        -- ahead sees the deck rising and rises a step early, and a second deck went in a block off the first
+        local laid
+        for _, d in ipairs({ 0, 1, -1 }) do
+            if block_at(x, L + d, z) == "minecraft:" .. item and block_at(x, L + d + 1, z) == "minecraft:air" then laid = L + d break end
+        end
+        if laid then
+            if laid ~= L then L, since = laid, 0 end
+        elseif i > 0 and since >= RAIL_GRADE and not near_turn and target ~= L then
             L = L + (target > L and 1 or -1)
             since = 0
         end

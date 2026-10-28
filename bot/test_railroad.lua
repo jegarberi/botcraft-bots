@@ -8,6 +8,8 @@ local function ground(x, z)
 end
 bot = { call = function(tool, a)
     if tool == "get_block" then
+        local laid = built and built[a.x .. "," .. a.y .. "," .. a.z]
+        if laid then return { block = "minecraft:" .. laid:gsub("%[.*", ""):gsub("|.*", "") } end
         if a.y > ground(a.x, a.z) then return { block = "minecraft:air" } end
         return { block = "minecraft:stone" }
     end
@@ -17,6 +19,7 @@ local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "functi
 load(src, "castle")()
 local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
 local world, rails, segs = {}, {}, {}
+built = false
 local function lay(ex, ez)
     local blocks, x, z, y, _, laid = rail_road(c, ex, ez, "cobblestone", 24)
     segs[c.leg] = segs[c.leg] or { ax = laid.ax, line = laid.line, rail = laid.rail, lv = {} }
@@ -84,6 +87,17 @@ for k, b in pairs(world) do
     end
 end
 assert(milestones == 2, "a milestone by the road and by the railway, got " .. milestones)
+-- Laid again over itself (as after a restart): the same levels all along, not a deck a block off
+built = world
+local again = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
+while again.px ~= 90 do
+    local blocks, x, z, y = rail_road(again, math.min(again.px + 32, 90), 0, "cobblestone", 24)
+    for _, b in ipairs(blocks) do
+        if b[3] == 0 and b[4] == "cobblestone" then assert(b[2] == deck[b[1]], "laid again at x " .. b[1] .. ": " .. b[2] .. ", was " .. deck[b[1]]) end
+    end
+    again.first, again.px, again.pz, again.y = false, x, z, y
+end
+built = false
 -- The network: with that road laid, a place off its first leg gets a branch at a right angle from its nearest
 -- point, at its level, 3 from its middle; that road's rail is cut there for 5 blocks
 local r = { origin = { x = 0, y = 70, z = 0 }, done = { ["90 60"] = true }, net = { segs[1], segs[2] } }
