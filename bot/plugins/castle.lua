@@ -1675,6 +1675,8 @@ local function rail_tick(r, c, st, now)
     -- Refused (the bot busy with a tool of another plugin: "busy" after 5 seconds): the same piece again next time,
     -- not the next one. Taken as given, whole stretches of road were passed over unbuilt
     local ok, err = pcall(bot.call, "team_member", order)
+    io.stderr:write(os.date("%H:%M:%S"), " [roads] ", r.bot, " piece ", start_x, " ", start_z, " -> ", endx, " ", endz, ": ", #blocks,
+        " blocks, ", ok and "given" or ("refused: " .. tostring(err)), "\n")
     if not ok then
         c.first, c.px, c.pz, c.y, c.since, c.prev_level = first, start_x, start_z, start_y, since, prev_level
         r.busy, r.note = false, "the order for the piece at " .. start_x .. " " .. start_z .. " was refused (" .. tostring(err) .. "): again"
