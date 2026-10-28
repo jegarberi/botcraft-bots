@@ -28,7 +28,7 @@
 local R1, R2, R3 = 36, 78, 126     -- half-sizes of the three square walls, to their outer face
 local THICK = 5                    -- walls are 5 blocks wide: a 3-wide walkway in the middle,
 local PARAPET = 1                  --   and 1 block on each side standing 1 block higher
-local KEEP = 8                     -- half-size of the keep (17x17: it towers over the rest, as in the reference picture)
+local KEEP = 12                    -- half-size of the keep (25x25: it towers over the rest, as in the reference picture)
 local TOWER = 3                    -- half-size of the corner towers (7x7, they wrap the wall's corner)
 local MOAT_GAP = 2                 -- the moat: a ditch around the third wall, this far out from its towers,
 local MOAT_WIDE = 5                --   this wide
@@ -43,6 +43,7 @@ local job = nil                    -- { stages = { { name, blocks } }, index }
 -- What the plugin is doing is kept in files, so a restart of the program picks it up again: the castle job
 -- (how it was started and which stage it was at) and the road builder
 local JOB_FILE, ROADS_FILE = "../castle_job.lua", "../roadbot_job.lua"
+local roadman                      -- the road builder (see roadbot): not one of the castle's builders
 local function serialize(v)
     if type(v) == "table" then
         local parts = {}
@@ -202,36 +203,285 @@ local function house(list, x0, y, z0, item, door_side, creative)
     end
 end
 
--- The keep, the tallest thing as in the reference picture: 12 high with a floor at 6 and at 12, windows,
--- a doorway to the south, then a roof stepping in a block a level to a point with a spire
-local KEEP_HIGH = 16
-local function keep(list, cx, y, cz, item)
+-- The keep, the tallest thing as in the reference picture: 25x25, two floors (the ground floor 6 high, the upper
+-- one 5), stained-glass windows every 4 blocks, a gate 3 wide to the south, then a roof stepping in a block a
+-- level to a point with a spire. Creative: furnished (keep_rooms), with the lower level beside the vault
+local KEEP_HIGH = 12
+-- Paintings and armor stands are entities, not blocks: summoned once the rooms stand (see the keep stage)
+local KEEP_ENTITIES = {}
+
+-- Each spot once, the last word wins (the rooms are carved out of the shell, a door out of a wall)
+local function grid()
+    local cells, order = {}, {}
+    local g = {}
+    function g.set(x, y, z, item)
+        local k = x .. "," .. y .. "," .. z
+        if not cells[k] then order[#order + 1] = k end
+        cells[k] = { x, y, z, item }
+    end
+    function g.box(x1, y1, z1, x2, y2, z2, item)
+        for x = math.min(x1, x2), math.max(x1, x2) do
+            for yy = math.min(y1, y2), math.max(y1, y2) do
+                for z = math.min(z1, z2), math.max(z1, z2) do g.set(x, yy, z, item) end
+            end
+        end
+    end
+    function g.emit(list) for _, k in ipairs(order) do list[#list + 1] = cells[k] end end
+    return g
+end
+
+local function keep_shell(g, cx, y, cz, item, creative)
     for x = cx - KEEP, cx + KEEP do
         for z = cz - KEEP, cz + KEEP do
             local edge = math.abs(x - cx) == KEEP or math.abs(z - cz) == KEEP
-            local door = z == cz + KEEP and x == cx
-            local window = (x == cx or z == cz) and edge
+            local corner = math.abs(x - cx) == KEEP and math.abs(z - cz) == KEEP
+            local t = math.abs(z - cz) == KEEP and x - cx or z - cz
+            local window = edge and not corner and math.abs(t) <= KEEP - 2 and t % 4 == 2
             for dy = 0, KEEP_HIGH - 1 do
-                if edge and not (door and dy <= 1) then
-                    add_stone(list, x, y + dy, z, (window and (dy == 3 or dy == 9 or dy == 13)) and "glass_pane" or item)
+                if edge then
+                    local pane = window and (dy == 2 or dy == 3 or dy == 8 or dy == 9)
+                    local glass = creative and (dy < 6 and "red_stained_glass_pane" or "light_blue_stained_glass_pane") or "glass_pane"
+                    g.set(x, y + dy, z, pane and glass or textured(item, x, y + dy, z))
                 end
             end
-            add(list, x, y + 6, z, item)
-            add(list, x, y + KEEP_HIGH, z, item)
+            g.set(x, y + 6, z, item)
+            g.set(x, y + KEEP_HIGH, z, item)
         end
     end
-    -- The way up: a gap in the middle floor, at the foot of the north wall
-    add(list, cx, y + 6, cz - KEEP + 1, AIR)
+    -- The gate: 3 wide, 3 high
+    g.box(cx - 1, y, cz + KEEP, cx + 1, y + 2, cz + KEEP, AIR)
     for level = 1, KEEP + 1 do
         local h = KEEP + 1 - level
         for x = cx - h, cx + h do
             for z = cz - h, cz + h do
-                if math.max(math.abs(x - cx), math.abs(z - cz)) == h then add(list, x, y + KEEP_HIGH + level, z, item) end
+                if math.max(math.abs(x - cx), math.abs(z - cz)) == h then g.set(x, y + KEEP_HIGH + level, z, textured(item, x, y, z)) end
             end
         end
     end
     local tip = y + KEEP_HIGH + KEEP + 2
-    for dy = 0, 3 do add(list, cx, tip + dy, cz, "cobblestone_wall") end
+    for dy = 0, 3 do g.set(cx, tip + dy, cz, "cobblestone_wall") end
+end
+
+-- The rooms. Coordinates from the middle (dx dz) and from the ground floor's floor (dy 0 is the first block above
+-- it). Ground floor: the main hall (ballroom, throne at the north wall) to the north; an entrance corridor from
+-- the gate, the kitchen to its west and the staff's bedroom to its east. Upper floor: the main bedroom to the north,
+-- a corridor, three guest bedrooms to the south. A secret door from the main bedroom (a stone button low on its west
+-- wall) to a hidden passage and a ladder shaft down to the armory. Lower level, beside the vault: the armory to the
+-- west, the dungeon to the east (six cells, an iron door each opened by a button in the corridor)
+local function keep_rooms(g, cx, y, cz, entities)
+    local function S(dx, dy, dz, item) g.set(cx + dx, y + dy, cz + dz, item) end
+    local function B(dx1, dy1, dz1, dx2, dy2, dz2, item) g.box(cx + dx1, y + dy1, cz + dz1, cx + dx2, y + dy2, cz + dz2, item) end
+    local wall, trim = "stone_bricks", "polished_andesite"
+    local I = KEEP - 1
+    -- Everything inside cleared, both floors
+    B(-I, 0, -I, I, 5, I, AIR)
+    B(-I, 7, -I, I, KEEP_HIGH - 1, I, AIR)
+    local function painting(dx, dy, dz, facing, variant)
+        entities[#entities + 1] = { kind = "painting", x = cx + dx, y = y + dy, z = cz + dz, facing = facing, variant = variant }
+    end
+    local function chandelier(dx, ceiling, dz)
+        S(dx, ceiling - 1, dz, "chain[axis=y]")
+        S(dx, ceiling - 2, dz, "lantern[hanging=true]")
+    end
+    -- Main hall: red wool, a white border, quartz pillars with gold capitals, chandeliers, the throne
+    B(-I, -1, -I, I, -1, 3, "white_wool")
+    B(-I + 1, -1, -I + 1, I - 1, -1, 2, "red_wool")
+    for _, px in ipairs({ -7, 7 }) do
+        for _, pz in ipairs({ -7, -1 }) do
+            B(px, 0, pz, px, 4, pz, "quartz_pillar[axis=y]")
+            S(px, 5, pz, "gold_block")
+        end
+    end
+    for _, c in ipairs({ { -4, -4 }, { 4, -4 }, { 0, -8 }, { 0, 0 } }) do chandelier(c[1], 6, c[2]) end
+    B(-2, 0, -I, 2, 0, -I + 1, trim)                    -- the dais
+    S(0, 1, -I + 1, "quartz_stairs[facing=north,half=bottom]")
+    S(-1, 1, -I + 1, "gold_block"); S(1, 1, -I + 1, "gold_block")
+    S(0, 1, -I, "gold_block"); S(0, 2, -I, "gold_block")
+    for _, px in ipairs({ -8, -4, 4, 8 }) do
+        painting(px, 2, -I, "south", "minecraft:kebab")
+        painting(px, 2, 3, "north", "minecraft:aztec")
+    end
+    -- The vault's stair down (dug through the floor by the vault stage): kept open, a fence around it
+    B(-2, -1, 0, 1, -1, 0, AIR)
+    B(-2, 0, -1, 1, 0, -1, "spruce_fence")
+    B(-2, 0, 1, 1, 0, 1, "spruce_fence")
+    S(-3, 0, 0, "spruce_fence")
+    -- The stair up, along the hall's south side: 6 steps east, through a gap in the floor above
+    for k = 0, 5 do
+        S(-10 + k, k, 1, "stone_brick_stairs[facing=east,half=bottom]")
+        if k > 0 then B(-10 + k, 0, 1, -10 + k, k - 1, 1, wall) end
+        S(-10 + k, 6, 1, AIR)
+    end
+    -- The wall between the hall and the south rooms, an arch through the middle
+    B(-I, 0, 4, I, 5, 4, wall)
+    B(-1, 0, 4, 1, 2, 4, AIR)
+    -- Entrance corridor, from the gate
+    B(-1, -1, 5, 1, -1, I, trim)
+    B(-2, 0, 5, -2, 5, I, wall)
+    B(2, 0, 5, 2, 5, I, wall)
+    S(0, 5, 8, "lantern[hanging=true]")
+    -- Kitchen (west of the corridor)
+    B(-I, -1, 5, -3, -1, I, trim)
+    S(-2, 0, 8, "spruce_door[facing=west,half=lower]"); S(-2, 1, 8, "spruce_door[facing=west,half=upper]")
+    S(-I, 0, 6, "smoker[facing=east]"); S(-I, 0, 7, "furnace[facing=east]"); S(-I, 0, 8, "smoker[facing=east]")
+    S(-I, 0, 9, "barrel[facing=east]"); S(-I, 0, 10, "barrel[facing=east]"); S(-I, 1, 9, "barrel[facing=east]")
+    S(-I, 0, I, "water_cauldron[level=3]"); S(-I + 1, 0, I, "crafting_table")
+    for dx = -8, -5 do
+        S(dx, 0, 8, "spruce_slab[type=top]")
+        S(dx, 0, 7, "spruce_stairs[facing=north,half=bottom]")
+        S(dx, 0, 9, "spruce_stairs[facing=south,half=bottom]")
+    end
+    S(-7, 5, 6, "lantern[hanging=true]"); S(-7, 5, 10, "lantern[hanging=true]")
+    -- Staff bedroom (east of the corridor): three beds, a barrel at the foot of each
+    B(3, -1, 5, I, -1, I, "spruce_planks")
+    S(2, 0, 8, "spruce_door[facing=east,half=lower]"); S(2, 1, 8, "spruce_door[facing=east,half=upper]")
+    for _, bz in ipairs({ 6, 8, 10 }) do
+        S(I - 1, 0, bz, "white_bed[facing=east,part=foot]")
+        S(I, 0, bz, "white_bed[facing=east,part=head]")
+        S(I - 2, 0, bz, "barrel[facing=up]")
+    end
+    S(6, 5, 8, "lantern[hanging=true]")
+
+    -- Upper floor (its floor is dy 6). The corridor, red wool, from the stair
+    B(-I, 6, 1, I, 6, 3, "red_wool")
+    for k = 0, 5 do S(-10 + k, 6, 1, AIR) end
+    for _, lx in ipairs({ -6, 0, 6 }) do S(lx, KEEP_HIGH - 1, 2, "lantern[hanging=true]") end
+    B(-I, 7, 0, I, KEEP_HIGH - 1, 0, wall)
+    B(-I, 7, 4, I, KEEP_HIGH - 1, 4, wall)
+    -- Main bedroom: purple wool, a king's bed of two, gold nightstands with lanterns, bookshelves, a chandelier
+    B(-I, 6, -I, I, 6, -1, "purple_wool")
+    S(3, 7, 0, "spruce_door[facing=north,half=lower]"); S(3, 8, 0, "spruce_door[facing=north,half=upper]")
+    for _, bx in ipairs({ 0, 1 }) do
+        S(bx, 7, -I, "red_bed[facing=north,part=head]")
+        S(bx, 7, -I + 1, "red_bed[facing=north,part=foot]")
+    end
+    for _, nx in ipairs({ -1, 2 }) do S(nx, 7, -I, "gold_block"); S(nx, 8, -I, "lantern[hanging=false]") end
+    B(I, 7, -I + 1, I, 9, -2, "bookshelf")
+    S(-4, 7, -2, "chest"); S(-3, 7, -2, "chest")
+    chandelier(0, KEEP_HIGH, -6)
+    painting(-4, 9, -I, "south", "minecraft:wasteland")
+    painting(5, 9, -I, "south", "minecraft:plant")
+    painting(I, 10, -6, "west", "minecraft:bomb")
+    -- The secret door, in the wall x -10 between the bedroom and a hidden passage at x -11 (z -11..-6). The
+    -- opening at z -11; two sticky pistons at z -9 hold the two door blocks in it, pushed by a redstone torch at
+    -- z -8 (beside the lower one; the block over the torch passes the power to the upper one). A button on either
+    -- side of the wall block at z -7 under the torch puts the torch out: the pistons pull the door blocks aside
+    -- while it is held, and the door shuts behind
+    B(-10, 7, -I, -10, KEEP_HIGH - 1, -6, wall)
+    B(-I, 9, -I, -I, KEEP_HIGH - 1, -5, wall)
+    B(-I, 7, -10, -I, 8, -6, AIR)
+    B(-I, 7, -5, -I, 8, -5, wall)
+    B(-10, 7, -I, -10, 8, -I, AIR)                           -- the opening (shut once the torch pushes the pistons)
+    S(-10, 7, -10, wall); S(-10, 8, -10, wall)               -- the door blocks, beside it
+    S(-10, 7, -9, "sticky_piston[facing=north]"); S(-10, 8, -9, "sticky_piston[facing=north]")
+    S(-10, 7, -8, "redstone_wall_torch[facing=north]")
+    S(-10, 8, -8, wall)
+    S(-10, 7, -7, wall)
+    S(-9, 7, -7, "stone_button[face=wall,facing=east]")
+    S(-I, 7, -7, "stone_button[face=wall,facing=west]")
+    -- The shaft: x -11 z -11, from the lower level up to the passage, a ladder on the keep's north wall
+    B(-10, 0, -I, -10, 5, -10, wall)
+    B(-I, 0, -10, -I, 5, -10, wall)
+    -- Guest bedrooms: three, light blue wool, a bed, a barrel, a lantern, a painting
+    B(-4, 7, 5, -4, KEEP_HIGH - 1, I, wall)
+    B(4, 7, 5, 4, KEEP_HIGH - 1, I, wall)
+    for i, gx in ipairs({ -8, 0, 8 }) do
+        B(gx - 3, 6, 5, gx + 3, 6, I, "light_blue_wool")
+        S(gx, 7, 4, "spruce_door[facing=south,half=lower]"); S(gx, 8, 4, "spruce_door[facing=south,half=upper]")
+        S(gx, 7, I, "blue_bed[facing=south,part=head]"); S(gx, 7, I - 1, "blue_bed[facing=south,part=foot]")
+        S(gx + 1, 7, I, "barrel[facing=up]"); S(gx - 1, 7, I, "gold_block"); S(gx - 1, 8, I, "lantern[hanging=false]")
+        S(gx, KEEP_HIGH - 1, 8, "lantern[hanging=true]")
+        painting(gx + 2, 10, I, "north", ({ "minecraft:alban", "minecraft:aztec2", "minecraft:kebab" })[i])
+    end
+
+    -- Lower level: the vault (its own stage) is x -4..4 z -4..4, dy -5..-3. Armory to the west, dungeon to the east,
+    -- the same height, a doorway to each from the vault
+    B(-KEEP, -6, -KEEP, -5, -2, KEEP, wall)
+    B(-I, -5, -I, -6, -3, I, AIR)
+    B(-I, -6, -I, -6, -6, I, trim)
+    B(-5, -5, 0, -5, -4, 0, AIR)
+    S(-I, -5, -8, "anvil[facing=north]"); S(-I, -5, -6, "grindstone[face=floor,facing=north]")
+    S(-I, -5, -4, "smithing_table"); S(-I, -5, -2, "blast_furnace[facing=east]")
+    for bz = 0, 8, 2 do S(-I, -5, bz, "barrel[facing=east]"); S(-I, -4, bz, "barrel[facing=east]") end
+    for _, lz in ipairs({ -7, 0, 7 }) do S(-8, -3, lz, "lantern[hanging=true]") end
+    for _, az in ipairs({ -9, -6, 3, 6, 9 }) do
+        entities[#entities + 1] = { kind = "armor_stand", x = cx - 7, y = y - 5, z = cz + az, facing = "west" }
+    end
+    B(5, -6, -KEEP, KEEP, -2, KEEP, wall)
+    B(6, -5, -I, I, -3, I, AIR)
+    B(6, -6, -I, I, -6, I, trim)
+    B(5, -5, 2, 5, -4, 2, AIR)
+    for _, w in ipairs({ -12, -8, -4, 0, 4, 8 }) do
+        if w > -12 then B(8, -5, w, I, -3, w, wall) end
+        -- The front: iron bars, an iron door beside the wall, a button on that wall's end in the corridor
+        B(8, -5, w + 1, 8, -3, w + 3, "iron_bars")
+        S(8, -5, w + 1, "iron_door[facing=west,half=lower]"); S(8, -4, w + 1, "iron_door[facing=west,half=upper]")
+        S(8, -3, w, wall)
+        S(7, -4, w, "stone_button[face=wall,facing=west]")
+        S(I, -3, w + 3, "cobweb")
+    end
+    for _, lz in ipairs({ -8, 0, 8 }) do S(7, -3, lz, "lantern[hanging=true]") end
+    -- Last, through all the floors it crosses: the shaft's ladder, on the keep's north wall (rock below the ground)
+    for dy = -5, 8 do
+        S(-I, dy, -I, "ladder[facing=south]")
+        if dy < -1 then S(-I, dy, -KEEP, wall) end
+    end
+end
+
+-- The keep's paintings and armor stands (entities: not in a build plan), summoned by a creative bot; one already
+-- there (within a block) is left. Painting NBT as of 1.21 (facing 0 south 1 west 2 north 3 east, variant, block_pos;
+-- TileX/Y/Z for older servers); armor stands with the equipment component of 1.21.5+
+local function summon_keep_entities()
+    local who
+    for _, b in ipairs(bot.call("bots")) do
+        local ok, st = pcall(bot.call, "status", { bot = b.name })
+        if ok and st.game_mode == "creative" and st.dimension == "minecraft:overworld" and not (roadman and roadman.bot == b.name) then who = b.name; break end
+    end
+    if not who or #KEEP_ENTITIES == 0 then return 0 end
+    local e = KEEP_ENTITIES[1]
+    pcall(bot.call, "goto", { bot = who, x = e.x, y = e.y + 8, z = e.z, tolerance = 6 })
+    local summoned = 0
+    for _, kind in ipairs({ "painting", "armor_stand" }) do
+        local ok, near = pcall(bot.call, "entities", { bot = who, type = kind })
+        near = ok and type(near) == "table" and near or {}
+        for _, t in ipairs(KEEP_ENTITIES) do
+            if t.kind == kind then
+                local there = false
+                for _, n in ipairs(near) do
+                    local p = n.position
+                    if p and math.abs(p.x - (t.x + 0.5)) < 1.2 and math.abs(p.y - t.y) < 1.5 and math.abs(p.z - (t.z + 0.5)) < 1.2 then there = true end
+                end
+                if not there then
+                    local cmd
+                    if kind == "painting" then
+                        local f = ({ south = 0, west = 1, north = 2, east = 3 })[t.facing]
+                        cmd = string.format('/summon minecraft:painting %d %d %d {facing:%db,Facing:%db,variant:"%s",block_pos:[I;%d,%d,%d],TileX:%d,TileY:%d,TileZ:%d}',
+                            t.x, t.y, t.z, f, f, t.variant, t.x, t.y, t.z, t.x, t.y, t.z)
+                    else
+                        local yaw = ({ south = 0, west = 90, north = 180, east = -90 })[t.facing]
+                        cmd = string.format('/summon minecraft:armor_stand %.1f %d %.1f {Rotation:[%df,0f],ShowArms:1b,equipment:{head:{id:"minecraft:iron_helmet"},chest:{id:"minecraft:iron_chestplate"},legs:{id:"minecraft:iron_leggings"},feet:{id:"minecraft:iron_boots"},mainhand:{id:"minecraft:iron_sword"}}}',
+                            t.x + 0.5, t.y, t.z + 0.5, yaw)
+                    end
+                    pcall(bot.call, "chat", { bot = who, message = cmd })
+                    summoned = summoned + 1
+                end
+            end
+        end
+    end
+    return summoned
+end
+
+local function keep(list, cx, y, cz, item, creative)
+    local g = grid()
+    keep_shell(g, cx, y, cz, item, creative)
+    if creative then
+        KEEP_ENTITIES = {}
+        keep_rooms(g, cx, y, cz, KEEP_ENTITIES)
+    else
+        -- The way up: a gap in the upper floor, at the foot of the north wall
+        g.set(cx, y + 6, cz - KEEP + 1, AIR)
+    end
+    g.emit(list)
 end
 
 -- Floor: the ground itself, paved. Inside the first wall (courtyard and keep) and under each house
@@ -560,7 +810,13 @@ local function structures(cx, y, cz, item, paving, creative)
             pcall(bot.call, "vault", { category = c[1], x = c[2], y = c[3], z = c[4] })
         end
     end
-    stage("keep", function(l) keep(l, cx, y, cz, item) end)
+    stage("keep", function(l) keep(l, cx, y, cz, item, creative) end)
+    if creative then
+        -- (On a thread of its own: the bot walks over first)
+        stages[#stages].after = function()
+            if bot.spawn then bot.spawn("keep-entities", function() pcall(summon_keep_entities) end) else pcall(summon_keep_entities) end
+        end
+    end
     stage("first wall and towers", function(l) walled(l, cx, cz, R1, y, y + 3, item) end)
     stage("village", function(l) for _, p in ipairs(houses(cx, cz)) do house(l, p[1], y, p[2], item, p[3], creative) end end)
     stage("paths and fountain", function(l) paths(l, cx, y, cz, item); fountain(l, cx, y, cz, item) end)
@@ -654,7 +910,9 @@ local function lighting(cx, cz, reach, around_y)
     local list = {}
     for x = cx - reach - MARGIN, cx + reach + MARGIN, 8 do
         for z = cz - reach - MARGIN, cz + reach + MARGIN, 8 do
-            if math.max(math.abs(x - cx), math.abs(z - cz)) <= reach then
+            if math.max(math.abs(x - cx), math.abs(z - cz)) <= KEEP then
+                -- (The keep: lanterns in its rooms)
+            elseif math.max(math.abs(x - cx), math.abs(z - cz)) <= reach then
                 -- Inside the site: on the levelled floor
                 add(list, x, around_y, z, "torch")
             else
@@ -980,7 +1238,6 @@ local function strip_parts(blocks, n, x1, x2)
     return parts
 end
 
-local roadman                      -- the road builder (below): not one of the castle's builders
 local function hand_over()
     CREATIVE_CONSTRUCTION = job.creative or false
     local s = job.stages[job.index]

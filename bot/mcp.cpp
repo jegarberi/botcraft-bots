@@ -5266,7 +5266,11 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
 {
     if (std::chrono::steady_clock::now() < c.creative_fill_retry_at) return false;
     const Wanted wanted(selected.second);
-    if (!CreativeBuild::Batchable(wanted.item) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
+    // A block with a state asked for (a bed's half, a lantern hanging, a piston's facing...) goes by command too, even
+    // alone: placed by hand it takes the state of how it was placed, and came out wrong over and over. Not doors:
+    // by hand both halves come at once
+    const bool single = CreativeBuild::Single(wanted.item) || (!wanted.state.empty() && !EndsWith(wanted.item, "_door"));
+    if ((!CreativeBuild::Batchable(wanted.item) && !single) || selected.second.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_:,=[]-") != std::string::npos) return false;
     const auto world = c.GetWorld();
     std::vector<AABB> occupied{c.GetLocalPlayer()->GetCollider()};
     {
@@ -5304,8 +5308,9 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         const Blockstate* block = world->GetBlock(p);
         if (!block || block->IsLava() || Unbreakable(block)) continue;
         const bool done = block->GetName() == wanted.item && wanted.StateMatches(*block);
+        // (Nor a building block or a rail of the plan's own: the old floor under a wool one, a rail reshaped)
         if (!done && !block->IsAir() && !block->IsFluid() && !CreativeBuild::Natural(block->GetName()) &&
-            !(CreativeBuild::Single(wanted.item) && CreativeBuild::Single(block->GetName()))) continue;
+            !CreativeBuild::Batchable(block->GetName())) continue;
         bool touches_entity = false;
         for (const auto& box : occupied)
         {
@@ -5327,7 +5332,7 @@ static bool CreativeFill(McpBot& c, const Team& team, const std::pair<Position, 
         return block != nullptr && block->GetName() == wanted.item && wanted.StateMatches(*block);
     };
     const auto batch = CreativeBuild::Rectangle(has, {selected.first.x, selected.first.y, selected.first.z});
-    if (batch.count < (CreativeBuild::Single(wanted.item) ? 1 : 16)) return false;
+    if (batch.count < (single ? 1 : 16)) return false;
     {
         std::lock_guard<std::mutex> lock(c.team_mutex);
         if (c.team.plan_id != team.plan_id) return false;

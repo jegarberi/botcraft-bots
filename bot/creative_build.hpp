@@ -21,8 +21,11 @@ namespace CreativeBuild
         for (const auto name : {"minecraft:air", "minecraft:stone", "minecraft:stone_bricks", "minecraft:cobblestone",
             "minecraft:dirt", "minecraft:grass_block", "minecraft:sand", "minecraft:gravel", "minecraft:glass",
             "minecraft:glass_pane", "minecraft:farmland", "minecraft:wheat", "minecraft:water"}) if (item == name) return true;
+        for (const auto name : {"minecraft:gold_block", "minecraft:quartz_block", "minecraft:quartz_pillar", "minecraft:polished_andesite",
+            "minecraft:polished_diorite", "minecraft:polished_deepslate", "minecraft:chiseled_stone_bricks", "minecraft:bookshelf",
+            "minecraft:coarse_dirt"}) if (item == name) return true;
         return Suffix(item, "_stairs") || Suffix(item, "_slab") || Suffix(item, "_planks") || Suffix(item, "_log") || Suffix(item, "_fence") ||
-            Single(item);
+            Suffix(item, "_wool") || Suffix(item, "_carpet") || Single(item);
     }
     inline bool Natural(const std::string_view item)
     {
