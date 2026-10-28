@@ -1111,6 +1111,19 @@ local function rail_road(c, ex, ez, item, span)
             end
         end
         if rail then put(rx, Li + 1, rz, rail, 4) end
+        -- A milestone every 200 blocks of road: a sign beside the road and one beside the railway, how far back to
+        -- the castle along the road and how far on to the place (c.d0: the road's length from the castle at its start)
+        local from = (c.d0 or 0) + math.abs(x - c.sx) + math.abs(z - c.sz)
+        if from > 0 and from % 200 == 0 then
+            local left = math.abs(c.x - x) + math.abs(c.z - z)
+            local text = (c.origin_name or "Castle") .. ": " .. from .. "|-> " .. c.name .. "|" .. left .. " blocks|"
+            local sx1, sz1 = across(x, z, -2)
+            put(sx1, Li + (drop and 2 or 1), sz1, (c.sign or "spruce_sign") .. "|" .. text, 5)
+            local sx2, sz2 = across(x, z, 3)
+            put(sx2, Li, sz2, item, 3)
+            put(sx2, Li + 2, sz2, AIR, 3)
+            put(sx2, Li + 1, sz2, (c.sign or "spruce_sign") .. "|" .. text, 5)
+        end
     end
     c.since, c.prev_level = since, level[n - 1] or level[n]
     local endx, endz = at(n)
@@ -1548,6 +1561,7 @@ local function rail_route(r, places)
         end
         if seg.ax then sx, sz = a, perp else sx, sz = perp, a end
         c.y, c.joined = seg.lv[ja], true
+        c.d0 = (seg.d0 or 0) + math.abs(ja - (seg.a0 or ja)) + 3
         -- The cut in that road's railway (rails at its level + 1)
         c.cut = {}
         for da = -2, 2 do
@@ -1559,6 +1573,8 @@ local function rail_route(r, places)
         end
     end
     c.sx, c.sz, c.px, c.pz = sx, sz, sx, sz
+    if not best_j then c.d0 = math.abs(sx - r.origin.x) + math.abs(sz - r.origin.z) end
+    c.sign, c.origin_name = r.sign, r.origin.name
     c.kx, c.kz = first_x and p.x or sx, first_x and sz or p.z
     c.leg, c.has_turn = 1, not (c.kx == p.x and c.kz == p.z)
     if c.kx == sx and c.kz == sz then c.kx, c.kz, c.has_turn = p.x, p.z, false end
@@ -1591,7 +1607,13 @@ local function rail_tick(r, c, st, now)
         -- One segment per leg, its levels gathered piece by piece
         c.segs = c.segs or {}
         local seg = c.segs[c.leg]
-        if not seg then seg = { ax = laid.ax, line = laid.line, rail = laid.rail, lv = {} }; c.segs[c.leg] = seg end
+        if not seg then
+            -- (where the leg starts along its axis, and the road's length from the castle there: for milestones)
+            local lx, lz = c.leg == 1 and c.sx or c.kx, c.leg == 1 and c.sz or c.kz
+            seg = { ax = laid.ax, line = laid.line, rail = laid.rail, lv = {}, a0 = laid.ax and lx or lz,
+                d0 = (c.d0 or 0) + math.abs(lx - c.sx) + math.abs(lz - c.sz) }
+            c.segs[c.leg] = seg
+        end
         for a, l in pairs(laid.lv) do seg.lv[a] = l end
     end
     if laid and first and c.cut then

@@ -15,7 +15,7 @@ bot = { call = function(tool, a)
 end, tool = function() end, every = function() end, on_chat = function() end, log = print }
 local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route(")
 load(src, "castle")()
-local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true }
+local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
 local world, rails, segs = {}, {}, {}
 local function lay(ex, ez)
     local blocks, x, z, y, _, laid = rail_road(c, ex, ez, "cobblestone", 24)
@@ -72,6 +72,18 @@ for _, r in ipairs(rails) do
     if links == 1 then ends = ends + 1 end
 end
 assert(ends == 2, "one unbroken line: " .. ends .. " ends")
+-- Milestones: the road starts 180 blocks from the castle, so at x 20 it is 200: a sign by the road (z -2, the torch
+-- side) and one by the railway (z 3), each saying how far back to the castle and how far on (70 + 60)
+local milestones = 0
+for k, b in pairs(world) do
+    if b:match("^spruce_sign|") then
+        assert(b == "spruce_sign|Castle: 200|-> Farm|130 blocks|", "milestone text: " .. b)
+        local x, z = k:match("^(-?%d+),%-?%d+,(-?%d+)$")
+        assert(x == "20" and (z == "-2" or z == "3"), "milestone at " .. k)
+        milestones = milestones + 1
+    end
+end
+assert(milestones == 2, "a milestone by the road and by the railway, got " .. milestones)
 -- The network: with that road laid, a place off its first leg gets a branch at a right angle from its nearest
 -- point, at its level, 3 from its middle; that road's rail is cut there for 5 blocks
 local r = { origin = { x = 0, y = 70, z = 0 }, done = { ["90 60"] = true }, net = { segs[1], segs[2] } }
