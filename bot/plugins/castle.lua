@@ -45,7 +45,10 @@ local job = nil                    -- { stages = { { name, blocks } }, index }
 local JOB_FILE, ROADS_FILE, REPAIR_FILE = "../castle_job.lua", "../roadbot_job.lua", "../repair_job.lua"
 local roadman                      -- the road builder (see roadbot): not one of the castle's builders
 local mender                       -- the repair bot (see repair): not one of them either
-local function taken(name) return (roadman and roadman.bot == name) or (mender and mender.bot == name) end
+local function taken(name)
+    for _, n in ipairs(roadman and roadman.crew or {}) do if n == name then return true end end
+    return mender and mender.bot == name or false
+end
 local SECRET_DOOR = {}             -- "x,y,z" of the secret door's two blocks: they move when it opens
 local function serialize(v)
     if type(v) == "table" then
@@ -1501,9 +1504,25 @@ end
 -- The road builder: one bot, out of the team, whose whole job is roads. From the origin to each of the team's
 -- mines and to each place it was given, one after the other, 32 blocks at a time (the ground has to be in its
 -- sight to be planned), with a signpost at each end saying where the road leads. Mines opened later get theirs
-roadman = restore(ROADS_FILE)     -- the road builder, as it was before a restart (nil: none)
-local function keep(r)
-    save(ROADS_FILE, r and { bot = r.bot, origin = r.origin, places = r.places, done = r.done, laid = r.laid, patience = 300, item = r.item,
+roadman = restore(ROADS_FILE)     -- the road network, as it was before a restart (nil: none)
+-- Several road builders on the one network: each has its road under way, where it explores and what it waits
+-- for; the places, the roads laid and the network are shared (a worker reads and writes those on roadman)
+local OWN = { bot = true, cur = true, busy = true, best = true, best_at = true, patience = true, note = true, heading = true }
+local road_crew = {}               -- the workers, in the order of roadman.crew
+local function worker(name, heading)
+    return setmetatable({ bot = name, patience = 300, heading = heading }, {
+        __index = function(_, k) if not OWN[k] and roadman then return roadman[k] end end,
+        __newindex = function(t, k, v) if OWN[k] then rawset(t, k, v) else roadman[k] = v end end })
+end
+if roadman then
+    roadman.crew = roadman.crew or { roadman.bot }
+    for i, name in ipairs(roadman.crew) do road_crew[i] = worker(name, (roadman.headings or {})[i] or (i - 1)) end
+end
+local function keep()
+    local r = roadman
+    local headings = {}
+    for i, w in ipairs(road_crew) do headings[i] = rawget(w, "heading") end
+    save(ROADS_FILE, r and { crew = r.crew, headings = headings, origin = r.origin, places = r.places, done = r.done, laid = r.laid, item = r.item,
         sign = r.sign, explore = r.explore, reach = r.reach, rail = r.rail, castle = r.castle, net = r.net })
 end
 -- What an explorer looks for (structure ids or #tags for /locate), when not told
@@ -1691,9 +1710,7 @@ local function rail_tick(r, c, st, now)
     end
 end
 
-local function road_tick()
-    local r = roadman
-    if not r then return end
+local function road_tick_one(r)
     local ok, st = pcall(bot.call, "status", { bot = r.bot })
     if not ok or type(st) ~= "table" or not st.position then return end
     local now = os.time()
@@ -1716,8 +1733,20 @@ local function road_tick()
             local what = (m.resources or ""):gsub("_ore", ""):gsub(",", ", ")
             places[#places + 1] = { name = "Mine", what = what ~= "" and what or "ore", x = m.x, z = m.z }
         end
+        -- Not a place another builder is laying a road to; and no road at all while the main road is under way
+        -- (the others branch from it once it is laid: they explore meanwhile)
+        local main_under_way = false
+        for _, w in ipairs(road_crew) do
+            if w ~= r and w.cur then
+                for i = #places, 1, -1 do if places[i].x == w.cur.x and places[i].z == w.cur.z then table.remove(places, i) end end
+                if w.cur.main then main_under_way = true end
+            end
+        end
+        if r.rail and main_under_way then places = {} end
         if r.rail then
+            local first_road = #(r.net or {}) == 0
             r.cur = rail_route(r, places)
+            if r.cur and first_road then r.cur.main = true end
         else
             for _, p in ipairs(places) do
                 if not r.done[p.x .. " " .. p.z] then
@@ -1809,6 +1838,14 @@ local function road_tick()
         r.note = "road to " .. c.name .. " at " .. c.x .. " " .. c.z .. ": " .. math.floor(len - step + 0.5) .. " blocks to go"
     end
     pcall(bot.call, "team_member", order)
+end
+
+local function road_tick()
+    if not roadman then return end
+    for _, w in ipairs(road_crew) do
+        local ok, err = pcall(road_tick_one, w)
+        if not ok then io.stderr:write("[roads] ", w.bot, ": ", tostring(err), "\n") end
+    end
 end
 
 -- The repair bot: with the castle finished, it goes over the whole plan again and again, a hand-over at a time,
@@ -1957,8 +1994,8 @@ end
 
 local castle_tool = {
     name = "castle",
-    description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), repair (takes one creative bot out of the team for good to keep the finished castle in repair: it goes over the whole plan, a part at a time, again and again, putting back missing or wrong blocks (not clearing cells planned empty, except the moat) and the keep's paintings and armor stands; bot: which one, default the last free creative bot; stop=true gives it back; with no argument, how far it is), explore (the same road builder as an explorer: it finds the structures itself with /locate, from the origin and then from the end of each road it lays, so it reaches further and further: structures = what to look for, default villages, pillager outposts, ruined portals, desert and jungle temples, igloos, swamp huts, mineshafts, trail ruins, trial chambers; radius = how far from the origin, default 1500; each find is announced in the chat and gets a road with a signpost at both ends and a waypoint sign every 128 blocks saying where it leads and how far is left; stop=true gives the bot back), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
-    params = { stop = "boolean", creative = "boolean", action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string", rail = "boolean" },
+    description = "Build a castle with the whole team: level the ground, then a paved floor, an underground vault under the keep with a double chest per category of item (food, weapons, armor, equipment, valuables, materials, building blocks) where the bots then store everything sorted (another floor is dug underneath by itself when a category fills up), a keep, a first wall, a village of 7 houses with glass-pane windows (the bots dig sand and smelt the glass) and pitched roofs of wooden stairs, a second wall, 7 farm plots, 4 fenced pens (cow, sheep, chicken, pig) that the bots stock by luring animals in, and a third wall, each wall 5 blocks wide (a 3-wide walkway with 1 block on each side standing 1 block higher) with a tower on its four corners, a gatehouse around the south gate, and a moat around it all, 5 wide and 3 deep, filled with water by the bots (they craft buckets and make a well), crossed by a fixed wooden bridge from the gatehouse (269x269 blocks in all). action: ranch (after the pens are built: for each pen the bot has the food for, open the gate, lead the animals within 48 blocks inside, breed them, shut the gate; start does it by itself once the pens stand, then every ten minutes), water (only the water, for a moat already dug: the bots craft buckets from iron, make a well that never runs dry, and fill the ditch from it; start does this by itself at the end), roads (after the castle: a 3-wide road with torches from the outer gate to each of the team's mines, see the mines tool, with bridges (a deck with a parapet on each side) over water and over ravines, and a signpost at each end saying which mine it leads to, what it gives and how far; item: road block, default cobblestone; sign: default spruce_sign), survey (find flat sites near the bot; size=test for small ones), test (a miniature at x y z going through every kind of work: levelling, paved floor, a piece of wall, a house, a farm plot), roadbot (takes one bot out of the team for good, its whole job being roads: from x y z, or where it stands, named `from` on the signs, default Castle, to every mine of the team, those opened later too, and to the places given: structures = names for /locate like \"village_plains,mineshaft\", places = { {name, what, x, z} }; one road after the other, with a signpost at each end saying what the road leads to, where and how far; bot: which one, default the last; stop=true gives it back; with no argument, what it is doing), repair (takes one creative bot out of the team for good to keep the finished castle in repair: it goes over the whole plan, a part at a time, again and again, putting back missing or wrong blocks (not clearing cells planned empty, except the moat) and the keep's paintings and armor stands; bot: which one, default the last free creative bot; stop=true gives it back; with no argument, how far it is), explore (the same road builder as an explorer: it finds the structures itself with /locate, from the origin and then from the end of each road it lays, so it reaches further and further: structures = what to look for, default villages, pillager outposts, ruined portals, desert and jungle temples, igloos, swamp huts, mineshafts, trail ruins, trial chambers; radius = how far from the origin, default 1500; each find is announced in the chat and gets a road with a signpost at both ends and a waypoint sign every 128 blocks saying where it leads and how far is left; bots = how many explorers on the one network, the free creative bots taken (also to add some to explorers at work), each starting out a different way; stop=true gives the bots back), plan (what and how many blocks), start (level and build, stage by stage, automatically), level (only the levelling of the whole site, x y z as for start), status, farms (water, till and sow the plots, needs water buckets, a hoe and seeds), stop. x z: centre; y: floor level to stand on. item: wall block, default stone, which the bots make themselves: mine cobblestone, mine coal for fuel, build a furnace each, smelt. floor: paving of the courtyard, the keep and the houses, default stone_bricks (crafted from that stone). item=cobblestone skips the smelting and is far quicker.",
+    params = { stop = "boolean", creative = "boolean", action = "string", x = "number", y = "number", z = "number", item = "string", floor = "string", sign = "string", size = "string", bot = "string", rail = "boolean", bots = "number", radius = "number", structures = "string" },
     run = function(args)
         local action = args.action or "status"
         if action == "status" then
@@ -2021,16 +2058,42 @@ local castle_tool = {
         elseif action == "roadbot" or action == "explore" then
             -- One bot taken out of the team to do nothing but roads
             if args.stop then
-                if roadman then pcall(bot.call, "team_member", { bot = roadman.bot, objective = "disband", members = {}, leader = "", count = 1, solo = false }) end
-                roadman = nil
+                for _, w in ipairs(road_crew) do pcall(bot.call, "team_member", { bot = w.bot, objective = "disband", members = {}, leader = "", count = 1, solo = false }) end
+                roadman, road_crew = nil, {}
                 save(ROADS_FILE, nil)
-                return "the road builder is back with the others"
+                return "the road builders are back with the others"
+            end
+            -- bots = n: as many road builders on the network, the free creative bots taken from the last
+            local function add_crew(n)
+                local names = bot.call("bots")
+                for i = #names, 1, -1 do
+                    if #road_crew >= n then break end
+                    local name = names[i].name
+                    local ok, st = pcall(bot.call, "status", { bot = name })
+                    if ok and type(st) == "table" and st.game_mode == "creative" and st.dimension == "minecraft:overworld" and not taken(name) then
+                        roadman.crew[#roadman.crew + 1] = name
+                        road_crew[#road_crew + 1] = worker(name, #road_crew)
+                    end
+                end
             end
             if not args.bot and roadman then
-                return { bot = roadman.bot, roads_laid = roadman.laid, doing = roadman.note, places = roadman.places }
+                if args.bots then add_crew(args.bots) end
+                if args.radius then roadman.reach = math.floor(args.radius) end
+                if args.structures then roadman.explore = args.structures end
+                keep()
+                local crew = {}
+                for _, w in ipairs(road_crew) do crew[#crew + 1] = { bot = w.bot, doing = w.note } end
+                return { crew = crew, roads_laid = roadman.laid, within = roadman.reach, places = roadman.places }
             end
             local names = bot.call("bots")
             local who = args.bot or names[#names].name
+            if args.bots and not args.bot then
+                -- (A crew: all of it creative, the first too)
+                for i = #names, 1, -1 do
+                    local ok, st = pcall(bot.call, "status", { bot = names[i].name })
+                    if ok and type(st) == "table" and st.game_mode == "creative" and not taken(names[i].name) then who = names[i].name; break end
+                end
+            end
             local st = bot.call("status", { bot = who })
             job_site = job_site or load_site()
             local origin = { name = args.from or "Castle", x = math.floor(args.x or st.position.x), y = math.floor(args.y or st.position.y), z = math.floor(args.z or st.position.z) }
@@ -2047,15 +2110,18 @@ local castle_tool = {
             end
             -- (rail=false: the old road alone, along a straight line and over the hills)
             local castle_origin = job_site and math.abs(origin.x - job_site.x) <= 8 and math.abs(origin.z - job_site.z) <= 8
-            roadman = { bot = who, origin = origin, places = places, done = {}, laid = 0, patience = 300,
+            for _, w in ipairs(road_crew) do pcall(bot.call, "team_member", { bot = w.bot, objective = "disband", members = {}, leader = "", count = 1, solo = false }) end
+            roadman = { crew = { who }, origin = origin, places = places, done = {}, laid = 0,
                 item = args.item or "cobblestone", sign = args.sign or "spruce_sign", rail = args.rail ~= false, castle = castle_origin or nil }
+            road_crew = { worker(who, 0) }
             if action == "explore" then
                 roadman.explore = args.structures or STRUCTURES
                 roadman.reach = math.floor(args.radius or 1500)
             end
-            keep(roadman)
+            if args.bots then add_crew(args.bots) end
+            keep()
             if action == "explore" then
-                return { bot = who, from = origin, looks_for = roadman.explore, within = roadman.reach,
+                return { bot = who, crew = roadman.crew, from = origin, looks_for = roadman.explore, within = roadman.reach,
                     note = "this bot now explores: it finds these structures (/locate, from the end of each road it lays) and lays a road to each, with signposts at both ends and a waypoint sign every 128 blocks; the team's mines get roads too" }
             end
             return { bot = who, from = origin, places = places, not_found = not_found,

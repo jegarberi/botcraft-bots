@@ -165,6 +165,26 @@ end
 TEAM_CREW = nil
 tool.run({action = "stop"})
 crew = false
+-- Three explorers on one network: one lays the main road, the others explore meanwhile; then each takes a
+-- place of its own
+crew, creative, orders = true, true, {}
+local ex = tool.run({ action = "explore", x = 0, y = 70, z = 0, bots = 3, radius = 500, structures = "village",
+    places = { { name = "Far", x = 0, z = 300 }, { name = "Near", x = 200, z = 0 } } })
+assert(#ex.crew == 3, "three road builders: " .. #ex.crew)
+for _, name in ipairs(ex.crew) do assert(name ~= "Survival", "creative bots only") end
+tick()
+local roads_by = {}
+for _, o in ipairs(orders) do if o.name == "road" then roads_by[o.bot] = true end end
+local n = 0
+for _ in pairs(roads_by) do n = n + 1 end
+assert(n == 1, "only the main road's builder lays road while it is under way: " .. n)
+local st = tool.run({ action = "explore" })
+local heading = {}
+for _, w in ipairs(st.crew) do if w.doing then heading[w.doing] = (heading[w.doing] or 0) + 1 end end
+for doing, k in pairs(heading) do assert(k == 1 or not doing:match("^road"), "two builders on one road: " .. doing) end
+assert(tool.run({ action = "explore", stop = true }):match("back"))
+os.remove("../roadbot_job.lua")
+crew = false
 -- The repair bot: with no castle job, a creative bot goes over the plan part by part; it never clears a cell
 -- planned empty outside the moat, nor touches the secret door's blocks, and is no builder of the next castle
 orders = {}

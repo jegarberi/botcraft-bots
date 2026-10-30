@@ -21,7 +21,7 @@ bot = { call = function(tool, a)
     end
     return {}
 end, tool = function() end, every = function() end, on_chat = function() end, log = print }
-local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route("):gsub("local function rail_tick%(", "function rail_tick("):gsub("local function road_tick%(", "function road_tick("):gsub("\nlocal roadman ", "\nroadman = nil ")
+local src = io.open(arg[1]):read("a"):gsub("local function rail_road%(", "function rail_road("):gsub("local function rail_route%(", "function rail_route("):gsub("local function rail_tick%(", "function rail_tick("):gsub("local function road_tick_one%(", "function road_tick_one("):gsub("\nlocal roadman ", "\nroadman = nil ")
 assert(load(src, "castle"))()
 local c = { sx = 0, sz = 0, px = 0, pz = 0, kx = 90, kz = 0, x = 90, z = 60, y = 70, leg = 1, has_turn = true, first = true, d0 = 180, name = "Farm" }
 local world, rails, segs = {}, {}, {}
@@ -141,7 +141,7 @@ roadman = { bot = "Bot1", origin = { x = 0, y = 70, z = 0, name = "Castle" }, do
     cur = { px = 90, pz = 60, x = 90, z = 60, kx = 90, kz = 0, leg = 2, has_turn = true, segs = segs } }
 real_call = bot.call
 bot.call = function(tool, a) if tool == "status" then return { position = { x = 90, y = 70, z = 60 } } end return real_call(tool, a) end
-road_tick()
+road_tick_one(roadman)
 bot.call = real_call
 assert(#roadman.net == 2 and roadman.done["90 60"], "the road's two legs are in the network")
 io.open = real_open
